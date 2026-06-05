@@ -1,0 +1,45 @@
+models:
+  default: qwen_local
+  planner: fast_planner
+  coder: qwen_local
+  tester: fast_planner
+
+providers:
+  qwen_local:
+    kind: openai_compatible
+    base_url: "http://127.0.0.1:8088/v1"
+    api_key_env: "LOCAL_LLM_API_KEY"
+    model: "qwen36-35b-abliterated"
+    temperature: 0.1
+    max_tokens: 4096
+    timeout_seconds: 240
+  fast_planner:
+    kind: openai_compatible
+    base_url: "http://127.0.0.1:11434/v1"
+    api_key_env: "OLLAMA_API_KEY"
+    model: "qwen3.6:27b"
+    temperature: 0.0
+    max_tokens: 2048
+    timeout_seconds: 120
+
+mcp_servers:
+  filesystem:
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "/path/to/target/repo"
+  command:
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-sequential-thinking"
+
+workflow:
+  max_code_test_loops: 3
+  allowed_file_globs:
+    - "src/**/*.py"
+    - "tests/**/*.py"
+    - "*.py"
+  test_commands:
+    - "python3 -m pytest -q"

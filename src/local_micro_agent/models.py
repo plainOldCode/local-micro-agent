@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Protocol
+
+import httpx
+
+
+class ChatModel(Protocol):
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        ...
+
+
+@dataclass(frozen=True)
+class OpenAICompatibleModel:
+    base_url: str
+    model: str
+    api_key_env: str | None = None
+    temperature: float = 0.0
+    max_tokens: int = 2048
+    timeout_seconds: int = 120
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        headers = {}
+        if self.api_key_env:
+            headers["Authorization"] = f"Bearer {os.getenv(self.api_key_env, 'local')}"
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"].get("content") or ""
+
+
+class ModelManager:
+    def __init__(self, config: dict):
+        self.config = config
+        self._models: dict[str, ChatModel] = {}
+
+    def get(self, role: str) -> ChatModel:
+        model_name = self.config["models"].get(role) or self.config["models"]["default"]
+        if model_name not in self._models:
+            self._models[model_name] = self._build(model_name)
+        return self._models[model_name]
+
+    def _build(self, name: str) -> ChatModel:
+        spec = self.config["providers"][name]
+        if spec["kind"] != "openai_compatible":
+            raise ValueError(f"Unsupported provider kind: {spec['kind']}")
+        return OpenAICompatibleModel(
+            base_url=spec["base_url"],
+            model=spec["model"],
+            api_key_env=spec.get("api_key_env"),
+            temperature=spec.get("temperature", 0.0),
+            max_tokens=spec.get("max_tokens", 2048),
+            timeout_seconds=spec.get("timeout_seconds", 120),
+        )

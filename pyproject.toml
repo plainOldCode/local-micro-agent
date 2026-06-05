@@ -1,0 +1,17 @@
+[project]
+name = "local-micro-agent"
+version = "0.1.0"
+description = "State-based micro-prompting local coding-agent skeleton"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2",
+  "PyYAML>=6",
+  "mcp>=1.0.0",
+]
+
+[project.scripts]
+local-micro-agent = "local_micro_agent.orchestrator:main"
+
+[tool.ruff]
+line-length = 100
