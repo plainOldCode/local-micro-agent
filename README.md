@@ -16,9 +16,47 @@ commercial APIs behind an OpenAI-compatible endpoint.
 
 Runtime dependencies: none outside the Python standard library.
 
-By default, the PLAN node reads a root `README.md` / `Readme.md` first and
-passes it as project context. Override that with `workflow.project_context_files`
-or disable it with `workflow.readme_first=false`.
+## How A Run Starts
+
+The default path is README-first:
+
+1. `PLAN` reads root project context before asking the model to plan.
+   By default this auto-detects `README.md`, `Readme.md`, `readme.md`,
+   `README`, or `README.txt`.
+2. `PLAN` turns the user request plus project context into a compact action
+   plan.
+3. `READ` selects the minimum files needed for that plan.
+4. `CODE` may only modify files allowed by `workflow.writable_files` or the
+   planned file list.
+5. `TEST` runs configured commands with timeout and output limits, then accepts,
+   rejects, or retries.
+
+Use `workflow.project_context_files` when the important entry point is not a
+README, or set `workflow.readme_first=false` for controlled experiments.
+
+Seeded workflow options are for resume and harness experiments, not the normal
+first look at a repository:
+
+- `workflow.plan_markdown`: bypasses README-first planning with a known plan.
+- `workflow.seed_files`: bypasses model file selection in `READ`.
+- `workflow.seed_changes`: bypasses model code generation in `CODE`.
+
+For general-purpose agent behavior, prefer README-first planning and keep
+`workflow.writable_files` narrow enough to protect tests, fixtures, generated
+files, and other out-of-scope surfaces.
+
+```json
+{
+  "workflow": {
+    "readme_first": true,
+    "project_context_files": [],
+    "writable_files": ["perf_takehome.py"],
+    "test_commands": ["python tests/submission_tests.py"]
+  }
+}
+```
+
+## Focused Source Context
 
 For narrow Python edits, `workflow.context_symbols` can replace full-file
 CODE context with exact function/class excerpts:
