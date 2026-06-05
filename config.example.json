@@ -32,6 +32,12 @@
     "command_timeout_seconds": 120,
     "command_output_limit": 200000,
     "allowed_file_globs": ["src/**/*.py", "tests/**/*.py", "*.py"],
-    "test_commands": ["python3 -m pytest -q"]
+    "writable_files": [],
+    "test_commands": ["python3 -m pytest -q"],
+    "metric_regex": null,
+    "metric_goal": "minimize",
+    "baseline_metric": null,
+    "require_metric": false,
+    "accept_if_improved": false
   }
 }

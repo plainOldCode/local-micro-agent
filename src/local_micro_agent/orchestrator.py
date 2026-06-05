@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -99,9 +100,8 @@ class MicroAgent:
             decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
         self.state.proposed_changes = decision.changes
         self.state.scratch["applied_changes"] = 0
-        allowed = set(
-            self.config.get("workflow", {}).get("writable_files") or self.state.planned_files
-        )
+        allowed = self._writable_files()
+        self.state.scratch["pre_code_snapshot"] = await self._snapshot_files(sorted(allowed))
         for change in decision.changes:
             if change.path not in allowed:
                 self.state.notes.append(f"Rejected out-of-plan change: {change.path}")
@@ -138,6 +138,10 @@ class MicroAgent:
         if self.state.scratch.get("applied_changes", 0) == 0:
             failed = True
             self.state.notes.append("No code changes were applied")
+        metric_failed = self._evaluate_metric_acceptance()
+        failed = failed or metric_failed
+        if failed:
+            await self._restore_pre_code_snapshot()
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
             self.state.current = AgentStateName.FAILED if failed else AgentStateName.DONE
             return
@@ -154,6 +158,71 @@ class MicroAgent:
 
         self.state.notes.append(f"Retry focus: {decision.next_focus or decision.reason}")
         self.state.current = AgentStateName.CODE
+
+    def _writable_files(self) -> set[str]:
+        workflow = self.config.get("workflow", {})
+        return set(workflow.get("writable_files") or self.state.planned_files)
+
+    async def _snapshot_files(self, paths: list[str]) -> dict[str, str]:
+        snapshot = {}
+        for rel_path in paths:
+            try:
+                snapshot[rel_path] = await self.mcp.read_file(str(self.state.repo_root / rel_path))
+            except FileNotFoundError:
+                snapshot[rel_path] = ""
+                self.state.notes.append(f"Snapshot missing file as empty: {rel_path}")
+        return snapshot
+
+    async def _restore_pre_code_snapshot(self) -> None:
+        snapshot = self.state.scratch.get("pre_code_snapshot")
+        if not isinstance(snapshot, dict):
+            return
+        for rel_path, content in snapshot.items():
+            await self.mcp.write_file(str(self.state.repo_root / rel_path), str(content))
+        self.state.notes.append("Restored writable files after rejected candidate")
+
+    def _evaluate_metric_acceptance(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        metric_regex = workflow.get("metric_regex")
+        if not metric_regex:
+            return False
+        joined_output = "\n".join(
+            f"{result.stdout}\n{result.stderr}" for result in self.state.test_results
+        )
+        metric = self._extract_metric(joined_output, str(metric_regex))
+        if metric is None:
+            self.state.notes.append(f"Metric not found with regex: {metric_regex}")
+            return bool(workflow.get("require_metric"))
+        self.state.scratch["last_metric"] = metric
+
+        baseline = self.state.scratch.get("best_metric", workflow.get("baseline_metric"))
+        if baseline is None:
+            self.state.scratch["best_metric"] = metric
+            self.state.notes.append(f"Recorded initial metric: {metric}")
+            return False
+
+        baseline_int = int(baseline)
+        improved = metric < baseline_int
+        if workflow.get("metric_goal", "minimize") == "maximize":
+            improved = metric > baseline_int
+        self.state.notes.append(f"Metric candidate={metric} baseline={baseline_int} improved={improved}")
+        if improved:
+            self.state.scratch["best_metric"] = metric
+            return False
+        return bool(workflow.get("accept_if_improved"))
+
+    @staticmethod
+    def _extract_metric(text: str, pattern: str) -> int | None:
+        matches = re.findall(pattern, text)
+        if not matches:
+            return None
+        value = matches[-1]
+        if isinstance(value, tuple):
+            value = next((part for part in value if part), "")
+        try:
+            return int(str(value))
+        except ValueError:
+            return None
 
     async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type):
         output = await self.models.get(role).chat(messages)
