@@ -9,6 +9,7 @@ from typing import Any
 class AgentStateName(StrEnum):
     PLAN = "plan"
     READ = "read"
+    REFLECT = "reflect"
     CODE = "code"
     TEST = "test"
     DONE = "done"

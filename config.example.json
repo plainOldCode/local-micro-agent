@@ -45,6 +45,7 @@
     "require_metric": false,
     "accept_if_improved": false,
     "retry_rejected_candidates": false,
+    "reflect_before_retry": false,
     "candidate_queue": false,
     "candidate_history_path": null,
     "candidate_history_limit": 20,

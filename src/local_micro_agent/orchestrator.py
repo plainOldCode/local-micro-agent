@@ -12,7 +12,7 @@ from typing import Any
 
 from .mcp_client import McpServerSpec, McpToolClient
 from .models import ModelManager
-from .prompts import PROMPT_MARKDOWN, code_prompt, plan_prompt, read_prompt, test_prompt
+from .prompts import PROMPT_MARKDOWN, code_prompt, plan_prompt, read_prompt, reflect_prompt, test_prompt
 from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
 from .validators import JsonValidationError, parse_json_object, require_keys, retry_repair_prompt
 
@@ -65,6 +65,9 @@ class MicroAgent:
                 elif self.state.current == AgentStateName.READ:
                     self._log("READ")
                     await self.read()
+                elif self.state.current == AgentStateName.REFLECT:
+                    self._log(f"REFLECT loop={self.state.loop_count}")
+                    await self.reflect()
                 elif self.state.current == AgentStateName.CODE:
                     self._log(f"CODE loop={self.state.loop_count}")
                     await self.code()
@@ -105,6 +108,26 @@ class MicroAgent:
             content = await self.mcp.read_file(str(abs_path))
             content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
+        self.state.current = AgentStateName.CODE
+
+    async def reflect(self) -> None:
+        feedback_notes_limit = int(
+            self.config.get("workflow", {}).get("feedback_notes_limit", 12)
+        )
+        try:
+            output = await self.models.get("reflector").chat(
+                reflect_prompt(self.state, feedback_notes_limit)
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"Reflect model call failed: {type(exc).__name__}: {exc}"
+            )
+            self.state.current = AgentStateName.CODE
+            return
+        reflection = output.strip()
+        if reflection:
+            self.state.scratch["reflection"] = reflection
+            self.state.notes.append("Reflect summary added for next CODE attempt")
         self.state.current = AgentStateName.CODE
 
     async def code(self) -> None:
@@ -292,7 +315,11 @@ class MicroAgent:
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
-                self.state.current = AgentStateName.CODE
+                self.state.current = (
+                    AgentStateName.REFLECT
+                    if self.config.get("workflow", {}).get("reflect_before_retry")
+                    else AgentStateName.CODE
+                )
                 return
             self.state.current = AgentStateName.FAILED if failed else AgentStateName.DONE
             return
@@ -308,7 +335,11 @@ class MicroAgent:
             return
 
         self.state.notes.append(f"Retry focus: {decision.next_focus or decision.reason}")
-        self.state.current = AgentStateName.CODE
+        self.state.current = (
+            AgentStateName.REFLECT
+            if self.config.get("workflow", {}).get("reflect_before_retry")
+            else AgentStateName.CODE
+        )
 
     def _writable_files(self) -> set[str]:
         workflow = self.config.get("workflow", {})

@@ -23,6 +23,13 @@ Output strict JSON:
 {"files":["relative/path.py"],"reason":"short reason"}
 Do not include markdown or prose outside JSON."""
 
+REFLECT_SYSTEM = """You are the REFLECT node in a local coding-agent FSM.
+Do not write code. Analyze only the latest rejected attempt and feedback.
+Output exactly 1-3 concise Markdown bullets:
+- why the previous attempt failed
+- what must change in the next CODE attempt
+- what pattern must not be repeated"""
+
 CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
 Use only the supplied plan, source files, and latest test failure.
 Output strict JSON:
@@ -60,9 +67,30 @@ def read_prompt(state: AgentState) -> list[dict[str, str]]:
     ]
 
 
+def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": REFLECT_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Latest test summary:\n{state.latest_test_summary()}\n\n"
+                f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
+            ),
+        },
+    ]
+
+
 def code_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    reflection = state.scratch.get("reflection")
+    reflection_block = (
+        f"\n\nRetry reflection:\n{reflection}"
+        if isinstance(reflection, str) and reflection.strip()
+        else ""
     )
     return [
         {"role": "system", "content": CODE_SYSTEM},
@@ -74,6 +102,7 @@ def code_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[
                 f"Latest test summary:\n{state.latest_test_summary()}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}\n\n"
                 f"Source files:\n{source_blocks}"
+                f"{reflection_block}"
             ),
         },
     ]
@@ -89,6 +118,7 @@ def test_prompt(state: AgentState) -> list[dict[str, str]]:
 PROMPT_MARKDOWN = {
     "PLAN": PLAN_SYSTEM,
     "READ": READ_SYSTEM,
+    "REFLECT": REFLECT_SYSTEM,
     "CODE": CODE_SYSTEM,
     "TEST": TEST_SYSTEM,
 }

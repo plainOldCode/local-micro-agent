@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from local_micro_agent.orchestrator import MicroAgent
-from local_micro_agent.prompts import code_prompt
+from local_micro_agent.prompts import code_prompt, reflect_prompt
 from local_micro_agent.state import AgentState, AgentStateName
 
 
@@ -268,6 +268,46 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("Recent agent feedback", messages[1]["content"])
             self.assertIn("target not found", messages[1]["content"])
             self.assertIn("only changes comments", messages[1]["content"])
+
+    def test_reflect_prompt_carries_retry_context_without_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.notes.append("Candidate 1 rejected: no changes applied")
+
+            messages = reflect_prompt(state)
+
+            self.assertIn("Do not write code", messages[0]["content"])
+            self.assertIn("Candidate 1 rejected", messages[1]["content"])
+            self.assertNotIn("Source files", messages[1]["content"])
+
+    def test_code_prompt_includes_retry_reflection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.scratch["reflection"] = "- Previous attempt produced invalid JSON."
+
+            messages = code_prompt(state)
+
+            self.assertIn("Retry reflection", messages[1]["content"])
+            self.assertIn("invalid JSON", messages[1]["content"])
+
+    def test_reflect_state_stores_summary_for_next_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(
+                repo_root=Path(tmp),
+                user_request="test",
+                current=AgentStateName.REFLECT,
+            )
+            config = {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}}
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager("- Failed because JSON was invalid.")
+
+            asyncio.run(agent.reflect())
+
+            self.assertEqual(state.current, AgentStateName.CODE)
+            self.assertIn("JSON was invalid", state.scratch["reflection"])
+            self.assertIn("Reflect summary added", "\n".join(state.notes))
 
     def test_metric_accepts_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
