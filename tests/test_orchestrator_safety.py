@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from local_micro_agent.orchestrator import MicroAgent
+from local_micro_agent.prompts import code_prompt
 from local_micro_agent.state import AgentState, AgentStateName
 
 
@@ -250,6 +251,23 @@ class OrchestratorSafetyTests(unittest.TestCase):
                     await agent.mcp.close()
 
             asyncio.run(plan_only())
+
+    def test_code_prompt_carries_recent_agent_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.notes.extend(
+                [
+                    "Replacement target not found: target.py",
+                    "Replacement only changes comments or blank lines: target.py",
+                ]
+            )
+
+            messages = code_prompt(state)
+
+            self.assertIn("Recent agent feedback", messages[1]["content"])
+            self.assertIn("target not found", messages[1]["content"])
+            self.assertIn("only changes comments", messages[1]["content"])
 
     def test_metric_accepts_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

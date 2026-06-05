@@ -60,7 +60,7 @@ def read_prompt(state: AgentState) -> list[dict[str, str]]:
     ]
 
 
-def code_prompt(state: AgentState) -> list[dict[str, str]]:
+def code_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
@@ -72,6 +72,7 @@ def code_prompt(state: AgentState) -> list[dict[str, str]]:
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Latest test summary:\n{state.latest_test_summary()}\n\n"
+                f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}\n\n"
                 f"Source files:\n{source_blocks}"
             ),
         },

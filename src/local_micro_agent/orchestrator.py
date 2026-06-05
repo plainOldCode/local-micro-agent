@@ -113,7 +113,10 @@ class MicroAgent:
             decision = CodeDecision(changes=[CodeChange.from_dict(c) for c in seeded_changes])
         else:
             try:
-                messages = code_prompt(self.state)
+                feedback_notes_limit = int(
+                    self.config.get("workflow", {}).get("feedback_notes_limit", 12)
+                )
+                messages = code_prompt(self.state, feedback_notes_limit)
                 if self.config.get("workflow", {}).get("candidate_queue"):
                     messages = [
                         *messages,

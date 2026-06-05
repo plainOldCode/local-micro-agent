@@ -47,6 +47,7 @@
     "retry_rejected_candidates": false,
     "candidate_queue": false,
     "candidate_history_path": null,
-    "candidate_history_limit": 20
+    "candidate_history_limit": 20,
+    "feedback_notes_limit": 12
   }
 }

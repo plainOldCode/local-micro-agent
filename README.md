@@ -34,6 +34,12 @@ The default path is project-instructions-first, then README:
 6. `TEST` runs configured commands with timeout and output limits, then accepts,
    rejects, or retries.
 
+Each retry carries compact feedback forward. Recent agent notes such as
+`target not found`, `no-op`, `comment-only`, failed metrics, and restore events
+are added to the next `CODE` prompt. Candidate history can also be persisted as
+JSONL with `workflow.candidate_history_path` so accepted/rejected directions
+survive across runs.
+
 Use `workflow.project_instruction_files` to name instruction files explicitly.
 Use `workflow.project_context_files` to fully override the auto-detected context
 set, or set `workflow.readme_first=false` for controlled experiments.

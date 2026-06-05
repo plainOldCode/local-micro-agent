@@ -78,6 +78,11 @@ class AgentState:
             f"stderr_tail={last.stderr[-2000:]}"
         )
 
+    def recent_notes_summary(self, limit: int = 12) -> str:
+        if not self.notes:
+            return "No agent feedback yet."
+        return "\n".join(f"- {note}" for note in self.notes[-limit:])
+
     def to_json_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["repo_root"] = str(self.repo_root)
