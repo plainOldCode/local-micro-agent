@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -100,10 +101,13 @@ class MicroAgent:
             if change.path not in allowed:
                 self.state.notes.append(f"Rejected out-of-plan change: {change.path}")
                 continue
-            if change.content is None:
-                self.state.notes.append(f"Skipped non-content patch skeleton: {change.path}")
+            if change.patch:
+                await self._apply_patch(change.patch)
                 continue
-            await self.mcp.write_file(str(self.state.repo_root / change.path), change.content)
+            if change.content is not None:
+                await self.mcp.write_file(str(self.state.repo_root / change.path), change.content)
+                continue
+            self.state.notes.append(f"Skipped empty change: {change.path}")
         self.state.current = AgentStateName.TEST
 
     async def test(self) -> None:
@@ -135,6 +139,18 @@ class MicroAgent:
         except JsonValidationError as exc:
             repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
             return parse_model_json(repaired, schema)
+
+    async def _apply_patch(self, patch: str) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as handle:
+            handle.write(patch)
+            patch_path = handle.name
+        result = await self.mcp.run_command(f"git apply --check {patch_path}", cwd=str(self.state.repo_root))
+        if result["exit_code"] != 0:
+            self.state.notes.append(f"Patch rejected: {result['stderr'][-1000:]}")
+            return
+        result = await self.mcp.run_command(f"git apply {patch_path}", cwd=str(self.state.repo_root))
+        if result["exit_code"] != 0:
+            self.state.notes.append(f"Patch apply failed: {result['stderr'][-1000:]}")
 
     @staticmethod
     def _log(message: str) -> None:
