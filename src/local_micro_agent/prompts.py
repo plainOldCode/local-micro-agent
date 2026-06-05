@@ -33,6 +33,7 @@ Rules:
 - Use "patch" only if target/replacement is impossible.
 - Use full-file "content" only for very small files.
 - Preserve existing public behavior unless the plan says otherwise.
+- Do not output comment-only, formatting-only, or explanatory placeholder changes.
 - No markdown fences, no commentary outside JSON."""
 
 TEST_SYSTEM = """You are the TEST node in a local coding-agent FSM.

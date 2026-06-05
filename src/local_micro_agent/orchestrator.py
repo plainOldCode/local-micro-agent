@@ -642,6 +642,9 @@ class MicroAgent:
         if target == replacement:
             self.state.notes.append(f"Replacement is a no-op: {path}")
             return False
+        if self._without_comment_lines(target) == self._without_comment_lines(replacement):
+            self.state.notes.append(f"Replacement only changes comments or blank lines: {path}")
+            return False
         original = await self.mcp.read_file(str(abs_path))
         if target not in original:
             self.state.notes.append(f"Replacement target not found: {path}")
@@ -651,6 +654,16 @@ class MicroAgent:
             return False
         await self.mcp.write_file(str(abs_path), original.replace(target, replacement, 1))
         return True
+
+    @staticmethod
+    def _without_comment_lines(text: str) -> str:
+        lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            lines.append(line)
+        return "\n".join(lines)
 
     async def _apply_patch(self, patch: str) -> bool:
         with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as handle:

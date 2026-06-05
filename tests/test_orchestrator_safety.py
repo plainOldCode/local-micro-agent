@@ -178,6 +178,31 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(result.scratch["applied_changes"], 0)
             self.assertIn("Replacement is a no-op", "\n".join(result.notes))
 
+    def test_comment_only_replacement_is_not_counted_as_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+
+            result = run_agent(
+                repo,
+                {
+                    "writable_files": ["target.py"],
+                    "seed_changes": [
+                        {
+                            "path": "target.py",
+                            "target": "value = 'old'\n",
+                            "replacement": "# explanatory comment\nvalue = 'old'\n",
+                        }
+                    ],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual(result.scratch["applied_changes"], 0)
+            self.assertIn("only changes comments", "\n".join(result.notes))
+
     def test_plan_reads_readme_as_project_context_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
