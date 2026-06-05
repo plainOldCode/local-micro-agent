@@ -246,6 +246,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
                     "metric_regex": r"cycles: (\d+)",
                     "baseline_metric": 100,
                     "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                 },
             }
             state = AgentState(repo_root=repo, user_request="test", max_loops=1)
@@ -259,6 +260,11 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(result.scratch["last_metric"], 80)
             self.assertIn("Candidate slow", "\n".join(result.notes))
             self.assertIn("Candidate queue accepted metric=80", "\n".join(result.notes))
+            history_path = repo / ".local_micro_agent" / "candidates.jsonl"
+            history = history_path.read_text()
+            self.assertIn('"candidate_id": "slow"', history)
+            self.assertIn('"candidate_id": "fast"', history)
+            self.assertIn('"status": "accepted"', history)
 
 
 if __name__ == "__main__":

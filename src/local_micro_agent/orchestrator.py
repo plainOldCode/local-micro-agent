@@ -5,6 +5,7 @@ import asyncio
 import json
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,19 @@ class MicroAgent:
                             ),
                         },
                     ]
+                history = self._format_candidate_history()
+                if history:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Recent candidate history follows. Avoid repeating rejected changes. "
+                                "Preserve ideas that were accepted unless the current plan says otherwise.\n"
+                                f"{history}"
+                            ),
+                        },
+                    ]
                 decision = await self._json_call("coder", messages, CodeDecision)
             except JsonValidationError as exc:
                 self.state.notes.append(f"Coder output rejected after repair: {exc}")
@@ -180,6 +194,13 @@ class MicroAgent:
             applied = await self._apply_changes(candidate.changes, allowed)
             if applied == 0:
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: no changes applied")
+                self._append_candidate_history(
+                    candidate,
+                    status="rejected_no_changes",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
                 continue
 
             results = await self._run_test_commands()
@@ -194,6 +215,13 @@ class MicroAgent:
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} applied={applied} "
                 f"metric={metric} failed={failed} improved={improved}"
+            )
+            self._append_candidate_history(
+                candidate,
+                status="improved" if improved and not failed else "rejected",
+                metric=metric,
+                applied=applied,
+                failed=failed,
             )
             if failed or not improved:
                 continue
@@ -217,6 +245,13 @@ class MicroAgent:
         self.state.test_results = best_results
         if iteration_best_metric is not None:
             self.state.scratch["last_metric"] = iteration_best_metric
+        self._append_candidate_history(
+            CodeCandidate("accepted", best_changes, "candidate queue accepted best"),
+            status="accepted",
+            metric=iteration_best_metric,
+            applied=best_applied,
+            failed=False,
+        )
         self.state.notes.append(f"Candidate queue accepted metric={iteration_best_metric}")
 
     async def _run_test_commands(self) -> list[TestResult]:
@@ -338,6 +373,85 @@ class MicroAgent:
         return bool(workflow.get("retry_rejected_candidates")) and (
             self.state.loop_count + 1 < self.state.max_loops
         )
+
+    def _candidate_history_path(self) -> Path | None:
+        path = self.config.get("workflow", {}).get("candidate_history_path")
+        if not path:
+            return None
+        candidate_path = Path(str(path))
+        if candidate_path.is_absolute():
+            return candidate_path
+        return self.state.repo_root / candidate_path
+
+    def _format_candidate_history(self) -> str:
+        path = self._candidate_history_path()
+        if path is None or not path.exists():
+            return ""
+        limit = int(self.config.get("workflow", {}).get("candidate_history_limit", 20))
+        lines = path.read_text(errors="replace").splitlines()[-limit:]
+        records = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            records.append(
+                {
+                    "status": record.get("status"),
+                    "metric": record.get("metric"),
+                    "failed": record.get("failed"),
+                    "changes": record.get("changes", []),
+                }
+            )
+        if not records:
+            return ""
+        return json.dumps(records, ensure_ascii=False, indent=2)
+
+    def _append_candidate_history(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+    ) -> None:
+        path = self._candidate_history_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "candidate_id": candidate.candidate_id,
+            "status": status,
+            "metric": metric,
+            "applied": applied,
+            "failed": failed,
+            "reason": candidate.reason,
+            "changes": self._summarize_changes(candidate.changes),
+        }
+        with path.open("a") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _summarize_changes(changes: list[CodeChange]) -> list[dict[str, str]]:
+        summary = []
+        for change in changes:
+            mode = "empty"
+            if change.target is not None and change.replacement is not None:
+                mode = "replacement"
+            elif change.patch:
+                mode = "patch"
+            elif change.content is not None:
+                mode = "content"
+            summary.append(
+                {
+                    "path": change.path,
+                    "reason": change.reason,
+                    "mode": mode,
+                }
+            )
+        return summary
 
     @staticmethod
     def _extract_metric(text: str, pattern: str) -> int | None:
