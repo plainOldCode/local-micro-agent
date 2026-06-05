@@ -11,14 +11,17 @@ class JsonValidationError(ValueError):
 def parse_json_object(text: str) -> dict[str, Any]:
     """Extract a JSON object from models that sometimes add accidental prose."""
     stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        return json.loads(stripped)
+    try:
+        if stripped.startswith("{") and stripped.endswith("}"):
+            return json.loads(stripped)
 
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise JsonValidationError("No JSON object found in model output")
-    return json.loads(stripped[start : end + 1])
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise JsonValidationError("No JSON object found in model output")
+        return json.loads(stripped[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise JsonValidationError(f"Invalid JSON object: {exc}") from exc
 
 
 def require_keys(data: dict[str, Any], keys: list[str]) -> None:
