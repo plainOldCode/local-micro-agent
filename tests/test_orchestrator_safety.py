@@ -206,6 +206,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
     def test_plan_reads_readme_as_project_context_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            (repo / "AGENTS.md").write_text("Only modify target.py.\n")
             (repo / "Readme.md").write_text("Do not change tests. Read target.py.\n")
             target = repo / "target.py"
             target.write_text("value = 'old'\n")
@@ -239,6 +240,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 await agent.mcp.start()
                 try:
                     await agent.plan()
+                    self.assertIn("AGENTS.md", models.seen["planner"][0][1]["content"])
+                    self.assertIn("Only modify target.py", models.seen["planner"][0][1]["content"])
                     self.assertIn("README", models.seen["planner"][0][1]["content"])
                     self.assertIn("Do not change tests", models.seen["planner"][0][1]["content"])
                     self.assertIn("Workflow constraints", models.seen["planner"][0][1]["content"])

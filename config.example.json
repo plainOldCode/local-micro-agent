@@ -32,6 +32,7 @@
     "command_timeout_seconds": 120,
     "command_output_limit": 200000,
     "readme_first": true,
+    "project_instruction_files": [],
     "project_context_files": [],
     "project_context_char_limit": 12000,
     "allowed_file_globs": ["src/**/*.py", "tests/**/*.py", "*.py"],

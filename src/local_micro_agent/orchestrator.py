@@ -404,12 +404,34 @@ class MicroAgent:
         configured = workflow.get("project_context_files")
         if isinstance(configured, list) and configured:
             return [str(path) for path in configured]
+        files = []
+        instruction_files = workflow.get("project_instruction_files")
+        if isinstance(instruction_files, list) and instruction_files:
+            files.extend(str(path) for path in instruction_files)
+        else:
+            files.extend(
+                name
+                for name in ("AGENTS.md", "CLAUDE.md", "INSTRUCTIONS.md")
+                if (self.state.repo_root / name).exists()
+            )
         if workflow.get("readme_first", True) is False:
-            return []
+            return self._unique_existing_paths(files)
         for name in ("README.md", "Readme.md", "readme.md", "README", "README.txt"):
             if (self.state.repo_root / name).exists():
-                return [name]
-        return []
+                files.append(name)
+                break
+        return self._unique_existing_paths(files)
+
+    def _unique_existing_paths(self, paths: list[str]) -> list[str]:
+        unique = []
+        seen = set()
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            if (self.state.repo_root / path).exists():
+                unique.append(path)
+        return unique
 
     def _workflow_plan_context(self) -> str:
         workflow = self.config.get("workflow", {})

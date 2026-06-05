@@ -18,11 +18,12 @@ Runtime dependencies: none outside the Python standard library.
 
 ## How A Run Starts
 
-The default path is README-first:
+The default path is project-instructions-first, then README:
 
-1. `PLAN` reads root project context before asking the model to plan.
-   By default this auto-detects `README.md`, `Readme.md`, `readme.md`,
-   `README`, or `README.txt`.
+1. `PLAN` reads repo-local instruction/context files before asking the model to
+   plan. By default this auto-detects `AGENTS.md`, `CLAUDE.md`,
+   `INSTRUCTIONS.md`, then `README.md`, `Readme.md`, `readme.md`, `README`, or
+   `README.txt`.
 2. `PLAN` receives workflow constraints such as `writable_files`,
    `test_commands`, and metric settings next to the project context.
 3. `PLAN` turns the user request plus project context into a compact action
@@ -33,8 +34,9 @@ The default path is README-first:
 6. `TEST` runs configured commands with timeout and output limits, then accepts,
    rejects, or retries.
 
-Use `workflow.project_context_files` when the important entry point is not a
-README, or set `workflow.readme_first=false` for controlled experiments.
+Use `workflow.project_instruction_files` to name instruction files explicitly.
+Use `workflow.project_context_files` to fully override the auto-detected context
+set, or set `workflow.readme_first=false` for controlled experiments.
 
 Seeded workflow options are for resume and harness experiments, not the normal
 first look at a repository:
@@ -51,6 +53,7 @@ files, and other out-of-scope surfaces.
 {
   "workflow": {
     "readme_first": true,
+    "project_instruction_files": [],
     "project_context_files": [],
     "writable_files": ["perf_takehome.py"],
     "test_commands": ["python tests/submission_tests.py"]
