@@ -94,6 +94,7 @@ class MicroAgent:
     async def code(self) -> None:
         decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
         self.state.proposed_changes = decision.changes
+        self.state.scratch["applied_changes"] = 0
         allowed = set(
             self.config.get("workflow", {}).get("writable_files") or self.state.planned_files
         )
@@ -102,10 +103,12 @@ class MicroAgent:
                 self.state.notes.append(f"Rejected out-of-plan change: {change.path}")
                 continue
             if change.patch:
-                await self._apply_patch(change.patch)
+                if await self._apply_patch(change.patch):
+                    self.state.scratch["applied_changes"] += 1
                 continue
             if change.content is not None:
                 await self.mcp.write_file(str(self.state.repo_root / change.path), change.content)
+                self.state.scratch["applied_changes"] += 1
                 continue
             self.state.notes.append(f"Skipped empty change: {change.path}")
         self.state.current = AgentStateName.TEST
@@ -118,6 +121,9 @@ class MicroAgent:
             result = await self.mcp.run_command(command, cwd=str(self.state.repo_root))
             self.state.test_results.append(TestResult(**result))
             failed = failed or result["exit_code"] != 0
+        if self.state.scratch.get("applied_changes", 0) == 0:
+            failed = True
+            self.state.notes.append("No code changes were applied")
 
         decision = await self._json_call("tester", test_prompt(self.state), TestDecision)
         if not failed and decision.status == "pass":
@@ -140,17 +146,19 @@ class MicroAgent:
             repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
             return parse_model_json(repaired, schema)
 
-    async def _apply_patch(self, patch: str) -> None:
+    async def _apply_patch(self, patch: str) -> bool:
         with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as handle:
             handle.write(patch)
             patch_path = handle.name
         result = await self.mcp.run_command(f"git apply --check {patch_path}", cwd=str(self.state.repo_root))
         if result["exit_code"] != 0:
             self.state.notes.append(f"Patch rejected: {result['stderr'][-1000:]}")
-            return
+            return False
         result = await self.mcp.run_command(f"git apply {patch_path}", cwd=str(self.state.repo_root))
         if result["exit_code"] != 0:
             self.state.notes.append(f"Patch apply failed: {result['stderr'][-1000:]}")
+            return False
+        return True
 
     @staticmethod
     def _log(message: str) -> None:
