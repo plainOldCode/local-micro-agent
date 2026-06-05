@@ -47,6 +47,11 @@ workflow:
   #   - "src/example.py"
   # writable_files:
   #   - "src/example.py"
+  # seed_changes:
+  #   - path: "src/example.py"
+  #     target: "old text"
+  #     replacement: "new text"
+  #     reason: "deterministic candidate"
   allowed_file_globs:
     - "src/**/*.py"
     - "tests/**/*.py"

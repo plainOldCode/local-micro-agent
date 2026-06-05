@@ -92,7 +92,11 @@ class MicroAgent:
         self.state.current = AgentStateName.CODE
 
     async def code(self) -> None:
-        decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
+        seeded_changes = self.config.get("workflow", {}).get("seed_changes")
+        if seeded_changes:
+            decision = CodeDecision(changes=[CodeChange.model_validate(c) for c in seeded_changes])
+        else:
+            decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
         self.state.proposed_changes = decision.changes
         self.state.scratch["applied_changes"] = 0
         allowed = set(
