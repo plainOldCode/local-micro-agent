@@ -10,7 +10,12 @@ Output only concise Markdown with:
 1. Files to read or modify
 2. Ordered implementation steps
 3. Test commands
-Do not write code. Do not include unrelated architecture discussion."""
+Do not write code. Do not include unrelated architecture discussion.
+Respect project instructions and workflow constraints before giving generic
+advice. If writable files are constrained, do not plan modifications outside
+that set. Do not modify tests unless the user explicitly asks for test changes.
+Prefer reading source entrypoints named by the README or task text before
+choosing implementation changes."""
 
 READ_SYSTEM = """You are the READ node in a local coding-agent FSM.
 Select the minimum source files needed for the plan.

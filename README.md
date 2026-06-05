@@ -23,12 +23,14 @@ The default path is README-first:
 1. `PLAN` reads root project context before asking the model to plan.
    By default this auto-detects `README.md`, `Readme.md`, `readme.md`,
    `README`, or `README.txt`.
-2. `PLAN` turns the user request plus project context into a compact action
-   plan.
-3. `READ` selects the minimum files needed for that plan.
-4. `CODE` may only modify files allowed by `workflow.writable_files` or the
+2. `PLAN` receives workflow constraints such as `writable_files`,
+   `test_commands`, and metric settings next to the project context.
+3. `PLAN` turns the user request plus project context into a compact action
+   plan that respects those constraints.
+4. `READ` selects the minimum files needed for that plan.
+5. `CODE` may only modify files allowed by `workflow.writable_files` or the
    planned file list.
-5. `TEST` runs configured commands with timeout and output limits, then accepts,
+6. `TEST` runs configured commands with timeout and output limits, then accepts,
    rejects, or retries.
 
 Use `workflow.project_context_files` when the important entry point is not a

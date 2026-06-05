@@ -189,6 +189,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 "providers": {},
                 "mcp_servers": {},
                 "workflow": {
+                    "writable_files": ["target.py"],
                     "test_commands": ["python3 -c \"print('ok')\""],
                     "deterministic_test_decision": True,
                 },
@@ -215,6 +216,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
                     await agent.plan()
                     self.assertIn("README", models.seen["planner"][0][1]["content"])
                     self.assertIn("Do not change tests", models.seen["planner"][0][1]["content"])
+                    self.assertIn("Workflow constraints", models.seen["planner"][0][1]["content"])
+                    self.assertIn("target.py", models.seen["planner"][0][1]["content"])
                 finally:
                     await agent.mcp.close()
 

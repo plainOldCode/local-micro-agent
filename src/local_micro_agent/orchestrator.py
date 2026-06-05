@@ -85,6 +85,9 @@ class MicroAgent:
             return
 
         project_context = await self._load_project_context()
+        workflow_context = self._workflow_plan_context()
+        if workflow_context:
+            project_context = "\n\n".join(part for part in [project_context, workflow_context] if part)
         output = await self.models.get("planner").chat(plan_prompt(self.state, project_context))
         self.state.plan_markdown = output.strip()
         self.state.current = AgentStateName.READ
@@ -407,6 +410,22 @@ class MicroAgent:
             if (self.state.repo_root / name).exists():
                 return [name]
         return []
+
+    def _workflow_plan_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        keys = (
+            "writable_files",
+            "test_commands",
+            "metric_regex",
+            "metric_goal",
+            "baseline_metric",
+            "accept_if_improved",
+            "require_metric",
+        )
+        summary = {key: workflow[key] for key in keys if key in workflow and workflow[key] not in (None, [], "")}
+        if not summary:
+            return ""
+        return "### Workflow constraints\n```json\n" + json.dumps(summary, ensure_ascii=False, indent=2) + "\n```"
 
     @staticmethod
     def _slice_text(text: str, limit: int) -> str:
