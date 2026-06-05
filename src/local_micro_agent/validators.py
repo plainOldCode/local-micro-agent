@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import xml.etree.ElementTree as ET
+import re
 from typing import Any
 
 
@@ -30,53 +30,65 @@ def parse_json_object(text: str) -> dict[str, Any]:
 
 
 def parse_xml_candidates(text: str) -> dict[str, Any]:
-    """Parse CODE output that uses raw XML blocks instead of JSON strings."""
+    """Parse CODE output that uses XML-like raw text blocks.
+
+    This intentionally avoids a real XML parser because raw Python snippets may
+    contain `<`, `>`, quotes, and other characters that are valid code but not
+    escaped XML text.
+    """
     stripped = text.strip()
     start = stripped.find("<candidates")
     end = stripped.rfind("</candidates>")
     if start == -1 or end == -1:
         raise XmlValidationError("No <candidates> block found in model output")
 
-    xml_text = stripped[start : end + len("</candidates>")]
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        raise XmlValidationError(f"Invalid XML candidates: {exc}") from exc
+    block = stripped[start : end + len("</candidates>")]
+    candidate_blocks = re.findall(
+        r"<candidate(?:\s+id=\"([^\"]*)\")?\s*>(.*?)</candidate>",
+        block,
+        re.DOTALL,
+    )
 
     candidates = []
-    for index, candidate_el in enumerate(root.findall("candidate"), start=1):
+    for index, (candidate_id, candidate_content) in enumerate(candidate_blocks, start=1):
         changes = []
-        for change_el in candidate_el.findall("change"):
-            path = _xml_child_text(change_el, "path")
-            search = _xml_child_text(change_el, "search")
-            replace = _xml_child_text(change_el, "replace")
+        reason = _tag_text(candidate_content, "reason")
+        for change_content in re.findall(r"<change>(.*?)</change>", candidate_content, re.DOTALL):
+            path = _tag_text(change_content, "path")
+            search = _tag_text(change_content, "search", strip=False)
+            replace = _tag_text(change_content, "replace", strip=False)
+            change_reason = _tag_text(change_content, "reason") or reason
+            if not path or not search or not replace:
+                continue
             changes.append(
                 {
                     "path": path,
                     "target": _trim_xml_block(search),
                     "replacement": _trim_xml_block(replace),
-                    "reason": _xml_child_text(change_el, "reason")
-                    or _xml_child_text(candidate_el, "reason"),
+                    "reason": change_reason,
                 }
             )
+        if not changes:
+            continue
         candidates.append(
             {
-                "id": candidate_el.attrib.get("id", str(index)),
-                "reason": _xml_child_text(candidate_el, "reason"),
+                "id": candidate_id or str(index),
+                "reason": reason,
                 "changes": changes,
             }
         )
 
     if not candidates:
-        raise XmlValidationError("No <candidate> entries found in XML output")
+        raise XmlValidationError("No valid <candidate> entries found in XML output")
     return {"candidates": candidates}
 
 
-def _xml_child_text(element: ET.Element, tag: str) -> str:
-    child = element.find(tag)
-    if child is None or child.text is None:
+def _tag_text(text: str, tag: str, strip: bool = True) -> str:
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+    if not match:
         return ""
-    return child.text
+    value = match.group(1)
+    return value.strip() if strip else value
 
 
 def _trim_xml_block(text: str) -> str:

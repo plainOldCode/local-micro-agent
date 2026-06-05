@@ -43,6 +43,32 @@ body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
         change = data["candidates"][0]["changes"][0]
         self.assertEqual(change["path"], "perf_takehome.py")
         self.assertIn('self.scratch["inp_indices_p"]', change["replacement"])
+        self.assertIn('body.append(("debug"', change["target"])
+
+    def test_parse_xml_candidates_tolerates_raw_less_than_operator(self) -> None:
+        data = parse_xml_candidates(
+            """
+<candidates>
+<candidate id="1">
+<reason>small local edit</reason>
+<change>
+<path>perf_takehome.py</path>
+<search>
+                body.append(("alu", ("<", tmp1, tmp_idx, self.scratch["n_nodes"])))
+</search>
+<replace>
+                body.append(("alu", ("<", tmp1, tmp_idx, self.scratch["n_nodes"])))
+                body.append(("debug", ("compare", tmp_idx, (round, i, "lt_check"))))
+</replace>
+</change>
+</candidate>
+</candidates>
+"""
+        )
+
+        change = data["candidates"][0]["changes"][0]
+        self.assertIn('("<", tmp1', change["target"])
+        self.assertTrue(change["target"].startswith("                body.append"))
 
     def test_xml_validation_error_uses_json_error_path(self) -> None:
         self.assertTrue(issubclass(XmlValidationError, JsonValidationError))
