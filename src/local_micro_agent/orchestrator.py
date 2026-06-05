@@ -48,12 +48,16 @@ class MicroAgent:
         try:
             while self.state.current not in {AgentStateName.DONE, AgentStateName.FAILED}:
                 if self.state.current == AgentStateName.PLAN:
+                    self._log("PLAN")
                     await self.plan()
                 elif self.state.current == AgentStateName.READ:
+                    self._log("READ")
                     await self.read()
                 elif self.state.current == AgentStateName.CODE:
+                    self._log(f"CODE loop={self.state.loop_count}")
                     await self.code()
                 elif self.state.current == AgentStateName.TEST:
+                    self._log(f"TEST loop={self.state.loop_count}")
                     await self.test()
                 else:
                     self.state.current = AgentStateName.FAILED
@@ -62,12 +66,22 @@ class MicroAgent:
         return self.state
 
     async def plan(self) -> None:
+        seeded_plan = self.config.get("workflow", {}).get("plan_markdown")
+        if seeded_plan:
+            self.state.plan_markdown = seeded_plan.strip()
+            self.state.current = AgentStateName.READ
+            return
+
         output = await self.models.get("planner").chat(plan_prompt(self.state))
         self.state.plan_markdown = output.strip()
         self.state.current = AgentStateName.READ
 
     async def read(self) -> None:
-        decision = await self._json_call("planner", read_prompt(self.state), ReadDecision)
+        seeded_files = self.config.get("workflow", {}).get("seed_files")
+        if seeded_files:
+            decision = ReadDecision(files=seeded_files, reason="seeded by workflow config")
+        else:
+            decision = await self._json_call("planner", read_prompt(self.state), ReadDecision)
         self.state.planned_files = decision.files
         self.state.file_context = []
         for rel_path in decision.files:
@@ -119,6 +133,10 @@ class MicroAgent:
         except JsonValidationError as exc:
             repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
             return parse_model_json(repaired, schema)
+
+    @staticmethod
+    def _log(message: str) -> None:
+        print(f"[local-micro-agent] {message}", flush=True)
 
 
 def load_config(path: Path) -> dict[str, Any]:

@@ -38,6 +38,13 @@ mcp_servers:
 
 workflow:
   max_code_test_loops: 3
+  # Optional deterministic shortcuts for narrow/local experiments.
+  # When set, PLAN and READ do not call the model.
+  # plan_markdown: |
+  #   Modify only the files listed in seed_files. Preserve correctness.
+  # seed_files:
+  #   - "README.md"
+  #   - "src/example.py"
   allowed_file_globs:
     - "src/**/*.py"
     - "tests/**/*.py"
