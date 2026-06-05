@@ -528,11 +528,21 @@ class MicroAgent:
             return None
 
     async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type):
-        output = await self.models.get(role).chat(messages)
+        try:
+            output = await self.models.get(role).chat(messages)
+        except Exception as exc:
+            raise JsonValidationError(
+                f"{role} model call failed: {type(exc).__name__}: {exc}"
+            ) from exc
         try:
             return self._parse_decision(output, schema)
         except JsonValidationError as exc:
-            repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
+            try:
+                repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
+            except Exception as repair_exc:
+                raise JsonValidationError(
+                    f"{role} repair model call failed: {type(repair_exc).__name__}: {repair_exc}"
+                ) from repair_exc
             return self._parse_decision(repaired, schema)
 
     @staticmethod

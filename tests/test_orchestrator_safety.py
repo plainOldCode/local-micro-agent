@@ -19,6 +19,16 @@ class _BadJsonModelManager:
         return _BadJsonModel()
 
 
+class _FailingModel:
+    async def chat(self, messages):
+        raise TimeoutError("model timed out")
+
+
+class _FailingModelManager:
+    def get(self, role):
+        return _FailingModel()
+
+
 class _StaticModel:
     def __init__(self, output: str):
         self.output = output
@@ -203,6 +213,33 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(result.current, AgentStateName.FAILED)
             self.assertEqual(result.loop_count, 1)
             self.assertIn("Coder output rejected after repair", "\n".join(result.notes))
+
+    def test_coder_transport_error_is_rejected_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {"default": "failing"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": [],
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                    "retry_rejected_candidates": True,
+                    "max_code_test_loops": 2,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=2)
+            agent = MicroAgent(config, state)
+            agent.models = _FailingModelManager()
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual(result.loop_count, 1)
+            self.assertIn("coder model call failed", "\n".join(result.notes))
 
     def test_candidate_queue_accepts_best_candidate_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
