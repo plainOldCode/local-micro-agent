@@ -80,7 +80,7 @@ class MicroAgent:
 
     async def read(self) -> None:
         seeded_files = self.config.get("workflow", {}).get("seed_files")
-        if seeded_files:
+        if seeded_files is not None:
             decision = ReadDecision(files=seeded_files, reason="seeded by workflow config")
         else:
             decision = await self._json_call("planner", read_prompt(self.state), ReadDecision)
@@ -163,14 +163,14 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         return set(workflow.get("writable_files") or self.state.planned_files)
 
-    async def _snapshot_files(self, paths: list[str]) -> dict[str, str]:
+    async def _snapshot_files(self, paths: list[str]) -> dict[str, str | None]:
         snapshot = {}
         for rel_path in paths:
             try:
                 snapshot[rel_path] = await self.mcp.read_file(str(self.state.repo_root / rel_path))
             except FileNotFoundError:
-                snapshot[rel_path] = ""
-                self.state.notes.append(f"Snapshot missing file as empty: {rel_path}")
+                snapshot[rel_path] = None
+                self.state.notes.append(f"Snapshot missing file: {rel_path}")
         return snapshot
 
     async def _restore_pre_code_snapshot(self) -> None:
@@ -178,7 +178,11 @@ class MicroAgent:
         if not isinstance(snapshot, dict):
             return
         for rel_path, content in snapshot.items():
-            await self.mcp.write_file(str(self.state.repo_root / rel_path), str(content))
+            abs_path = str(self.state.repo_root / rel_path)
+            if content is None:
+                await self.mcp.delete_file(abs_path)
+                continue
+            await self.mcp.write_file(abs_path, str(content))
         self.state.notes.append("Restored writable files after rejected candidate")
 
     def _evaluate_metric_acceptance(self) -> bool:

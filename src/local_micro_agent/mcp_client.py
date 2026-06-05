@@ -40,6 +40,11 @@ class McpToolClient:
         # Development fallback. Swap for filesystem MCP `write_file`.
         await asyncio.to_thread(Path(path).write_text, content)
 
+    async def delete_file(self, path: str) -> None:
+        self._require_started()
+        # Development fallback. Swap for filesystem MCP `delete_file`.
+        await asyncio.to_thread(Path(path).unlink, missing_ok=True)
+
     async def run_command(
         self,
         command: str,
