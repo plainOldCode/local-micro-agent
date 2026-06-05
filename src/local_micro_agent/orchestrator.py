@@ -7,29 +7,29 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import yaml
-from pydantic import BaseModel
-
 from .mcp_client import McpServerSpec, McpToolClient
 from .models import ModelManager
 from .prompts import PROMPT_MARKDOWN, code_prompt, plan_prompt, read_prompt, test_prompt
 from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
-from .validators import JsonValidationError, parse_model_json, retry_repair_prompt
+from .validators import JsonValidationError, parse_json_object, require_keys, retry_repair_prompt
 
 
-class ReadDecision(BaseModel):
-    files: list[str]
-    reason: str
+class ReadDecision:
+    def __init__(self, files: list[str], reason: str = ""):
+        self.files = files
+        self.reason = reason
 
 
-class CodeDecision(BaseModel):
-    changes: list[CodeChange]
+class CodeDecision:
+    def __init__(self, changes: list[CodeChange]):
+        self.changes = changes
 
 
-class TestDecision(BaseModel):
-    status: str
-    reason: str
-    next_focus: str = ""
+class TestDecision:
+    def __init__(self, status: str, reason: str = "", next_focus: str = ""):
+        self.status = status
+        self.reason = reason
+        self.next_focus = next_focus
 
 
 class MicroAgent:
@@ -94,7 +94,7 @@ class MicroAgent:
     async def code(self) -> None:
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")
         if seeded_changes:
-            decision = CodeDecision(changes=[CodeChange.model_validate(c) for c in seeded_changes])
+            decision = CodeDecision(changes=[CodeChange.from_dict(c) for c in seeded_changes])
         else:
             decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
         self.state.proposed_changes = decision.changes
@@ -125,8 +125,14 @@ class MicroAgent:
         commands = self.config.get("workflow", {}).get("test_commands", [])
         self.state.test_results = []
         failed = False
+        workflow = self.config.get("workflow", {})
         for command in commands:
-            result = await self.mcp.run_command(command, cwd=str(self.state.repo_root))
+            result = await self.mcp.run_command(
+                command,
+                cwd=str(self.state.repo_root),
+                timeout_seconds=workflow.get("command_timeout_seconds", 120),
+                output_limit=workflow.get("command_output_limit", 200_000),
+            )
             self.state.test_results.append(TestResult(**result))
             failed = failed or result["exit_code"] != 0
         if self.state.scratch.get("applied_changes", 0) == 0:
@@ -149,13 +155,31 @@ class MicroAgent:
         self.state.notes.append(f"Retry focus: {decision.next_focus or decision.reason}")
         self.state.current = AgentStateName.CODE
 
-    async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type[BaseModel]):
+    async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type):
         output = await self.models.get(role).chat(messages)
         try:
-            return parse_model_json(output, schema)
+            return self._parse_decision(output, schema)
         except JsonValidationError as exc:
             repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
-            return parse_model_json(repaired, schema)
+            return self._parse_decision(repaired, schema)
+
+    @staticmethod
+    def _parse_decision(output: str, schema: type):
+        data = parse_json_object(output)
+        if schema is ReadDecision:
+            require_keys(data, ["files"])
+            return ReadDecision(files=[str(path) for path in data["files"]], reason=str(data.get("reason", "")))
+        if schema is CodeDecision:
+            require_keys(data, ["changes"])
+            return CodeDecision(changes=[CodeChange.from_dict(change) for change in data["changes"]])
+        if schema is TestDecision:
+            require_keys(data, ["status"])
+            return TestDecision(
+                status=str(data["status"]),
+                reason=str(data.get("reason", "")),
+                next_focus=str(data.get("next_focus", "")),
+            )
+        raise JsonValidationError(f"Unsupported decision schema: {schema}")
 
     async def _apply_replacement(self, path: str, target: str, replacement: str) -> bool:
         abs_path = self.state.repo_root / path
@@ -189,7 +213,7 @@ class MicroAgent:
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    return yaml.safe_load(path.read_text())
+    return json.loads(path.read_text())
 
 
 def dump_prompts() -> str:
@@ -218,7 +242,7 @@ async def async_main() -> None:
         max_loops=config.get("workflow", {}).get("max_code_test_loops", 3),
     )
     result = await MicroAgent(config, state).run()
-    print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    print(json.dumps(result.to_json_dict(), ensure_ascii=False, indent=2))
 
 
 def main() -> None:

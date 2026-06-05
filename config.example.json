@@ -1,0 +1,37 @@
+{
+  "models": {
+    "default": "qwen_local",
+    "planner": "qwen_local",
+    "coder": "qwen_local",
+    "tester": "qwen_local"
+  },
+  "providers": {
+    "qwen_local": {
+      "kind": "ollama_native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3.6:27b",
+      "temperature": 0.1,
+      "max_tokens": 4096,
+      "num_ctx": 64000,
+      "think": false,
+      "timeout_seconds": 240
+    },
+    "fast_planner": {
+      "kind": "openai_compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": "OLLAMA_API_KEY",
+      "model": "qwen3.6:27b",
+      "temperature": 0.0,
+      "max_tokens": 2048,
+      "timeout_seconds": 120
+    }
+  },
+  "mcp_servers": {},
+  "workflow": {
+    "max_code_test_loops": 3,
+    "command_timeout_seconds": 120,
+    "command_output_limit": 200000,
+    "allowed_file_globs": ["src/**/*.py", "tests/**/*.py", "*.py"],
+    "test_commands": ["python3 -m pytest -q"]
+  }
+}

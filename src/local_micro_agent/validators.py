@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, TypeVar
-
-from pydantic import BaseModel, ValidationError
-
-T = TypeVar("T", bound=BaseModel)
+from typing import Any
 
 
 class JsonValidationError(ValueError):
@@ -25,11 +21,10 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return json.loads(stripped[start : end + 1])
 
 
-def parse_model_json(text: str, schema: type[T]) -> T:
-    try:
-        return schema.model_validate(parse_json_object(text))
-    except (json.JSONDecodeError, ValidationError) as exc:
-        raise JsonValidationError(str(exc)) from exc
+def require_keys(data: dict[str, Any], keys: list[str]) -> None:
+    missing = [key for key in keys if key not in data]
+    if missing:
+        raise JsonValidationError(f"Missing required keys: {missing}")
 
 
 def retry_repair_prompt(bad_output: str, error: Exception) -> list[dict[str, str]]:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from .state import AgentState
 
+DEFAULT_CHAR_LIMIT = 15000
+
 
 PLAN_SYSTEM = """You are the PLAN node in a local coding-agent FSM.
 Output only concise Markdown with:
@@ -51,7 +53,7 @@ def read_prompt(state: AgentState) -> list[dict[str, str]]:
 
 def code_prompt(state: AgentState) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
-        f"### {snap.path}\n```text\n{snap.content}\n```" for snap in state.file_context
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
     return [
         {"role": "system", "content": CODE_SYSTEM},
@@ -80,3 +82,11 @@ PROMPT_MARKDOWN = {
     "CODE": CODE_SYSTEM,
     "TEST": TEST_SYSTEM,
 }
+
+
+def slice_text(text: str, limit: int = DEFAULT_CHAR_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    head = limit // 2
+    tail = limit - head
+    return text[:head] + "\n[...truncated...]\n" + text[-tail:]

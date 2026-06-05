@@ -40,7 +40,13 @@ class McpToolClient:
         # Development fallback. Swap for filesystem MCP `write_file`.
         await asyncio.to_thread(Path(path).write_text, content)
 
-    async def run_command(self, command: str, cwd: str | None = None) -> dict[str, Any]:
+    async def run_command(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout_seconds: int = 120,
+        output_limit: int = 200_000,
+    ) -> dict[str, Any]:
         self._require_started()
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -48,12 +54,25 @@ class McpToolClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            proc.kill()
+            stdout, stderr = await proc.communicate()
+            return {
+                "command": command,
+                "exit_code": 124,
+                "stdout": stdout.decode(errors="replace")[-output_limit:],
+                "stderr": (
+                    stderr.decode(errors="replace")[-output_limit:]
+                    + f"\nError: command timed out after {timeout_seconds}s"
+                ),
+            }
         return {
             "command": command,
             "exit_code": proc.returncode,
-            "stdout": stdout.decode(errors="replace"),
-            "stderr": stderr.decode(errors="replace"),
+            "stdout": stdout.decode(errors="replace")[-output_limit:],
+            "stderr": stderr.decode(errors="replace")[-output_limit:],
         }
 
     def _require_started(self) -> None:
