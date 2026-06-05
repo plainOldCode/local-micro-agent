@@ -49,6 +49,11 @@ and an identical later candidate is rejected before tests run. The rejection is
 fed back as `forbidden repeated pattern`, which makes retry loops spend budget
 on new search directions instead of repeatedly testing the same failed patch.
 
+Set `workflow.continue_after_improvement=true` for long-running search. When a
+candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
+and `.local_micro_agent/best.patch`, updates the in-memory best metric, and
+continues to the next `CODE` loop until `max_code_test_loops` is reached.
+
 For local models that struggle to JSON-escape multi-line code snippets, set
 `workflow.code_output_format="xml"`. In XML mode the CODE node emits raw
 `<search>` and `<replace>` blocks inside `<candidates>` instead of putting

@@ -544,6 +544,52 @@ class OrchestratorSafetyTests(unittest.TestCase):
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"status": "rejected_repeated_pattern"', history)
 
+    def test_continue_after_improvement_persists_best_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'fast'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "continue_after_improvement": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=2)
+            state.loop_count = 0
+            state.scratch["metric_improved"] = True
+            state.scratch["best_metric"] = 80
+            state.scratch["last_metric"] = 80
+            state.scratch["pre_code_snapshot"] = {"target.py": "value = 'old'\n"}
+            state.proposed_changes = [
+                CodeChange(
+                    path="target.py",
+                    reason="faster",
+                    target="value = 'old'\n",
+                    replacement="value = 'fast'\n",
+                )
+            ]
+            agent = MicroAgent(config, state)
+
+            async def persist() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._persist_current_best_state()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(persist())
+
+            best_state = repo / ".local_micro_agent" / "best_state.json"
+            best_patch = repo / ".local_micro_agent" / "best.patch"
+            self.assertTrue(agent._should_continue_after_improvement())
+            self.assertIn('"metric": 80', best_state.read_text())
+            self.assertIn("-value = 'old'", best_patch.read_text())
+            self.assertIn("+value = 'fast'", best_patch.read_text())
+
     def test_context_symbols_limit_code_prompt_to_requested_python_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import difflib
 import hashlib
 import json
 import re
@@ -392,6 +393,8 @@ class MicroAgent:
         failed = failed or metric_failed
         if failed:
             await self._restore_pre_code_snapshot()
+        else:
+            await self._persist_current_best_state()
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
@@ -401,11 +404,25 @@ class MicroAgent:
                     else AgentStateName.CODE
                 )
                 return
+            if not failed and self._should_continue_after_improvement():
+                self.state.loop_count += 1
+                self.state.current = AgentStateName.CODE
+                self.state.notes.append(
+                    f"Continuing after improvement with baseline={self.state.scratch.get('best_metric')}"
+                )
+                return
             self.state.current = AgentStateName.FAILED if failed else AgentStateName.DONE
             return
 
         decision = await self._json_call("tester", test_prompt(self.state), TestDecision)
         if not failed and decision.status == "pass":
+            if self._should_continue_after_improvement():
+                self.state.loop_count += 1
+                self.state.current = AgentStateName.CODE
+                self.state.notes.append(
+                    f"Continuing after improvement with baseline={self.state.scratch.get('best_metric')}"
+                )
+                return
             self.state.current = AgentStateName.DONE
             return
 
@@ -452,6 +469,7 @@ class MicroAgent:
 
     def _evaluate_metric_acceptance(self) -> bool:
         workflow = self.config.get("workflow", {})
+        self.state.scratch["metric_improved"] = False
         if not workflow.get("metric_regex"):
             return False
         metric = self._metric_from_results(self.state.test_results)
@@ -471,6 +489,7 @@ class MicroAgent:
         self.state.notes.append(f"Metric candidate={metric} baseline={baseline_int} improved={improved}")
         if improved:
             self.state.scratch["best_metric"] = metric
+            self.state.scratch["metric_improved"] = True
             return False
         return bool(workflow.get("accept_if_improved"))
 
@@ -493,6 +512,72 @@ class MicroAgent:
         return bool(workflow.get("retry_rejected_candidates")) and (
             self.state.loop_count + 1 < self.state.max_loops
         )
+
+    def _should_continue_after_improvement(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("continue_after_improvement")) and (
+            self.state.scratch.get("metric_improved") is True
+            and self.state.loop_count + 1 < self.state.max_loops
+        )
+
+    async def _persist_current_best_state(self) -> None:
+        workflow = self.config.get("workflow", {})
+        should_persist = (
+            bool(workflow.get("continue_after_improvement"))
+            or workflow.get("best_state_path") is not None
+        )
+        if not should_persist or self.state.scratch.get("metric_improved") is not True:
+            return
+
+        state_path = self._workflow_artifact_path("best_state_path", ".local_micro_agent/best_state.json")
+        patch_path = self._workflow_artifact_path("best_patch_path", ".local_micro_agent/best.patch")
+        allowed = sorted(self._writable_files())
+        current_snapshot = await self._snapshot_files(allowed)
+        previous_snapshot = self.state.scratch.get("pre_code_snapshot")
+        patch_text = ""
+        if isinstance(previous_snapshot, dict):
+            patch_text = self._snapshot_patch(previous_snapshot, current_snapshot)
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "metric": self.state.scratch.get("best_metric", self.state.scratch.get("last_metric")),
+            "last_metric": self.state.scratch.get("last_metric"),
+            "changes": self._summarize_changes(self.state.proposed_changes),
+            "notes_tail": self.state.notes[-12:],
+        }
+        state_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+        patch_path.write_text(patch_text)
+        self.state.notes.append(f"Persisted best state: {state_path}")
+
+    def _workflow_artifact_path(self, key: str, default: str) -> Path:
+        raw = self.config.get("workflow", {}).get(key, default)
+        path = Path(str(raw))
+        if path.is_absolute():
+            return path
+        return self.state.repo_root / path
+
+    @staticmethod
+    def _snapshot_patch(
+        before: dict[str, str | None], after: dict[str, str | None]
+    ) -> str:
+        hunks = []
+        for path in sorted(set(before) | set(after)):
+            before_text = before.get(path) or ""
+            after_text = after.get(path) or ""
+            if before_text == after_text:
+                continue
+            hunks.extend(
+                difflib.unified_diff(
+                    before_text.splitlines(keepends=True),
+                    after_text.splitlines(keepends=True),
+                    fromfile=f"a/{path}",
+                    tofile=f"b/{path}",
+                )
+            )
+        return "".join(hunks)
 
     async def _load_project_context(self) -> str:
         files = self._project_context_files()
