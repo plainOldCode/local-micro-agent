@@ -9,7 +9,7 @@ class JsonValidationError(ValueError):
     pass
 
 
-class XmlValidationError(ValueError):
+class XmlValidationError(JsonValidationError):
     pass
 
 

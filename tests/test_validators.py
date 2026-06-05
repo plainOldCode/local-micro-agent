@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from local_micro_agent.validators import JsonValidationError, parse_json_object, parse_xml_candidates
+from local_micro_agent.validators import (
+    JsonValidationError,
+    XmlValidationError,
+    parse_json_object,
+    parse_xml_candidates,
+)
 
 
 class ValidatorTests(unittest.TestCase):
@@ -38,6 +43,9 @@ body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
         change = data["candidates"][0]["changes"][0]
         self.assertEqual(change["path"], "perf_takehome.py")
         self.assertIn('self.scratch["inp_indices_p"]', change["replacement"])
+
+    def test_xml_validation_error_uses_json_error_path(self) -> None:
+        self.assertTrue(issubclass(XmlValidationError, JsonValidationError))
 
 
 if __name__ == "__main__":
