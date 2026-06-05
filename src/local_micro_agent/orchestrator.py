@@ -143,6 +143,10 @@ class MicroAgent:
         if failed:
             await self._restore_pre_code_snapshot()
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
+            if failed and self._should_retry_rejected_candidate():
+                self.state.loop_count += 1
+                self.state.current = AgentStateName.CODE
+                return
             self.state.current = AgentStateName.FAILED if failed else AgentStateName.DONE
             return
 
@@ -214,6 +218,12 @@ class MicroAgent:
             self.state.scratch["best_metric"] = metric
             return False
         return bool(workflow.get("accept_if_improved"))
+
+    def _should_retry_rejected_candidate(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("retry_rejected_candidates")) and (
+            self.state.loop_count + 1 < self.state.max_loops
+        )
 
     @staticmethod
     def _extract_metric(text: str, pattern: str) -> int | None:

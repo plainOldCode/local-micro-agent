@@ -21,7 +21,11 @@ def run_agent(repo: Path, workflow: dict) -> AgentState:
             **workflow,
         },
     }
-    state = AgentState(repo_root=repo, user_request="test")
+    state = AgentState(
+        repo_root=repo,
+        user_request="test",
+        max_loops=config.get("workflow", {}).get("max_code_test_loops", 3),
+    )
     return asyncio.run(MicroAgent(config, state).run())
 
 
@@ -119,6 +123,33 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.current, AgentStateName.DONE)
             self.assertEqual(target.read_text(), "value = 'faster'\n")
+
+    def test_deterministic_mode_can_retry_rejected_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+
+            result = run_agent(
+                repo,
+                {
+                    "max_code_test_loops": 2,
+                    "retry_rejected_candidates": True,
+                    "writable_files": ["target.py"],
+                    "seed_changes": [
+                        {
+                            "path": "target.py",
+                            "target": "value = 'old'\n",
+                            "replacement": "value = 'bad'\n",
+                        }
+                    ],
+                    "test_commands": ["python3 -c \"raise SystemExit(1)\""],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual(result.loop_count, 1)
+            self.assertEqual(target.read_text(), "value = 'old'\n")
 
 
 if __name__ == "__main__":

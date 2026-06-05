@@ -38,6 +38,7 @@
     "metric_goal": "minimize",
     "baseline_metric": null,
     "require_metric": false,
-    "accept_if_improved": false
+    "accept_if_improved": false,
+    "retry_rejected_candidates": false
   }
 }
