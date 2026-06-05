@@ -25,6 +25,8 @@ class CodeChange(BaseModel):
     path: str
     content: str | None = None
     patch: str | None = None
+    target: str | None = None
+    replacement: str | None = None
     reason: str
 
 

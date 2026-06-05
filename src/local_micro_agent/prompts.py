@@ -19,10 +19,11 @@ Do not include markdown or prose outside JSON."""
 CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
 Use only the supplied plan, source files, and latest test failure.
 Output strict JSON:
-{"changes":[{"path":"relative/path.py","patch":"unified diff text","reason":"why"}]}
+{"changes":[{"path":"relative/path.py","target":"exact existing text","replacement":"new text","reason":"why"}]}
 Rules:
 - Modify only listed files.
-- Prefer a small unified diff patch.
+- Prefer exact target/replacement snippets.
+- Use "patch" only if target/replacement is impossible.
 - Use full-file "content" only for very small files.
 - Preserve existing public behavior unless the plan says otherwise.
 - No markdown fences, no commentary outside JSON."""

@@ -102,6 +102,10 @@ class MicroAgent:
             if change.path not in allowed:
                 self.state.notes.append(f"Rejected out-of-plan change: {change.path}")
                 continue
+            if change.target is not None and change.replacement is not None:
+                if await self._apply_replacement(change.path, change.target, change.replacement):
+                    self.state.scratch["applied_changes"] += 1
+                continue
             if change.patch:
                 if await self._apply_patch(change.patch):
                     self.state.scratch["applied_changes"] += 1
@@ -145,6 +149,18 @@ class MicroAgent:
         except JsonValidationError as exc:
             repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
             return parse_model_json(repaired, schema)
+
+    async def _apply_replacement(self, path: str, target: str, replacement: str) -> bool:
+        abs_path = self.state.repo_root / path
+        original = await self.mcp.read_file(str(abs_path))
+        if target not in original:
+            self.state.notes.append(f"Replacement target not found: {path}")
+            return False
+        if original.count(target) != 1:
+            self.state.notes.append(f"Replacement target is ambiguous: {path}")
+            return False
+        await self.mcp.write_file(str(abs_path), original.replace(target, replacement, 1))
+        return True
 
     async def _apply_patch(self, patch: str) -> bool:
         with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as handle:
