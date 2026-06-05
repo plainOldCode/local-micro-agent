@@ -93,7 +93,9 @@ class MicroAgent:
     async def code(self) -> None:
         decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
         self.state.proposed_changes = decision.changes
-        allowed = set(self.state.planned_files)
+        allowed = set(
+            self.config.get("workflow", {}).get("writable_files") or self.state.planned_files
+        )
         for change in decision.changes:
             if change.path not in allowed:
                 self.state.notes.append(f"Rejected out-of-plan change: {change.path}")

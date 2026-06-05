@@ -45,6 +45,8 @@ workflow:
   # seed_files:
   #   - "README.md"
   #   - "src/example.py"
+  # writable_files:
+  #   - "src/example.py"
   allowed_file_globs:
     - "src/**/*.py"
     - "tests/**/*.py"
