@@ -580,6 +580,9 @@ class MicroAgent:
 
     async def _apply_replacement(self, path: str, target: str, replacement: str) -> bool:
         abs_path = self.state.repo_root / path
+        if target == replacement:
+            self.state.notes.append(f"Replacement is a no-op: {path}")
+            return False
         original = await self.mcp.read_file(str(abs_path))
         if target not in original:
             self.state.notes.append(f"Replacement target not found: {path}")
