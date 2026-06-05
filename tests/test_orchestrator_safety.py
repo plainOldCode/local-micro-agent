@@ -19,6 +19,22 @@ class _BadJsonModelManager:
         return _BadJsonModel()
 
 
+class _StaticModel:
+    def __init__(self, output: str):
+        self.output = output
+
+    async def chat(self, messages):
+        return self.output
+
+
+class _StaticModelManager:
+    def __init__(self, output: str):
+        self.output = output
+
+    def get(self, role):
+        return _StaticModel(self.output)
+
+
 def run_agent(repo: Path, workflow: dict) -> AgentState:
     config = {
         "models": {},
@@ -187,6 +203,62 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(result.current, AgentStateName.FAILED)
             self.assertEqual(result.loop_count, 1)
             self.assertIn("Coder output rejected after repair", "\n".join(result.notes))
+
+    def test_candidate_queue_accepts_best_candidate_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            evaluator = (
+                "python3 -c \"from pathlib import Path; "
+                "t=Path('target.py').read_text(); "
+                "print('cycles: 80' if 'fast' in t else 'cycles: 120')\""
+            )
+            output = """
+{
+  "candidates": [
+    {
+      "id": "slow",
+      "changes": [
+        {"path": "target.py", "target": "value = 'old'\\n", "replacement": "value = 'slow'\\n"}
+      ]
+    },
+    {
+      "id": "fast",
+      "changes": [
+        {"path": "target.py", "target": "value = 'old'\\n", "replacement": "value = 'fast'\\n"}
+      ]
+    }
+  ]
+}
+"""
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "test_commands": [evaluator],
+                    "deterministic_test_decision": True,
+                    "candidate_queue": True,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=1)
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(output)
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertEqual(target.read_text(), "value = 'fast'\n")
+            self.assertEqual(result.scratch["last_metric"], 80)
+            self.assertIn("Candidate slow", "\n".join(result.notes))
+            self.assertIn("Candidate queue accepted metric=80", "\n".join(result.notes))
 
 
 if __name__ == "__main__":
