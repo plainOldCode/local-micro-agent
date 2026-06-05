@@ -266,6 +266,47 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn('"candidate_id": "fast"', history)
             self.assertIn('"status": "accepted"', history)
 
+    def test_context_symbols_limit_code_prompt_to_requested_python_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def keep_me():\n"
+                "    return 'old'\n\n"
+                "def hide_me():\n"
+                "    return 'secret'\n"
+            )
+            output = """
+{
+  "changes": [
+    {"path": "target.py", "target": "return 'old'", "replacement": "return 'new'"}
+  ]
+}
+"""
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "context_symbols": {"target.py": ["keep_me"]},
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=1)
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(output)
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertIn("def keep_me", result.file_context[0].content)
+            self.assertNotIn("hide_me", result.file_context[0].content)
+            self.assertIn("Using symbol context", "\n".join(result.notes))
+
 
 if __name__ == "__main__":
     unittest.main()

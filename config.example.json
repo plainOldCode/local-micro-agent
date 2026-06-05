@@ -33,6 +33,7 @@
     "command_output_limit": 200000,
     "allowed_file_globs": ["src/**/*.py", "tests/**/*.py", "*.py"],
     "writable_files": [],
+    "context_symbols": {},
     "test_commands": ["python3 -m pytest -q"],
     "metric_regex": null,
     "metric_goal": "minimize",

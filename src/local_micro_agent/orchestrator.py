@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import json
 import re
@@ -98,6 +99,7 @@ class MicroAgent:
         for rel_path in decision.files:
             abs_path = self.state.repo_root / rel_path
             content = await self.mcp.read_file(str(abs_path))
+            content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
         self.state.current = AgentStateName.CODE
 
@@ -373,6 +375,65 @@ class MicroAgent:
         return bool(workflow.get("retry_rejected_candidates")) and (
             self.state.loop_count + 1 < self.state.max_loops
         )
+
+    def _context_for_file(self, rel_path: str, content: str) -> str:
+        symbols_by_path = self.config.get("workflow", {}).get("context_symbols")
+        if not isinstance(symbols_by_path, dict):
+            return content
+        symbols = symbols_by_path.get(rel_path)
+        if not symbols:
+            return content
+        if not isinstance(symbols, list):
+            self.state.notes.append(f"Ignored non-list context_symbols for {rel_path}")
+            return content
+        excerpt = self._extract_python_symbols(content, [str(symbol) for symbol in symbols])
+        if not excerpt:
+            self.state.notes.append(f"No requested context symbols found in {rel_path}")
+            return content
+        self.state.notes.append(
+            f"Using symbol context for {rel_path}: {', '.join(str(symbol) for symbol in symbols)}"
+        )
+        return excerpt
+
+    @staticmethod
+    def _extract_python_symbols(content: str, symbols: list[str]) -> str:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return ""
+        lines = content.splitlines(keepends=True)
+        selected_ranges: list[tuple[int, int]] = []
+        for symbol in symbols:
+            selected = MicroAgent._find_symbol_node(tree, symbol)
+            if selected is None or not hasattr(selected, "lineno") or not hasattr(selected, "end_lineno"):
+                continue
+            selected_ranges.append((int(selected.lineno), int(selected.end_lineno)))
+        if not selected_ranges:
+            return ""
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(selected_ranges):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                continue
+            merged.append((start, end))
+        return "\n\n".join("".join(lines[start - 1 : end]).rstrip() for start, end in merged)
+
+    @staticmethod
+    def _find_symbol_node(tree: ast.AST, symbol: str) -> ast.AST | None:
+        if "." in symbol:
+            class_name, member_name = symbol.split(".", 1)
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.ClassDef) and node.name == class_name:
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            if child.name == member_name:
+                                return child
+            return None
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name == symbol:
+                    return node
+        return None
 
     def _candidate_history_path(self) -> Path | None:
         path = self.config.get("workflow", {}).get("candidate_history_path")

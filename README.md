@@ -16,6 +16,20 @@ commercial APIs behind an OpenAI-compatible endpoint.
 
 Runtime dependencies: none outside the Python standard library.
 
+For narrow Python edits, `workflow.context_symbols` can replace full-file
+CODE context with exact function/class excerpts:
+
+```json
+{
+  "workflow": {
+    "seed_files": ["perf_takehome.py"],
+    "context_symbols": {
+      "perf_takehome.py": ["build_kernel", "Builder.emit"]
+    }
+  }
+}
+```
+
 ## Files
 
 - `config.example.json`: provider and workflow configuration.
