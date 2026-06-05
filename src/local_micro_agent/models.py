@@ -43,6 +43,40 @@ class OpenAICompatibleModel:
             return data["choices"][0]["message"].get("content") or ""
 
 
+@dataclass(frozen=True)
+class OllamaNativeModel:
+    base_url: str
+    model: str
+    temperature: float = 0.0
+    max_tokens: int = 2048
+    num_ctx: int | None = None
+    think: bool = False
+    timeout_seconds: int = 120
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "think": self.think,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
+        }
+        if self.num_ctx:
+            payload["options"]["num_ctx"] = self.num_ctx
+
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(
+                f"{self.base_url.rstrip('/')}/api/chat",
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["message"].get("content") or ""
+
+
 class ModelManager:
     def __init__(self, config: dict):
         self.config = config
@@ -56,13 +90,23 @@ class ModelManager:
 
     def _build(self, name: str) -> ChatModel:
         spec = self.config["providers"][name]
-        if spec["kind"] != "openai_compatible":
-            raise ValueError(f"Unsupported provider kind: {spec['kind']}")
-        return OpenAICompatibleModel(
-            base_url=spec["base_url"],
-            model=spec["model"],
-            api_key_env=spec.get("api_key_env"),
-            temperature=spec.get("temperature", 0.0),
-            max_tokens=spec.get("max_tokens", 2048),
-            timeout_seconds=spec.get("timeout_seconds", 120),
-        )
+        if spec["kind"] == "openai_compatible":
+            return OpenAICompatibleModel(
+                base_url=spec["base_url"],
+                model=spec["model"],
+                api_key_env=spec.get("api_key_env"),
+                temperature=spec.get("temperature", 0.0),
+                max_tokens=spec.get("max_tokens", 2048),
+                timeout_seconds=spec.get("timeout_seconds", 120),
+            )
+        if spec["kind"] == "ollama_native":
+            return OllamaNativeModel(
+                base_url=spec["base_url"],
+                model=spec["model"],
+                temperature=spec.get("temperature", 0.0),
+                max_tokens=spec.get("max_tokens", 2048),
+                num_ctx=spec.get("num_ctx"),
+                think=spec.get("think", False),
+                timeout_seconds=spec.get("timeout_seconds", 120),
+            )
+        raise ValueError(f"Unsupported provider kind: {spec['kind']}")

@@ -1,17 +1,18 @@
 models:
   default: qwen_local
-  planner: fast_planner
+  planner: qwen_local
   coder: qwen_local
-  tester: fast_planner
+  tester: qwen_local
 
 providers:
   qwen_local:
-    kind: openai_compatible
-    base_url: "http://127.0.0.1:8088/v1"
-    api_key_env: "LOCAL_LLM_API_KEY"
-    model: "qwen36-35b-abliterated"
+    kind: ollama_native
+    base_url: "http://127.0.0.1:11434"
+    model: "qwen3.6:27b"
     temperature: 0.1
     max_tokens: 4096
+    num_ctx: 64000
+    think: false
     timeout_seconds: 240
   fast_planner:
     kind: openai_compatible
