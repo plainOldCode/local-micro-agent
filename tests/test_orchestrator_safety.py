@@ -292,6 +292,17 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("Retry reflection", messages[1]["content"])
             self.assertIn("invalid JSON", messages[1]["content"])
 
+    def test_code_prompt_can_request_xml_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+
+            messages = code_prompt(state, output_format="xml")
+
+            self.assertIn("Do not output JSON", messages[0]["content"])
+            self.assertIn("<search>", messages[0]["content"])
+            self.assertIn("<replace>", messages[0]["content"])
+
     def test_reflect_state_stores_summary_for_next_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(

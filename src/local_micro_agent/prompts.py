@@ -43,6 +43,31 @@ Rules:
 - Do not output comment-only, formatting-only, or explanatory placeholder changes.
 - No markdown fences, no commentary outside JSON."""
 
+CODE_XML_SYSTEM = """You are the CODE node in a local coding-agent FSM.
+Use only the supplied plan, source files, and latest test failure.
+Do not output JSON. Output only this XML-like format:
+<candidates>
+<candidate id="1">
+<reason>why this candidate is proposed</reason>
+<change>
+<path>relative/path.py</path>
+<search>
+exact existing code, copied verbatim
+</search>
+<replace>
+new code, copied verbatim
+</replace>
+</change>
+</candidate>
+</candidates>
+Rules:
+- Modify only listed files.
+- Keep <search> and <replace> as short as possible.
+- The <search> block must match existing code exactly, including whitespace.
+- Put raw code inside <search> and <replace>; do not JSON-escape quotes or newlines.
+- Do not add markdown fences or prose outside <candidates>.
+- Do not output comment-only, formatting-only, or explanatory placeholder changes."""
+
 TEST_SYSTEM = """You are the TEST node in a local coding-agent FSM.
 Given test output, decide whether the work is complete or needs another CODE loop.
 Output strict JSON:
@@ -82,7 +107,9 @@ def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[di
     ]
 
 
-def code_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
+def code_prompt(
+    state: AgentState, feedback_notes_limit: int = 12, output_format: str = "json"
+) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
@@ -93,7 +120,10 @@ def code_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[
         else ""
     )
     return [
-        {"role": "system", "content": CODE_SYSTEM},
+        {
+            "role": "system",
+            "content": CODE_XML_SYSTEM if output_format == "xml" else CODE_SYSTEM,
+        },
         {
             "role": "user",
             "content": (
@@ -120,6 +150,7 @@ PROMPT_MARKDOWN = {
     "READ": READ_SYSTEM,
     "REFLECT": REFLECT_SYSTEM,
     "CODE": CODE_SYSTEM,
+    "CODE_XML": CODE_XML_SYSTEM,
     "TEST": TEST_SYSTEM,
 }
 

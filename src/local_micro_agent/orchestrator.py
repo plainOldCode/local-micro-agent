@@ -14,7 +14,13 @@ from .mcp_client import McpServerSpec, McpToolClient
 from .models import ModelManager
 from .prompts import PROMPT_MARKDOWN, code_prompt, plan_prompt, read_prompt, reflect_prompt, test_prompt
 from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
-from .validators import JsonValidationError, parse_json_object, require_keys, retry_repair_prompt
+from .validators import (
+    JsonValidationError,
+    parse_json_object,
+    parse_xml_candidates,
+    require_keys,
+    retry_repair_prompt,
+)
 
 
 class ReadDecision:
@@ -139,21 +145,12 @@ class MicroAgent:
                 feedback_notes_limit = int(
                     self.config.get("workflow", {}).get("feedback_notes_limit", 12)
                 )
-                messages = code_prompt(self.state, feedback_notes_limit)
+                output_format = str(
+                    self.config.get("workflow", {}).get("code_output_format", "json")
+                )
+                messages = code_prompt(self.state, feedback_notes_limit, output_format)
                 if self.config.get("workflow", {}).get("candidate_queue"):
-                    messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Candidate queue mode is enabled. Output strict JSON with a top-level "
-                                '"candidates" array, not a top-level "changes" array. Example: '
-                                '{"candidates":[{"id":"1","reason":"short","changes":[{"path":"file.py",'
-                                '"target":"exact text","replacement":"new text","reason":"short"}]}]}. '
-                                "Each candidate must be independent and safe to apply from the same baseline."
-                            ),
-                        },
-                    ]
+                    messages = [*messages, self._candidate_queue_message(output_format)]
                 history = self._format_candidate_history()
                 if history:
                     messages = [
@@ -299,6 +296,28 @@ class MicroAgent:
             )
             results.append(TestResult(**result))
         return results
+
+    @staticmethod
+    def _candidate_queue_message(output_format: str) -> dict[str, str]:
+        if output_format == "xml":
+            return {
+                "role": "system",
+                "content": (
+                    "Candidate queue mode is enabled. Output one or more <candidate> "
+                    "blocks inside a single <candidates> root. Each candidate must be "
+                    "independent and safe to apply from the same baseline."
+                ),
+            }
+        return {
+            "role": "system",
+            "content": (
+                "Candidate queue mode is enabled. Output strict JSON with a top-level "
+                '"candidates" array, not a top-level "changes" array. Example: '
+                '{"candidates":[{"id":"1","reason":"short","changes":[{"path":"file.py",'
+                '"target":"exact text","replacement":"new text","reason":"short"}]}]}. '
+                "Each candidate must be independent and safe to apply from the same baseline."
+            ),
+        }
 
     async def test(self) -> None:
         self.state.test_results = await self._run_test_commands()
@@ -652,17 +671,42 @@ class MicroAgent:
         try:
             return self._parse_decision(output, schema)
         except JsonValidationError as exc:
+            self._record_raw_model_output(role, "initial", output, exc)
             try:
                 repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
             except Exception as repair_exc:
                 raise JsonValidationError(
                     f"{role} repair model call failed: {type(repair_exc).__name__}: {repair_exc}"
                 ) from repair_exc
-            return self._parse_decision(repaired, schema)
+            try:
+                return self._parse_decision(repaired, schema)
+            except JsonValidationError as repair_parse_exc:
+                self._record_raw_model_output(role, "repair", repaired, repair_parse_exc)
+                raise
+
+    def _record_raw_model_output(
+        self, role: str, phase: str, output: str, error: Exception
+    ) -> None:
+        if not self.config.get("workflow", {}).get("log_raw_model_outputs"):
+            return
+        root = self.state.repo_root / self.config.get("workflow", {}).get(
+            "raw_model_output_dir", ".local_micro_agent/raw_model_outputs"
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = int(time.time() * 1000)
+        path = root / f"{stamp}-{role}-{phase}.txt"
+        path.write_text(
+            f"error: {error}\n\n--- output ---\n{output}",
+            encoding="utf-8",
+        )
+        self.state.notes.append(f"Raw model output logged: {path.relative_to(self.state.repo_root)}")
 
     @staticmethod
     def _parse_decision(output: str, schema: type):
-        data = parse_json_object(output)
+        if schema is CodeDecision and "<candidates" in output:
+            data = parse_xml_candidates(output)
+        else:
+            data = parse_json_object(output)
         if schema is ReadDecision:
             require_keys(data, ["files"])
             return ReadDecision(files=[str(path) for path in data["files"]], reason=str(data.get("reason", "")))
