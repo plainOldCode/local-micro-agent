@@ -132,6 +132,9 @@ class MicroAgent:
         if self.state.scratch.get("applied_changes", 0) == 0:
             failed = True
             self.state.notes.append("No code changes were applied")
+        if self.config.get("workflow", {}).get("deterministic_test_decision"):
+            self.state.current = AgentStateName.FAILED if failed else AgentStateName.DONE
+            return
 
         decision = await self._json_call("tester", test_prompt(self.state), TestDecision)
         if not failed and decision.status == "pass":

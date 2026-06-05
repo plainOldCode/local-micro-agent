@@ -52,6 +52,7 @@ workflow:
   #     target: "old text"
   #     replacement: "new text"
   #     reason: "deterministic candidate"
+  # deterministic_test_decision: true
   allowed_file_globs:
     - "src/**/*.py"
     - "tests/**/*.py"
