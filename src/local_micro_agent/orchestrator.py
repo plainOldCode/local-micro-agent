@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import re
 import tempfile
@@ -219,10 +220,27 @@ class MicroAgent:
         best_applied = 0
 
         for candidate in candidates:
+            duplicate_fingerprint = self._rejected_candidate_fingerprint(candidate)
+            if duplicate_fingerprint is not None:
+                self.state.notes.append(
+                    "Candidate "
+                    f"{candidate.candidate_id} rejected: forbidden repeated pattern "
+                    f"{duplicate_fingerprint}"
+                )
+                self._append_candidate_history(
+                    candidate,
+                    status="rejected_repeated_pattern",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             await self._restore_snapshot(baseline_snapshot)
             applied = await self._apply_changes(candidate.changes, allowed)
             if applied == 0:
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: no changes applied")
+                self._remember_rejected_candidate(candidate)
                 self._append_candidate_history(
                     candidate,
                     status="rejected_no_changes",
@@ -253,6 +271,7 @@ class MicroAgent:
                 failed=failed,
             )
             if failed or not improved:
+                self._remember_rejected_candidate(candidate)
                 continue
 
             iteration_best_metric = metric
@@ -282,6 +301,48 @@ class MicroAgent:
             failed=False,
         )
         self.state.notes.append(f"Candidate queue accepted metric={iteration_best_metric}")
+
+    def _candidate_novelty_gate_enabled(self) -> bool:
+        return bool(self.config.get("workflow", {}).get("candidate_novelty_gate"))
+
+    def _rejected_candidate_fingerprint(self, candidate: CodeCandidate) -> str | None:
+        if not self._candidate_novelty_gate_enabled():
+            return None
+        fingerprint = self._candidate_fingerprint(candidate)
+        seen = self.state.scratch.setdefault("rejected_candidate_fingerprints", [])
+        if fingerprint in seen:
+            return fingerprint
+        return None
+
+    def _remember_rejected_candidate(self, candidate: CodeCandidate) -> None:
+        if not self._candidate_novelty_gate_enabled():
+            return
+        fingerprint = self._candidate_fingerprint(candidate)
+        seen = self.state.scratch.setdefault("rejected_candidate_fingerprints", [])
+        if fingerprint not in seen:
+            seen.append(fingerprint)
+
+    def _candidate_fingerprint(self, candidate: CodeCandidate) -> str:
+        payload = {
+            "reason": self._normalize_fingerprint_text(candidate.reason),
+            "changes": [
+                {
+                    "path": change.path,
+                    "reason": self._normalize_fingerprint_text(change.reason),
+                    "target": self._normalize_fingerprint_text(change.target or ""),
+                    "replacement": self._normalize_fingerprint_text(change.replacement or ""),
+                    "patch": self._normalize_fingerprint_text(change.patch or ""),
+                    "content": self._normalize_fingerprint_text(change.content or ""),
+                }
+                for change in candidate.changes
+            ],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _normalize_fingerprint_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip()).lower()
 
     async def _run_test_commands(self) -> list[TestResult]:
         commands = self.config.get("workflow", {}).get("test_commands", [])
@@ -623,6 +684,7 @@ class MicroAgent:
             "applied": applied,
             "failed": failed,
             "reason": candidate.reason,
+            "fingerprint": self._candidate_fingerprint(candidate),
             "changes": self._summarize_changes(candidate.changes),
         }
         with path.open("a") as handle:

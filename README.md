@@ -43,6 +43,12 @@ invalid or no-op candidate. Candidate history can also be persisted as JSONL
 with `workflow.candidate_history_path` so accepted/rejected directions survive
 across runs.
 
+For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
+Rejected candidate fingerprints are then remembered inside the current run,
+and an identical later candidate is rejected before tests run. The rejection is
+fed back as `forbidden repeated pattern`, which makes retry loops spend budget
+on new search directions instead of repeatedly testing the same failed patch.
+
 For local models that struggle to JSON-escape multi-line code snippets, set
 `workflow.code_output_format="xml"`. In XML mode the CODE node emits raw
 `<search>` and `<replace>` blocks inside `<candidates>` instead of putting

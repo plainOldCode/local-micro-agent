@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from local_micro_agent.orchestrator import MicroAgent
+from local_micro_agent.orchestrator import CodeCandidate, MicroAgent
 from local_micro_agent.prompts import code_prompt, reflect_prompt
-from local_micro_agent.state import AgentState, AgentStateName
+from local_micro_agent.state import AgentState, AgentStateName, CodeChange
 
 
 class _BadJsonModel:
@@ -489,6 +489,60 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn('"candidate_id": "slow"', history)
             self.assertIn('"candidate_id": "fast"', history)
             self.assertIn('"status": "accepted"', history)
+
+    def test_candidate_novelty_gate_rejects_repeated_failed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 120')\""],
+                    "candidate_queue": True,
+                    "candidate_novelty_gate": True,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            agent = MicroAgent(config, state)
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            candidate = CodeCandidate(
+                "repeat",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="same failed idea",
+                        target="value = 'old'\n",
+                        replacement="value = 'slow'\n",
+                    )
+                ],
+                "same failed idea",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+            first_notes = "\n".join(state.notes)
+            self.assertIn("Candidate repeat applied=1 metric=120", first_notes)
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+
+            asyncio.run(evaluate_once())
+            second_notes = "\n".join(state.notes)
+            self.assertIn("forbidden repeated pattern", second_notes)
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_repeated_pattern"', history)
 
     def test_context_symbols_limit_code_prompt_to_requested_python_symbols(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
