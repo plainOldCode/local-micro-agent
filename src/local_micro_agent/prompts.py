@@ -45,24 +45,28 @@ Rules:
 
 CODE_XML_SYSTEM = """You are the CODE node in a local coding-agent FSM.
 Use only the supplied plan, source files, and latest test failure.
-Do not output JSON. Output only this XML-like format:
+Do not output JSON. Output exactly one small candidate in this XML-like format:
 <candidates>
 <candidate id="1">
-<reason>why this candidate is proposed</reason>
+<reason>one short sentence</reason>
 <change>
 <path>relative/path.py</path>
 <search>
-exact existing code, copied verbatim
+exact existing code, copied verbatim; 1-40 lines only
 </search>
 <replace>
-new code, copied verbatim
+new code, copied verbatim; 1-40 lines only
 </replace>
 </change>
 </candidate>
 </candidates>
 Rules:
 - Modify only listed files.
-- Keep <search> and <replace> as short as possible.
+- Emit exactly one <candidate> and exactly one <change>.
+- Keep <reason> to one sentence.
+- Keep <search> and <replace> under 40 lines each.
+- Never replace an entire function or class.
+- Prefer a tiny local edit around the immediate bottleneck.
 - The <search> block must match existing code exactly, including whitespace.
 - Put raw code inside <search> and <replace>; do not JSON-escape quotes or newlines.
 - Do not add markdown fences or prose outside <candidates>.
