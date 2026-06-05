@@ -97,7 +97,11 @@ class MicroAgent:
         if seeded_changes:
             decision = CodeDecision(changes=[CodeChange.from_dict(c) for c in seeded_changes])
         else:
-            decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
+            try:
+                decision = await self._json_call("coder", code_prompt(self.state), CodeDecision)
+            except JsonValidationError as exc:
+                self.state.notes.append(f"Coder output rejected after repair: {exc}")
+                decision = CodeDecision(changes=[])
         self.state.proposed_changes = decision.changes
         self.state.scratch["applied_changes"] = 0
         allowed = self._writable_files()

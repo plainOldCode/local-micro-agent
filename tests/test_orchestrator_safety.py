@@ -9,6 +9,16 @@ from local_micro_agent.orchestrator import MicroAgent
 from local_micro_agent.state import AgentState, AgentStateName
 
 
+class _BadJsonModel:
+    async def chat(self, messages):
+        return "{}"
+
+
+class _BadJsonModelManager:
+    def get(self, role):
+        return _BadJsonModel()
+
+
 def run_agent(repo: Path, workflow: dict) -> AgentState:
     config = {
         "models": {},
@@ -150,6 +160,33 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(result.current, AgentStateName.FAILED)
             self.assertEqual(result.loop_count, 1)
             self.assertEqual(target.read_text(), "value = 'old'\n")
+
+    def test_bad_coder_json_is_rejected_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {"default": "bad"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": [],
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                    "retry_rejected_candidates": True,
+                    "max_code_test_loops": 2,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=2)
+            agent = MicroAgent(config, state)
+            agent.models = _BadJsonModelManager()
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual(result.loop_count, 1)
+            self.assertIn("Coder output rejected after repair", "\n".join(result.notes))
 
 
 if __name__ == "__main__":
