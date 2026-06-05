@@ -84,7 +84,8 @@ class MicroAgent:
             self.state.current = AgentStateName.READ
             return
 
-        output = await self.models.get("planner").chat(plan_prompt(self.state))
+        project_context = await self._load_project_context()
+        output = await self.models.get("planner").chat(plan_prompt(self.state, project_context))
         self.state.plan_markdown = output.strip()
         self.state.current = AgentStateName.READ
 
@@ -375,6 +376,45 @@ class MicroAgent:
         return bool(workflow.get("retry_rejected_candidates")) and (
             self.state.loop_count + 1 < self.state.max_loops
         )
+
+    async def _load_project_context(self) -> str:
+        files = self._project_context_files()
+        if not files:
+            return ""
+        limit = int(self.config.get("workflow", {}).get("project_context_char_limit", 12000))
+        blocks = []
+        for rel_path in files:
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / rel_path))
+            except FileNotFoundError:
+                self.state.notes.append(f"Project context file not found: {rel_path}")
+                continue
+            blocks.append(f"### {rel_path}\n```text\n{self._slice_text(content, limit)}\n```")
+        if blocks:
+            self.state.notes.append(
+                "Loaded project context: " + ", ".join(files)
+            )
+        return "\n\n".join(blocks)
+
+    def _project_context_files(self) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        configured = workflow.get("project_context_files")
+        if isinstance(configured, list) and configured:
+            return [str(path) for path in configured]
+        if workflow.get("readme_first", True) is False:
+            return []
+        for name in ("README.md", "Readme.md", "readme.md", "README", "README.txt"):
+            if (self.state.repo_root / name).exists():
+                return [name]
+        return []
+
+    @staticmethod
+    def _slice_text(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        head = limit // 2
+        tail = limit - head
+        return text[:head] + "\n[...truncated...]\n" + text[-tail:]
 
     def _context_for_file(self, rel_path: str, content: str) -> str:
         symbols_by_path = self.config.get("workflow", {}).get("context_symbols")

@@ -16,6 +16,10 @@ commercial APIs behind an OpenAI-compatible endpoint.
 
 Runtime dependencies: none outside the Python standard library.
 
+By default, the PLAN node reads a root `README.md` / `Readme.md` first and
+passes it as project context. Override that with `workflow.project_context_files`
+or disable it with `workflow.readme_first=false`.
+
 For narrow Python edits, `workflow.context_symbols` can replace full-file
 CODE context with exact function/class excerpts:
 

@@ -45,6 +45,26 @@ class _StaticModelManager:
         return _StaticModel(self.output)
 
 
+class _RoleModel:
+    def __init__(self, outputs: dict[str, str], seen: dict[str, list[list[dict[str, str]]]], role: str):
+        self.outputs = outputs
+        self.seen = seen
+        self.role = role
+
+    async def chat(self, messages):
+        self.seen.setdefault(self.role, []).append(messages)
+        return self.outputs[self.role]
+
+
+class _RoleModelManager:
+    def __init__(self, outputs: dict[str, str]):
+        self.outputs = outputs
+        self.seen: dict[str, list[list[dict[str, str]]]] = {}
+
+    def get(self, role):
+        return _RoleModel(self.outputs, self.seen, role)
+
+
 def run_agent(repo: Path, workflow: dict) -> AgentState:
     config = {
         "models": {},
@@ -157,6 +177,48 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(result.current, AgentStateName.FAILED)
             self.assertEqual(result.scratch["applied_changes"], 0)
             self.assertIn("Replacement is a no-op", "\n".join(result.notes))
+
+    def test_plan_reads_readme_as_project_context_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "Readme.md").write_text("Do not change tests. Read target.py.\n")
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=1)
+            agent = MicroAgent(config, state)
+            models = _RoleModelManager(
+                {
+                    "planner": "plan",
+                    "coder": (
+                        '{"changes":[{"path":"target.py","target":"value = '
+                        "'old'\\n\",\"replacement\":\"value = 'new'\\n\"}]}"
+                    ),
+                    "tester": '{"status":"pass"}',
+                }
+            )
+            # The planner is called once for PLAN and once for READ.
+            models.outputs["planner"] = "plan"
+            agent.models = models
+
+            async def plan_only():
+                await agent.mcp.start()
+                try:
+                    await agent.plan()
+                    self.assertIn("README", models.seen["planner"][0][1]["content"])
+                    self.assertIn("Do not change tests", models.seen["planner"][0][1]["content"])
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(plan_only())
 
     def test_metric_accepts_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

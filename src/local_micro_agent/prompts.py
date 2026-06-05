@@ -37,10 +37,13 @@ Output strict JSON:
 Do not include markdown or prose outside JSON."""
 
 
-def plan_prompt(state: AgentState) -> list[dict[str, str]]:
+def plan_prompt(state: AgentState, project_context: str = "") -> list[dict[str, str]]:
+    user_content = state.user_request
+    if project_context:
+        user_content = f"{state.user_request}\n\nProject context:\n{project_context}"
     return [
         {"role": "system", "content": PLAN_SYSTEM},
-        {"role": "user", "content": state.user_request},
+        {"role": "user", "content": user_content},
     ]
 
 
