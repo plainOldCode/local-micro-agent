@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -1246,6 +1247,41 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("def keep_me", result.file_context[0].content)
             self.assertNotIn("hide_me", result.file_context[0].content)
             self.assertIn("Using symbol context", "\n".join(result.notes))
+
+    def test_validated_todo_status_is_not_downgraded_by_later_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-vector_unroll_lane",
+                "status": "validated",
+                "attempts": 1,
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            agent._update_todo_status_from_attempt(
+                {
+                    "todo_id": "todo-001-vector_unroll_lane",
+                    "status": "rejected_axis_drift",
+                }
+            )
+
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            active = json.loads((artifact_dir / "active_todo.json").read_text())
+            self.assertEqual(updated["todos"][0]["status"], "validated")
+            self.assertEqual(active["status"], "validated")
+            self.assertEqual(updated["todos"][0]["attempts"], 2)
 
 
 if __name__ == "__main__":

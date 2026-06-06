@@ -1805,6 +1805,8 @@ class MicroAgent:
             next_status = "attempted"
         for todo in todos:
             if isinstance(todo, dict) and todo.get("todo_id") == attempt.get("todo_id"):
+                if todo.get("status") == "validated" and next_status != "validated":
+                    next_status = "validated"
                 todo["status"] = next_status
                 todo["last_attempt"] = attempt
                 todo.setdefault("attempts", 0)
