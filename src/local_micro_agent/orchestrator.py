@@ -322,6 +322,7 @@ class MicroAgent:
             family_key = str(record.get("family_key", "")).strip()
             if family_key:
                 family_keys.add(family_key)
+                family_keys.add(self._normalize_strategy_axis(family_key))
             family_keys.update(self._tactic_family_aliases(context))
             axis = self._normalize_strategy_axis(str(record.get("strategy_axis", "")))
             if axis:
@@ -443,6 +444,7 @@ class MicroAgent:
         family_key = self._tactic_family_key(text)
         if family_key:
             aliases.add(family_key)
+            aliases.add(self._normalize_strategy_axis(family_key))
         if not include_axes:
             return aliases
         for axis in re.findall(
@@ -831,6 +833,26 @@ class MicroAgent:
                 )
                 continue
 
+            family_rejection = self._candidate_family_contract_rejection(candidate)
+            if family_rejection is not None:
+                status, note = family_rejection
+                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             duplicate_fingerprint = self._rejected_candidate_fingerprint(candidate)
             if duplicate_fingerprint is not None:
                 self.state.notes.append(
@@ -1082,6 +1104,7 @@ class MicroAgent:
         cooled_axes = self._current_cooled_axes()
         payload = {
             "required_strategy_axis": required_axis,
+            "required_family_key": self._selected_tactic_family_for_current_loop(),
             "allowed_strategy_axes": self._allowed_strategy_axes(),
             "cooled_strategy_axes": cooled_axes,
             "known_strategy_axes": self._strategy_axis_pool(),
@@ -1091,7 +1114,10 @@ class MicroAgent:
                 "Set candidate strategy_axis exactly to required_strategy_axis. "
                 "In XML mode include <strategy_axis>axis</strategy_axis> inside each "
                 "<candidate>. Candidate reason and change reasons must substantively "
-                "target required_strategy_axis, or the candidate is rejected as axis drift."
+                "target required_strategy_axis. If required_family_key is set, candidate "
+                "reason and change reasons must stay on that selected tactic family and "
+                "must not re-label a forbidden family under the selected axis. Drift is "
+                "rejected before changes are applied."
             ),
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -1333,6 +1359,36 @@ class MicroAgent:
             return ("rejected_cooled_axis", f"cooled strategy_axis {declared}")
         return None
 
+    def _candidate_family_contract_rejection(
+        self, candidate: CodeCandidate
+    ) -> tuple[str, str] | None:
+        selected_family = self._selected_tactic_family_for_current_loop()
+        if not selected_family:
+            return None
+        candidate_families = self._candidate_reason_family_aliases(candidate)
+        if selected_family in candidate_families:
+            return None
+        failed_families = self._failed_tactic_family_keys() | set(
+            self._skipped_brainstorm_family_aliases()
+        )
+        drift_matches = sorted(candidate_families & failed_families)
+        if not drift_matches:
+            return None
+        return (
+            "rejected_family_drift",
+            "candidate reason targets failed family "
+            f"{', '.join(drift_matches)} instead of selected family_key {selected_family}",
+        )
+
+    def _candidate_reason_family_aliases(self, candidate: CodeCandidate) -> set[str]:
+        reason_parts = [candidate.reason, *(change.reason for change in candidate.changes)]
+        reason_text = "\n".join(reason_parts)
+        return {
+            self._normalize_strategy_axis(alias)
+            for alias in self._tactic_family_aliases(reason_text, include_axes=False)
+            if self._normalize_strategy_axis(alias)
+        }
+
     @staticmethod
     def _normalize_strategy_axis(axis: str) -> str:
         return re.sub(r"[^a-z0-9_]+", "_", axis.strip().lower()).strip("_")
@@ -1385,6 +1441,15 @@ class MicroAgent:
         if axis in self._strategy_axis_pool():
             return axis
         return None
+
+    def _selected_tactic_family_for_current_loop(self) -> str | None:
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        if not isinstance(selected_tactic, dict):
+            return None
+        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+            return None
+        family_key = self._normalize_strategy_axis(str(selected_tactic.get("family_key", "")))
+        return family_key or None
 
     def _record_strategy_attempt(
         self,
@@ -1470,6 +1535,7 @@ class MicroAgent:
             "rejected",
             "rejected_cooled_axis",
             "rejected_missing_axis",
+            "rejected_family_drift",
             "rejected_no_changes",
             "rejected_repeated_pattern",
             "rejected_unknown_axis",
@@ -2184,6 +2250,7 @@ class MicroAgent:
             "fingerprint": self._candidate_fingerprint(candidate),
             "strategy_axis": candidate.strategy_axis,
             "strategy_axes": self._candidate_strategy_axes(candidate),
+            "family_aliases": sorted(self._candidate_reason_family_aliases(candidate)),
             "changes": self._summarize_changes(candidate.changes),
             "todo_id": self._active_todo_id(),
         }

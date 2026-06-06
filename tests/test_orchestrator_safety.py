@@ -1341,6 +1341,76 @@ class OrchestratorSafetyTests(unittest.TestCase):
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"status": "rejected_axis_drift"', history)
 
+    def test_family_contract_rejects_selected_tactic_drift_to_failed_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "strategy_axis": "memory_store_layout",
+                        "family_key": "store_address_reuse",
+                        "context": "Phase 4 store address reuse",
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["memory_store_layout"],
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "failed_tactics_path": ".local_micro_agent/failed_tactics.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            state.scratch["required_strategy_axis"] = "memory_store_layout"
+            state.scratch["selected_tactic"] = {
+                "strategy_axis": "memory_store_layout",
+                "family_key": "double_buffer_scratch_swap",
+                "text": "family_key: double_buffer_scratch_swap",
+            }
+            state.scratch["selected_tactic_loop"] = 0
+            candidate = CodeCandidate(
+                "family-drift",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="Phase 4 store address reuse",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Phase 4 store address reuse",
+                strategy_axis="memory_store_layout",
+            )
+            agent = MicroAgent(config, state)
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            self.assertIn("instead of selected family_key double_buffer_scratch_swap", "\n".join(state.notes))
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_family_drift"', history)
+
     def test_axis_contract_allows_required_axis_with_secondary_keywords(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
