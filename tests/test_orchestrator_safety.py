@@ -694,7 +694,17 @@ class OrchestratorSafetyTests(unittest.TestCase):
             state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
             state.plan_markdown = "seeded"
             state.file_context = [FileSnapshot("target.py", target.read_text())]
-            models = _RoleModelManager({"brainstorm": "1. new tactic\n2. other\n3. third"})
+            models = _RoleModelManager(
+                {
+                    "brainstorm": (
+                        "1. strategy_axis: hash_build\n"
+                        "new_axis_suggestion: new tactic\n"
+                        "Try a different hash build tactic.\n"
+                        "2. strategy_axis: phase_interleave\nother\n"
+                        "3. strategy_axis: branch_control\nthird"
+                    )
+                }
+            )
             agent = MicroAgent(config, state)
             agent.models = models
 
@@ -702,6 +712,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertEqual(state.current, AgentStateName.CODE)
             self.assertIn("new tactic", state.scratch["tactic_library"])
+            self.assertEqual(state.scratch["selected_tactic"]["strategy_axis"], "hash_build")
             joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
             self.assertIn("Recent reject summary", joined)
             self.assertIn("Known strategy axes", joined)
@@ -710,6 +721,35 @@ class OrchestratorSafetyTests(unittest.TestCase):
             tactics = repo / ".local_micro_agent" / "brainstorm_tactics.md"
             self.assertIn("new tactic", tactics.read_text())
             self.assertIn("phase retry", tactics.read_text())
+
+    def test_selected_brainstorm_tactic_sets_required_axis_for_current_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["vector_unroll_lane", "hash_build"],
+                },
+            }
+            state.scratch["selected_tactic"] = {
+                "strategy_axis": "hash_build",
+                "text": "1. strategy_axis: hash_build",
+            }
+            state.scratch["selected_tactic_loop"] = 0
+            agent = MicroAgent(config, state)
+
+            contract = agent._format_axis_contract()
+
+            self.assertIn('"required_strategy_axis": "hash_build"', contract)
+            self.assertIn('"selected_tactic"', contract)
+
+            state.loop_count = 1
+            next_contract = agent._format_axis_contract()
+            self.assertIn('"required_strategy_axis": "vector_unroll_lane"', next_contract)
 
     def test_code_prompt_includes_tactic_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

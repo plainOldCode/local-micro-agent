@@ -180,9 +180,30 @@ class MicroAgent:
         brainstorm = output.strip()
         if brainstorm:
             self.state.scratch["tactic_library"] = brainstorm
+            selected_tactic = self._select_brainstorm_tactic(brainstorm)
+            if selected_tactic:
+                self.state.scratch["selected_tactic"] = selected_tactic
+                self.state.scratch["selected_tactic_loop"] = self.state.loop_count
+                self.state.notes.append(
+                    "Selected brainstorm tactic axis: "
+                    f"{selected_tactic.get('strategy_axis')}"
+                )
             self.state.scratch["last_brainstorm_loop"] = self.state.loop_count
             self._persist_brainstorm_tactics(brainstorm, reject_summary)
             self.state.notes.append("Brainstorm tactics added for next CODE attempt")
+
+    def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
+        known_axes = set(self._strategy_axis_pool())
+        cooled_axes = set(self._current_cooled_axes())
+        blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
+        for block in blocks:
+            match = re.search(r"strategy_axis\s*:\s*`?([a-zA-Z0-9_ -]+)`?", block)
+            if not match:
+                continue
+            axis = self._normalize_strategy_axis(match.group(1))
+            if axis in known_axes and axis not in cooled_axes:
+                return {"strategy_axis": axis, "text": block.strip()}
+        return None
 
     def _persist_brainstorm_tactics(self, brainstorm: str, reject_summary: str) -> None:
         path = self._workflow_artifact_path(
@@ -601,6 +622,7 @@ class MicroAgent:
             "cooled_strategy_axes": cooled_axes,
             "known_strategy_axes": self._strategy_axis_pool(),
             "required_axis_guidance": self._strategy_axis_guidance(required_axis),
+            "selected_tactic": self.state.scratch.get("selected_tactic", {}),
             "output_requirement": (
                 "Set candidate strategy_axis exactly to required_strategy_axis. "
                 "In XML mode include <strategy_axis>axis</strategy_axis> inside each "
@@ -760,6 +782,14 @@ class MicroAgent:
         allowed = self._allowed_strategy_axes()
         if not allowed:
             return "general_edit"
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        selected_loop = self.state.scratch.get("selected_tactic_loop")
+        if (
+            isinstance(selected_tactic, dict)
+            and selected_loop == self.state.loop_count
+            and selected_tactic.get("strategy_axis") in allowed
+        ):
+            return str(selected_tactic["strategy_axis"])
         memory = self.state.scratch.get("adaptive_search_memory")
         if not isinstance(memory, dict):
             memory = self._adaptive_search_memory_from_history()
@@ -1294,6 +1324,14 @@ class MicroAgent:
         tactic_library = self.state.scratch.get("tactic_library")
         if not isinstance(tactic_library, str) or not tactic_library.strip():
             return ""
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        if isinstance(selected_tactic, dict) and selected_tactic:
+            return (
+                "Selected tactic for this CODE attempt:\n"
+                + json.dumps(selected_tactic, ensure_ascii=False, indent=2)
+                + "\n\nFull tactic library:\n"
+                + tactic_library.strip()
+            )
         return tactic_library.strip()
 
     def _format_recent_reject_summary(self) -> str:
