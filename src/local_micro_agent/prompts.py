@@ -30,6 +30,16 @@ Output exactly 1-3 concise Markdown bullets:
 - what must change in the next CODE attempt
 - what pattern must not be repeated"""
 
+BRAINSTORM_SYSTEM = """You are the BRAINSTORM node in a local coding-agent FSM.
+The search is stuck in a local minimum. Do not write code.
+Output exactly 3 numbered tactics in Markdown.
+Each tactic must:
+- be a different algorithmic or architectural paradigm
+- avoid repeating the rejected patterns
+- name the most relevant strategy_axis
+- include one concrete implementation hook in the supplied source
+Keep each tactic to 2 short sentences."""
+
 CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
 Use only the supplied plan, source files, and latest test failure.
 Output strict JSON:
@@ -113,6 +123,29 @@ def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[di
     ]
 
 
+def brainstorm_prompt(
+    state: AgentState, reject_summary: str, cooled_axes: list[str], feedback_notes_limit: int = 8
+) -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    return [
+        {"role": "system", "content": BRAINSTORM_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}\n\n"
+                f"Current best/test summary:\n{state.latest_test_summary()}\n\n"
+                f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
+                f"Recent reject summary:\n{reject_summary}\n\n"
+                f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
+            ),
+        },
+    ]
+
+
 def code_prompt(
     state: AgentState, feedback_notes_limit: int = 12, output_format: str = "json"
 ) -> list[dict[str, str]]:
@@ -155,6 +188,7 @@ PROMPT_MARKDOWN = {
     "PLAN": PLAN_SYSTEM,
     "READ": READ_SYSTEM,
     "REFLECT": REFLECT_SYSTEM,
+    "BRAINSTORM": BRAINSTORM_SYSTEM,
     "CODE": CODE_SYSTEM,
     "CODE_XML": CODE_XML_SYSTEM,
     "TEST": TEST_SYSTEM,

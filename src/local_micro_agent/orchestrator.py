@@ -14,7 +14,15 @@ from typing import Any
 
 from .mcp_client import McpServerSpec, McpToolClient
 from .models import ModelManager
-from .prompts import PROMPT_MARKDOWN, code_prompt, plan_prompt, read_prompt, reflect_prompt, test_prompt
+from .prompts import (
+    PROMPT_MARKDOWN,
+    brainstorm_prompt,
+    code_prompt,
+    plan_prompt,
+    read_prompt,
+    reflect_prompt,
+    test_prompt,
+)
 from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
 from .validators import (
     JsonValidationError,
@@ -126,6 +134,10 @@ class MicroAgent:
         self.state.current = AgentStateName.CODE
 
     async def reflect(self) -> None:
+        if self._should_brainstorm():
+            await self._brainstorm()
+            self.state.current = AgentStateName.CODE
+            return
         feedback_notes_limit = int(
             self.config.get("workflow", {}).get("feedback_notes_limit", 12)
         )
@@ -144,6 +156,31 @@ class MicroAgent:
             self.state.scratch["reflection"] = reflection
             self.state.notes.append("Reflect summary added for next CODE attempt")
         self.state.current = AgentStateName.CODE
+
+    async def _brainstorm(self) -> None:
+        reject_summary = self._format_recent_reject_summary()
+        feedback_notes_limit = int(
+            self.config.get("workflow", {}).get("brainstorm_feedback_notes_limit", 8)
+        )
+        try:
+            output = await self.models.get("brainstorm").chat(
+                brainstorm_prompt(
+                    self.state,
+                    reject_summary=reject_summary,
+                    cooled_axes=self._current_cooled_axes(),
+                    feedback_notes_limit=feedback_notes_limit,
+                )
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"Brainstorm model call failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        brainstorm = output.strip()
+        if brainstorm:
+            self.state.scratch["tactic_library"] = brainstorm
+            self.state.scratch["last_brainstorm_loop"] = self.state.loop_count
+            self.state.notes.append("Brainstorm tactics added for next CODE attempt")
 
     async def code(self) -> None:
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")
@@ -186,6 +223,19 @@ class MicroAgent:
                                 "explicitly requires them; prefer under-explored axes and explain "
                                 "the chosen axis in the candidate reason.\n"
                                 f"{search_memory}"
+                            ),
+                        },
+                    ]
+                tactic_library = self._format_tactic_library()
+                if tactic_library:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Stagnation brainstorm tactics follow. Prefer one tactic that "
+                                "matches the required strategy axis and has not been rejected.\n"
+                                f"{tactic_library}"
                             ),
                         },
                     ]
@@ -1209,6 +1259,47 @@ class MicroAgent:
             and self.state.loop_count + 1 < self.state.max_loops
         )
 
+    def _should_brainstorm(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        threshold = int(workflow.get("brainstorm_after_rejections", 0) or 0)
+        if threshold <= 0:
+            return False
+        if self.state.scratch.get("last_brainstorm_loop") == self.state.loop_count:
+            return False
+        records = self._candidate_history_records(limit=max(threshold, 1))
+        if len(records) < threshold:
+            return False
+        return all(str(record.get("status", "")).startswith("rejected") for record in records)
+
+    def _format_tactic_library(self) -> str:
+        tactic_library = self.state.scratch.get("tactic_library")
+        if not isinstance(tactic_library, str) or not tactic_library.strip():
+            return ""
+        return tactic_library.strip()
+
+    def _format_recent_reject_summary(self) -> str:
+        limit = int(self.config.get("workflow", {}).get("brainstorm_reject_summary_limit", 8))
+        records = self._candidate_history_records(limit=limit)
+        if not records:
+            return "No candidate history yet."
+        summary = []
+        for record in records:
+            status = record.get("status")
+            axis = record.get("strategy_axis") or ""
+            axes = record.get("strategy_axes") or []
+            reason = str(record.get("reason") or "")[:240]
+            metric = record.get("metric")
+            summary.append(
+                {
+                    "status": status,
+                    "metric": metric,
+                    "strategy_axis": axis,
+                    "strategy_axes": axes,
+                    "reason": reason,
+                }
+            )
+        return json.dumps(summary, ensure_ascii=False, indent=2)
+
     async def _persist_current_best_state(self) -> None:
         workflow = self.config.get("workflow", {})
         should_persist = (
@@ -1415,18 +1506,12 @@ class MicroAgent:
         return self.state.repo_root / candidate_path
 
     def _format_candidate_history(self) -> str:
-        path = self._candidate_history_path()
-        if path is None or not path.exists():
-            return ""
         limit = int(self.config.get("workflow", {}).get("candidate_history_limit", 20))
-        lines = path.read_text(errors="replace").splitlines()[-limit:]
-        records = []
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            records.append(
+        records = self._candidate_history_records(limit=limit)
+        if not records:
+            return ""
+        return json.dumps(
+            [
                 {
                     "status": record.get("status"),
                     "metric": record.get("metric"),
@@ -1435,10 +1520,25 @@ class MicroAgent:
                     "strategy_axes": record.get("strategy_axes", []),
                     "changes": record.get("changes", []),
                 }
-            )
-        if not records:
-            return ""
-        return json.dumps(records, ensure_ascii=False, indent=2)
+                for record in records
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def _candidate_history_records(self, limit: int) -> list[dict[str, Any]]:
+        path = self._candidate_history_path()
+        if path is None or not path.exists():
+            return []
+        lines = path.read_text(errors="replace").splitlines()[-limit:]
+        records = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            records.append(record)
+        return records
 
     def _append_candidate_history(
         self,

@@ -59,6 +59,9 @@
     "adaptive_search_axis_failure_threshold": 3,
     "adaptive_search_axis_cooldown_loops": 3,
     "adaptive_search_recent_limit": 20,
+    "brainstorm_after_rejections": 0,
+    "brainstorm_reject_summary_limit": 8,
+    "brainstorm_feedback_notes_limit": 8,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
     "feedback_notes_limit": 12

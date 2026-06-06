@@ -665,6 +665,98 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("phase_interleave", joined)
             self.assertIn("cooled_down_axes", joined)
 
+    def test_reflect_brainstorms_after_rejection_streak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            history_dir = repo / ".local_micro_agent"
+            history_dir.mkdir()
+            history = history_dir / "candidates.jsonl"
+            history.write_text(
+                "\n".join(
+                    [
+                        '{"status":"rejected_axis_drift","strategy_axis":"general_edit","strategy_axes":["phase_interleave"],"reason":"phase retry"}',
+                        '{"status":"rejected_cooled_axis","strategy_axis":"precompute_constants","strategy_axes":["precompute_constants"],"reason":"constant retry"}',
+                    ]
+                )
+                + "\n"
+            )
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "brainstorm_after_rejections": 2,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
+            state.plan_markdown = "seeded"
+            state.file_context = [FileSnapshot("target.py", target.read_text())]
+            models = _RoleModelManager({"brainstorm": "1. new tactic\n2. other\n3. third"})
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            asyncio.run(agent.reflect())
+
+            self.assertEqual(state.current, AgentStateName.CODE)
+            self.assertIn("new tactic", state.scratch["tactic_library"])
+            joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
+            self.assertIn("Recent reject summary", joined)
+            self.assertIn("phase retry", joined)
+
+    def test_code_prompt_includes_tactic_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.CODE,
+                max_loops=1,
+            )
+            state.plan_markdown = "seeded"
+            state.planned_files = ["target.py"]
+            state.file_context = []
+            state.scratch["tactic_library"] = "1. Try a tabula rasa data layout tactic."
+            models = _RoleModelManager(
+                {
+                    "coder": (
+                        '{"changes":[{"path":"target.py","target":"value = '
+                        "'old'\\n\",\"replacement\":\"value = 'new'\\n\"}]}"
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            async def code_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_once())
+
+            joined = "\n".join(message["content"] for message in models.seen["coder"][0])
+            self.assertIn("Stagnation brainstorm tactics follow", joined)
+            self.assertIn("tabula rasa data layout", joined)
+
     def test_adaptive_search_can_reject_cooled_axis_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
