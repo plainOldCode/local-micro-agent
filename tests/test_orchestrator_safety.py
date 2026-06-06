@@ -800,6 +800,110 @@ class OrchestratorSafetyTests(unittest.TestCase):
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"status": "rejected_wrong_axis"', history)
 
+    def test_axis_contract_rejects_reason_drift_from_required_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["hash_build", "phase_interleave"],
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            state.scratch["required_strategy_axis"] = "hash_build"
+            candidate = CodeCandidate(
+                "drift",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="phase interleave retry",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "phase interleave retry",
+                strategy_axis="hash_build",
+            )
+            agent = MicroAgent(config, state)
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            self.assertIn("does not substantively target required", "\n".join(state.notes))
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_axis_drift"', history)
+
+    def test_axis_contract_allows_required_axis_with_secondary_keywords(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["hash_build", "instruction_scheduling"],
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "accept_if_improved": True,
+                    "baseline_metric": 100,
+                    "metric_regex": "cycles: (\\d+)",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            state.scratch["required_strategy_axis"] = "hash_build"
+            candidate = CodeCandidate(
+                "hash",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="hash build bundle scheduling",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "hash build bundle scheduling",
+                strategy_axis="hash_build",
+            )
+            agent = MicroAgent(config, state)
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'new'\n")
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "improved"', history)
+
     def test_axis_contract_prompt_sets_required_axis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")

@@ -453,21 +453,37 @@ class MicroAgent:
 
     def _candidate_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
         declared = self._normalize_strategy_axis(candidate.strategy_axis)
-        reason_parts = [candidate.reason]
-        code_parts = []
-        for change in candidate.changes:
-            reason_parts.append(change.reason)
-            code_parts.extend(
-                [
+        reason_axes = self._candidate_reason_strategy_axes(candidate)
+        axes = [] if reason_axes == ["general_edit"] else list(reason_axes)
+        code_text = self._normalize_fingerprint_text(
+            "\n".join(
+                part
+                for change in candidate.changes
+                for part in (
                     change.path,
                     change.target or "",
                     change.replacement or "",
                     change.patch or "",
                     change.content or "",
-                ]
+                )
             )
+        )
+        if not axes:
+            axes = self._strategy_axes_for_text(code_text, self._strategy_axis_keywords())
+        if declared and declared in self._strategy_axis_pool() and declared not in axes:
+            axes.append(declared)
+        if not axes:
+            axes = ["general_edit"]
+        return sorted(set(axes))
+
+    def _candidate_reason_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
+        reason_parts = [candidate.reason, *(change.reason for change in candidate.changes)]
         reason_text = self._normalize_fingerprint_text("\n".join(reason_parts))
-        code_text = self._normalize_fingerprint_text("\n".join(code_parts))
+        axes = self._strategy_axes_for_text(reason_text, self._strategy_axis_keywords())
+        return axes or ["general_edit"]
+
+    @staticmethod
+    def _strategy_axis_keywords() -> dict[str, tuple[str, ...]]:
         keyword_axes = {
             "hash_build": ("hash", "checksum", "digest", "build_hash"),
             "phase_interleave": ("phase", "stage", "interleave", "pipeline", "round"),
@@ -491,14 +507,7 @@ class MicroAgent:
             "test_contract": ("test", "assert", "fixture", "threshold"),
             "runtime_control": ("timeout", "async", "process", "subprocess", "retry"),
         }
-        axes = self._strategy_axes_for_text(reason_text, keyword_axes)
-        if not axes:
-            axes = self._strategy_axes_for_text(code_text, keyword_axes)
-        if declared and declared in self._strategy_axis_pool() and declared not in axes:
-            axes.append(declared)
-        if not axes:
-            axes = ["general_edit"]
-        return sorted(set(axes))
+        return keyword_axes
 
     @staticmethod
     def _strategy_axes_for_text(
@@ -620,6 +629,21 @@ class MicroAgent:
                 "rejected_wrong_axis",
                 f"strategy_axis {declared} does not match required {required}",
             )
+        if isinstance(required, str) and required:
+            reason_axes = self._candidate_reason_strategy_axes(candidate)
+            if required == "general_edit":
+                if reason_axes != ["general_edit"]:
+                    return (
+                        "rejected_axis_drift",
+                        "candidate reason targets "
+                        f"{', '.join(reason_axes)} instead of required general_edit",
+                    )
+            elif required not in reason_axes:
+                return (
+                    "rejected_axis_drift",
+                    "candidate reason does not substantively target required "
+                    f"strategy_axis {required}",
+                )
         if declared in self._current_cooled_axes():
             return ("rejected_cooled_axis", f"cooled strategy_axis {declared}")
         return None
