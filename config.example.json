@@ -70,6 +70,8 @@
     "validated_patterns_path": ".local_micro_agent/validated_patterns.jsonl",
     "todo_attempt_budget": 1,
     "todo_ledger_summary_limit": 8,
+    "failed_tactic_signature_limit": 16,
+    "failed_tactic_similarity_threshold": 0.45,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
     "feedback_notes_limit": 12

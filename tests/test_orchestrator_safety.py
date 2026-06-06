@@ -797,6 +797,49 @@ class OrchestratorSafetyTests(unittest.TestCase):
             next_contract = agent._format_axis_contract()
             self.assertIn('"required_strategy_axis": "vector_unroll_lane"', next_contract)
 
+    def test_failed_tactic_signature_skips_similar_brainstorm_tactic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "context": (
+                            "Replace scalar ALU hash stages with VALU vector instructions "
+                            "to process lanes per cycle."
+                        ),
+                        "last_attempt": {
+                            "reason": (
+                                "Replace scalar ALU hash stages with VALU vector instructions "
+                                "to reduce instruction count."
+                            )
+                        },
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"failed_tactic_similarity_threshold": 0.35},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: vector_unroll_lane\n"
+                "Replace scalar ALU hash stages with VALU vector instructions.\n"
+                "2. strategy_axis: branch_control\n"
+                "Replace a bounds multiply with a bitwise mask.\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "branch_control")
+            self.assertIn("Skipped brainstorm tactic", "\n".join(agent.state.notes))
+
     def test_selected_brainstorm_tactic_overrides_cooldown_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")

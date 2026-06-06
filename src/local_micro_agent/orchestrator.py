@@ -196,6 +196,7 @@ class MicroAgent:
 
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
         known_axes = set(self._strategy_axis_pool())
+        failed_signatures = self._failed_tactic_signatures()
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for block in blocks:
             match = re.search(
@@ -206,9 +207,91 @@ class MicroAgent:
             if not match:
                 continue
             axis = self._normalize_strategy_axis(match.group(1))
-            if axis in known_axes:
-                return {"strategy_axis": axis, "text": block.strip()}
+            if axis not in known_axes:
+                continue
+            if self._matches_failed_tactic(block, failed_signatures):
+                self.state.notes.append(
+                    "Skipped brainstorm tactic similar to failed tactic signature"
+                )
+                continue
+            return {"strategy_axis": axis, "text": block.strip()}
         return None
+
+    def _failed_tactic_signatures(self) -> list[set[str]]:
+        path = self._workflow_artifact_path(
+            "failed_tactics_path", ".local_micro_agent/failed_tactics.jsonl"
+        )
+        if not path.exists():
+            return []
+        limit = int(self.config.get("workflow", {}).get("failed_tactic_signature_limit", 16) or 16)
+        signatures: list[set[str]] = []
+        for line in path.read_text(errors="replace").splitlines()[-limit:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = "\n".join(
+                str(part)
+                for part in (
+                    record.get("context", ""),
+                    (record.get("last_attempt") or {}).get("reason", "")
+                    if isinstance(record.get("last_attempt"), dict)
+                    else "",
+                )
+            )
+            signature = self._tactic_signature(text)
+            if signature:
+                signatures.append(signature)
+        return signatures
+
+    def _matches_failed_tactic(self, tactic_text: str, failed_signatures: list[set[str]]) -> bool:
+        if not failed_signatures:
+            return False
+        threshold = float(
+            self.config.get("workflow", {}).get("failed_tactic_similarity_threshold", 0.45)
+        )
+        candidate_signature = self._tactic_signature(tactic_text)
+        if not candidate_signature:
+            return False
+        return any(
+            self._signature_similarity(candidate_signature, failed_signature) >= threshold
+            for failed_signature in failed_signatures
+        )
+
+    @staticmethod
+    def _tactic_signature(text: str) -> set[str]:
+        normalized = re.sub(r"[^a-zA-Z0-9_]+", " ", text.lower())
+        stopwords = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "into",
+            "this",
+            "that",
+            "todo",
+            "tactic",
+            "strategy_axis",
+            "new_axis_suggestion",
+            "hook",
+            "modify",
+            "replace",
+            "implement",
+            "feasibility",
+            "probe",
+        }
+        return {
+            token
+            for token in normalized.split()
+            if len(token) >= 4 and token not in stopwords and not token.isdigit()
+        }
+
+    @staticmethod
+    def _signature_similarity(left: set[str], right: set[str]) -> float:
+        if not left or not right:
+            return 0.0
+        return len(left & right) / len(left | right)
 
     def _persist_brainstorm_tactics(self, brainstorm: str, reject_summary: str) -> None:
         path = self._workflow_artifact_path(
