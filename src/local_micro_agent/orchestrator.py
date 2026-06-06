@@ -174,6 +174,9 @@ class MicroAgent:
                     forbidden_family_aliases=self._forbidden_tactic_family_aliases()
                     if new_family_required
                     else [],
+                    open_novelty_lanes=self._open_novelty_lanes()
+                    if new_family_required
+                    else [],
                     new_family_required=new_family_required,
                     feedback_notes_limit=feedback_notes_limit,
                 )
@@ -249,6 +252,7 @@ class MicroAgent:
             selected = {
                 "strategy_axis": axis,
                 "family_key": self._tactic_family_key(block),
+                "novelty_lane": self._tactic_novelty_lane(block),
                 "text": block.strip(),
             }
             selection_records.append(
@@ -439,6 +443,17 @@ class MicroAgent:
             return "phase_pipeline"
         return ""
 
+    @staticmethod
+    def _tactic_novelty_lane(text: str) -> str:
+        match = re.search(
+            r"novelty[\s_*.-]*lane\s*:\s*`?([a-zA-Z0-9_-]+)`?",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return MicroAgent._normalize_strategy_axis(match.group(1))
+        return ""
+
     def _tactic_family_aliases(self, text: str, include_axes: bool = True) -> set[str]:
         aliases: set[str] = set()
         family_key = self._tactic_family_key(text)
@@ -507,6 +522,22 @@ class MicroAgent:
             or 0
         )
         return threshold > 0 and self._brainstorm_all_skipped_streak() >= threshold
+
+    def _open_novelty_lanes(self) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        configured = workflow.get("brainstorm_open_novelty_lanes")
+        if isinstance(configured, list) and configured:
+            lanes = [str(item).strip() for item in configured if str(item).strip()]
+            if lanes:
+                return lanes
+        return [
+            "resource_pressure_reduction: reduce scratch/register/temp lifetime pressure without changing the high-level algorithm",
+            "control_or_guard_lowering: change branch, mask, select, or bounds handling with one local feasibility probe",
+            "dependency_or_latency_hiding: move independent work across a narrow dependency boundary to hide load or producer latency",
+            "layout_or_tiling_change: alter data, scratch, lane, or store layout in a small reversible way",
+            "encoding_or_issue_pressure: reduce instruction count, slot conflicts, or bundle pressure without a broad rewrite",
+            "specialization_or_case_split: exploit a stable invariant, constant, phase, lane, or boundary case with a narrow edit",
+        ]
 
     def _brainstorm_all_skipped_streak(self) -> int:
         path = self._workflow_artifact_path(

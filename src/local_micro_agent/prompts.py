@@ -37,6 +37,8 @@ Each tactic must:
 - be a different algorithmic or architectural paradigm
 - avoid repeating the rejected patterns
 - name exactly one strategy_axis from the supplied Known strategy axes
+- if Open novelty lanes are provided, include one novelty_lane line copied from
+  those lanes before choosing the family_key
 - include one family_key line for the tactic family, such as valu_vectorization,
   hash_constant_fold, store_address_reuse, list_scheduler_rewrite, branch_mask,
   phase_pipeline, memory_cache_layout, hash_reorder, or unroll_factor_change
@@ -136,6 +138,7 @@ def brainstorm_prompt(
     known_axes: list[str],
     todo_ledger_summary: str = "",
     forbidden_family_aliases: list[str] | None = None,
+    open_novelty_lanes: list[str] | None = None,
     new_family_required: bool = False,
     feedback_notes_limit: int = 8,
 ) -> list[dict[str, str]]:
@@ -155,6 +158,8 @@ def brainstorm_prompt(
                 f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
                 "Forbidden family aliases:\n"
                 f"{', '.join(forbidden_family_aliases or []) if forbidden_family_aliases else 'none'}\n\n"
+                "Open novelty lanes:\n"
+                f"{chr(10).join(f'- {lane}' for lane in (open_novelty_lanes or [])) if open_novelty_lanes else 'none'}\n\n"
                 f"New family required:\n{str(new_family_required).lower()}\n\n"
                 f"Recent reject summary:\n{reject_summary}\n\n"
                 f"Durable todo ledger summary:\n{todo_ledger_summary or 'none'}\n\n"

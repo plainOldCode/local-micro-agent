@@ -805,6 +805,10 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 "workflow": {
                     "brainstorm_after_rejections": 2,
                     "brainstorm_new_family_after_all_skipped": 2,
+                    "brainstorm_open_novelty_lanes": [
+                        "layout_or_tiling_change: try a small layout probe",
+                        "control_or_guard_lowering: try a guard lowering probe",
+                    ],
                     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                 },
             }
@@ -815,6 +819,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 {
                     "brainstorm": (
                         "1. strategy_axis: memory_store_layout\n"
+                        "novelty_lane: layout_or_tiling_change\n"
                         "Try a new family under the same execution axis.\n"
                         "family_key: tree_shape_specialization\n"
                     )
@@ -829,7 +834,10 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("New family required:\ntrue", joined)
             self.assertIn("store_address_reuse", joined)
             self.assertIn("hash_reorder", joined)
+            self.assertIn("Open novelty lanes", joined)
+            self.assertIn("layout_or_tiling_change", joined)
             self.assertEqual(state.scratch["selected_tactic"]["family_key"], "tree_shape_specialization")
+            self.assertEqual(state.scratch["selected_tactic"]["novelty_lane"], "layout_or_tiling_change")
 
     def test_selected_brainstorm_tactic_sets_required_axis_for_current_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
