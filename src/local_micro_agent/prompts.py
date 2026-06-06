@@ -135,9 +135,9 @@ def code_prompt(
             "content": (
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
-                f"Latest test summary:\n{state.latest_test_summary()}\n\n"
-                f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}\n\n"
                 f"Source files:\n{source_blocks}"
+                f"\n\nLatest test summary:\n{state.latest_test_summary()}\n\n"
+                f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
                 f"{reflection_block}"
             ),
         },

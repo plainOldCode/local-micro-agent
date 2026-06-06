@@ -7,7 +7,7 @@ from pathlib import Path
 
 from local_micro_agent.orchestrator import CodeCandidate, MicroAgent
 from local_micro_agent.prompts import code_prompt, reflect_prompt
-from local_micro_agent.state import AgentState, AgentStateName, CodeChange
+from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot
 
 
 class _BadJsonModel:
@@ -922,7 +922,30 @@ class OrchestratorSafetyTests(unittest.TestCase):
             contract = agent._format_axis_contract()
 
             self.assertIn('"required_strategy_axis": "vector_unroll_lane"', contract)
+            self.assertIn('"required_axis_guidance"', contract)
+            self.assertIn("per-lane or unroll-lane structure", contract)
             self.assertEqual(state.scratch["required_strategy_axis"], "vector_unroll_lane")
+
+    def test_code_prompt_keeps_source_before_dynamic_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 1\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            state.plan_markdown = "Plan text"
+            state.file_context = [FileSnapshot("target.py", "value = 1\n")]
+            state.notes.append("dynamic feedback")
+
+            user_content = code_prompt(state)[1]["content"]
+
+            self.assertLess(
+                user_content.index("Source files:"),
+                user_content.index("Latest test summary:"),
+            )
+            self.assertLess(
+                user_content.index("Latest test summary:"),
+                user_content.index("Recent agent feedback:"),
+            )
 
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

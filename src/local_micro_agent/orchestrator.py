@@ -531,12 +531,131 @@ class MicroAgent:
             "allowed_strategy_axes": self._allowed_strategy_axes(),
             "cooled_strategy_axes": cooled_axes,
             "known_strategy_axes": self._strategy_axis_pool(),
+            "required_axis_guidance": self._strategy_axis_guidance(required_axis),
             "output_requirement": (
                 "Set candidate strategy_axis exactly to required_strategy_axis. "
-                "In XML mode include <strategy_axis>axis</strategy_axis> inside each <candidate>."
+                "In XML mode include <strategy_axis>axis</strategy_axis> inside each "
+                "<candidate>. Candidate reason and change reasons must substantively "
+                "target required_strategy_axis, or the candidate is rejected as axis drift."
             ),
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _strategy_axis_guidance(axis: str) -> dict[str, Any]:
+        guidance = {
+            "hash_build": {
+                "focus": "Change how hash-stage instructions are generated or packed.",
+                "try": [
+                    "separate independent hash operands from dependent combine ops",
+                    "reorder hash-stage temporaries to reduce RAW dependency stalls",
+                    "change hash emission shape without changing surrounding phase structure",
+                ],
+                "avoid_drift": [
+                    "store address reuse",
+                    "loop unroll changes",
+                    "branch/select rewrites",
+                ],
+            },
+            "precompute_constants": {
+                "focus": "Move repeated constant/scratch lookup work into reusable locals or tables.",
+                "try": [
+                    "cache repeated scratch_const results used in tight emission loops",
+                    "prebuild per-round or per-stage constants before the hot loop",
+                    "replace repeated literal lookup calls with indexed local arrays",
+                ],
+                "avoid_drift": [
+                    "hash operation reorder",
+                    "phase interleaving",
+                    "store layout rewrites",
+                ],
+            },
+            "branch_control": {
+                "focus": "Reduce flow/select/control instructions or make control cheaper.",
+                "try": [
+                    "replace flow select with ALU mask/arithmetic when correctness is identical",
+                    "combine guard computation with existing ALU work",
+                    "remove redundant bounds or condition checks",
+                ],
+                "avoid_drift": [
+                    "hash-stage scheduling",
+                    "store address movement",
+                    "unroll factor changes",
+                ],
+            },
+            "phase_interleave": {
+                "focus": "Change ordering between existing phases without changing the algorithm.",
+                "try": [
+                    "move independent work from adjacent phases together",
+                    "split a phase into smaller chunks to improve engine-slot mixing",
+                    "interleave only one narrow phase boundary at a time",
+                ],
+                "avoid_drift": [
+                    "new hash algorithm",
+                    "constant precompute only",
+                    "branch/select-only edits",
+                ],
+            },
+            "vector_unroll_lane": {
+                "focus": "Change per-lane or unroll-lane structure.",
+                "try": [
+                    "change lane-local temporary reuse",
+                    "alter lane order or grouping inside the current unroll factor",
+                    "specialize first or last lane handling if it removes work",
+                ],
+                "avoid_drift": [
+                    "global phase rewrite",
+                    "hash-stage-only scheduling",
+                    "branch/select-only edits",
+                ],
+            },
+            "memory_store_layout": {
+                "focus": "Change address, store, scratch, or memory layout work.",
+                "try": [
+                    "reuse already-computed store addresses when lifetime is valid",
+                    "move address computation away from store bottlenecks",
+                    "reduce scratch/register pressure around memory writes",
+                ],
+                "avoid_drift": [
+                    "hash operation reorder",
+                    "branch/select-only rewrites",
+                    "generic loop restructuring",
+                ],
+            },
+            "instruction_scheduling": {
+                "focus": "Change instruction order to reduce bundle, slot, or dependency stalls.",
+                "try": [
+                    "separate producer and consumer instructions with independent work",
+                    "mix engine types while preserving data dependencies",
+                    "schedule one dependency chain locally instead of rewriting the whole loop",
+                ],
+                "avoid_drift": [
+                    "new algorithm",
+                    "constant caching only",
+                    "memory layout only",
+                ],
+            },
+            "general_edit": {
+                "focus": "Make a small novel edit that does not fit a cooled specialist axis.",
+                "try": [
+                    "remove dead or duplicate work",
+                    "simplify a local invariant",
+                    "make one correctness-preserving local cleanup with measurable effect",
+                ],
+                "avoid_drift": [
+                    "hidden hash/phase/vector/memory rewrite",
+                    "repeating any cooled axis under a generic label",
+                ],
+            },
+        }
+        return guidance.get(
+            axis,
+            {
+                "focus": f"Make a candidate centered on {axis}.",
+                "try": ["choose one small concrete tactic for this axis"],
+                "avoid_drift": ["renaming another strategy as this axis"],
+            },
+        )
 
     def _axis_contract_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
