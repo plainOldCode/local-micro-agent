@@ -40,6 +40,8 @@ Each tactic must:
 - include one family_key line for the tactic family, such as valu_vectorization,
   hash_constant_fold, store_address_reuse, list_scheduler_rewrite, branch_mask,
   phase_pipeline, memory_cache_layout, hash_reorder, or unroll_factor_change
+- if New family required is true, every tactic must use a family_key that is not
+  listed in Forbidden family aliases and must avoid the same idea under a new name
 - put any new invented category name after "new_axis_suggestion:" instead of using it as strategy_axis
 - include one concrete implementation hook in the supplied source
 Keep each tactic to 2 short sentences."""
@@ -133,6 +135,8 @@ def brainstorm_prompt(
     cooled_axes: list[str],
     known_axes: list[str],
     todo_ledger_summary: str = "",
+    forbidden_family_aliases: list[str] | None = None,
+    new_family_required: bool = False,
     feedback_notes_limit: int = 8,
 ) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
@@ -149,6 +153,9 @@ def brainstorm_prompt(
                 f"Current best/test summary:\n{state.latest_test_summary()}\n\n"
                 f"Known strategy axes:\n{', '.join(known_axes)}\n\n"
                 f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
+                "Forbidden family aliases:\n"
+                f"{', '.join(forbidden_family_aliases or []) if forbidden_family_aliases else 'none'}\n\n"
+                f"New family required:\n{str(new_family_required).lower()}\n\n"
                 f"Recent reject summary:\n{reject_summary}\n\n"
                 f"Durable todo ledger summary:\n{todo_ledger_summary or 'none'}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"

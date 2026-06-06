@@ -163,6 +163,7 @@ class MicroAgent:
             self.config.get("workflow", {}).get("brainstorm_feedback_notes_limit", 8)
         )
         try:
+            new_family_required = self._brainstorm_new_family_required()
             output = await self.models.get("brainstorm").chat(
                 brainstorm_prompt(
                     self.state,
@@ -170,6 +171,10 @@ class MicroAgent:
                     cooled_axes=self._current_cooled_axes(),
                     known_axes=self._strategy_axis_pool(),
                     todo_ledger_summary=self._format_todo_ledger_summary(),
+                    forbidden_family_aliases=self._forbidden_tactic_family_aliases()
+                    if new_family_required
+                    else [],
+                    new_family_required=new_family_required,
                     feedback_notes_limit=feedback_notes_limit,
                 )
             )
@@ -340,7 +345,10 @@ class MicroAgent:
         failed_signatures: list[set[str]],
         failed_family_keys: set[str],
     ) -> str:
-        family_matches = sorted(self._tactic_family_aliases(tactic_text) & failed_family_keys)
+        candidate_family_aliases = self._tactic_family_aliases(tactic_text, include_axes=False)
+        if not candidate_family_aliases:
+            candidate_family_aliases = self._tactic_family_aliases(tactic_text)
+        family_matches = sorted(candidate_family_aliases & failed_family_keys)
         if family_matches:
             return "failed_family=" + ",".join(family_matches)
         threshold = float(
@@ -392,10 +400,10 @@ class MicroAgent:
 
     @staticmethod
     def _tactic_family_key(text: str) -> str:
-        normalized = re.sub(r"[^a-zA-Z0-9_]+", " ", text.lower())
-        explicit = re.search(r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?", normalized)
+        explicit = re.search(r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?", text, re.IGNORECASE)
         if explicit:
-            return explicit.group(1)
+            return explicit.group(1).strip().lower()
+        normalized = re.sub(r"[^a-zA-Z0-9_]+", " ", text.lower())
         if any(
             keyword in normalized
             for keyword in ("list scheduling", "topological", "dependency depth", "scheduler")
@@ -430,11 +438,13 @@ class MicroAgent:
             return "phase_pipeline"
         return ""
 
-    def _tactic_family_aliases(self, text: str) -> set[str]:
+    def _tactic_family_aliases(self, text: str, include_axes: bool = True) -> set[str]:
         aliases: set[str] = set()
         family_key = self._tactic_family_key(text)
         if family_key:
             aliases.add(family_key)
+        if not include_axes:
+            return aliases
         for axis in re.findall(
             r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
             text,
@@ -488,6 +498,34 @@ class MicroAgent:
         with path.open("a") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         self.state.notes.append(f"Persisted brainstorm selection: {path}")
+
+    def _brainstorm_new_family_required(self) -> bool:
+        threshold = int(
+            self.config.get("workflow", {}).get("brainstorm_new_family_after_all_skipped", 2)
+            or 0
+        )
+        return threshold > 0 and self._brainstorm_all_skipped_streak() >= threshold
+
+    def _brainstorm_all_skipped_streak(self) -> int:
+        path = self._workflow_artifact_path(
+            "brainstorm_selection_path", ".local_micro_agent/brainstorm_selection.jsonl"
+        )
+        if not path.exists():
+            return 0
+        streak = 0
+        for line in reversed(path.read_text(errors="replace").splitlines()):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                break
+            if record.get("all_skipped") is True:
+                streak += 1
+                continue
+            break
+        return streak
+
+    def _forbidden_tactic_family_aliases(self) -> list[str]:
+        return sorted(self._failed_tactic_family_keys())
 
     def _create_active_todo_from_selected_tactic(self, selected_tactic: dict[str, str]) -> None:
         axis = str(selected_tactic.get("strategy_axis", "general_edit"))

@@ -751,6 +751,63 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("hash_build", active_todo.read_text())
             self.assertIn("todo-000-hash_build", todo_plan.read_text())
 
+    def test_all_skipped_streak_requires_new_brainstorm_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            history_dir = repo / ".local_micro_agent"
+            history_dir.mkdir()
+            (history_dir / "candidates.jsonl").write_text(
+                '{"status":"rejected_brainstorm_all_failed_families"}\n'
+                '{"status":"rejected_brainstorm_all_failed_families"}\n'
+            )
+            (history_dir / "brainstorm_selection.jsonl").write_text(
+                json.dumps({"all_skipped": True}) + "\n"
+                + json.dumps({"all_skipped": True}) + "\n"
+            )
+            (history_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "strategy_axis": "memory_store_layout",
+                        "family_key": "store_address_reuse",
+                        "context": "failed store address reuse",
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "brainstorm_after_rejections": 2,
+                    "brainstorm_new_family_after_all_skipped": 2,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
+            state.plan_markdown = "seeded"
+            state.file_context = [FileSnapshot("target.py", target.read_text())]
+            models = _RoleModelManager(
+                {
+                    "brainstorm": (
+                        "1. strategy_axis: memory_store_layout\n"
+                        "Try a new family under the same execution axis.\n"
+                        "family_key: tree_shape_specialization\n"
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            asyncio.run(agent.reflect())
+
+            joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
+            self.assertIn("New family required:\ntrue", joined)
+            self.assertIn("store_address_reuse", joined)
+            self.assertEqual(state.scratch["selected_tactic"]["family_key"], "tree_shape_specialization")
+
     def test_selected_brainstorm_tactic_sets_required_axis_for_current_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")
@@ -865,8 +922,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             selected = agent._select_brainstorm_tactic(
                 "1. strategy_axis: branch_control\n"
-                "Use a fresh branch mask family not seen in old records.\n"
-                "family_key: fresh_branch_mask\n"
+                "Use a local comparison shape without declaring a family.\n"
                 "2. strategy_axis: hash_build\n"
                 "Try a different hash emission shape.\n"
                 "family_key: hash_reorder\n"
@@ -875,6 +931,39 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIsNotNone(selected)
             self.assertEqual(selected["strategy_axis"], "hash_build")
             self.assertIn("failed_family=branch_control", "\n".join(agent.state.notes))
+
+    def test_new_tactic_family_can_reuse_failed_strategy_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "context": "Old failed tactic with no family key.",
+                        "strategy_axis": "branch_control",
+                        "last_attempt": {
+                            "strategy_axis": "branch_control",
+                            "reason": "Use a compare result in a different branch-control shape.",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: branch_control\n"
+                "Use a genuinely different idea family under the same execution axis.\n"
+                "family_key: tree_depth_specialization\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "branch_control")
+            self.assertEqual(selected["family_key"], "tree_depth_specialization")
 
     def test_all_failed_brainstorm_tactics_are_persisted_and_skip_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
