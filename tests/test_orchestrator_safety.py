@@ -721,6 +721,10 @@ class OrchestratorSafetyTests(unittest.TestCase):
             tactics = repo / ".local_micro_agent" / "brainstorm_tactics.md"
             self.assertIn("new tactic", tactics.read_text())
             self.assertIn("phase retry", tactics.read_text())
+            active_todo = repo / ".local_micro_agent" / "active_todo.json"
+            todo_plan = repo / ".local_micro_agent" / "todo_plan.json"
+            self.assertIn("hash_build", active_todo.read_text())
+            self.assertIn("todo-000-hash_build", todo_plan.read_text())
 
     def test_selected_brainstorm_tactic_sets_required_axis_for_current_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -844,6 +848,11 @@ class OrchestratorSafetyTests(unittest.TestCase):
             state.planned_files = ["target.py"]
             state.file_context = []
             state.scratch["tactic_library"] = "1. Try a tabula rasa data layout tactic."
+            state.scratch["active_todo"] = {
+                "todo_id": "todo-001",
+                "strategy_axis": "hash_build",
+                "micro_goal": "probe one operation",
+            }
             models = _RoleModelManager(
                 {
                     "coder": (
@@ -865,6 +874,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
             asyncio.run(code_once())
 
             joined = "\n".join(message["content"] for message in models.seen["coder"][0])
+            self.assertIn("Active durable todo follows", joined)
+            self.assertIn("todo-001", joined)
             self.assertIn("Stagnation brainstorm tactics follow", joined)
             self.assertIn("tabula rasa data layout", joined)
 

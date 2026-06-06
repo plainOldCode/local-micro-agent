@@ -184,6 +184,7 @@ class MicroAgent:
             if selected_tactic:
                 self.state.scratch["selected_tactic"] = selected_tactic
                 self.state.scratch["selected_tactic_loop"] = self.state.loop_count
+                self._create_active_todo_from_selected_tactic(selected_tactic)
                 self.state.notes.append(
                     "Selected brainstorm tactic axis: "
                     f"{selected_tactic.get('strategy_axis')}"
@@ -220,6 +221,59 @@ class MicroAgent:
         with path.open("a") as handle:
             handle.write(record)
         self.state.notes.append(f"Persisted brainstorm tactics: {path}")
+
+    def _create_active_todo_from_selected_tactic(self, selected_tactic: dict[str, str]) -> None:
+        axis = str(selected_tactic.get("strategy_axis", "general_edit"))
+        todo_id = f"todo-{self.state.loop_count:03d}-{axis}"
+        todo = {
+            "todo_id": todo_id,
+            "parent_tactic_id": f"brainstorm-loop-{self.state.loop_count}",
+            "status": "active",
+            "strategy_axis": axis,
+            "title": f"Feasibility probe for {axis}",
+            "context": selected_tactic.get("text", ""),
+            "micro_goal": (
+                "Implement the smallest correctness-preserving feasibility probe for this "
+                "tactic. Do not attempt the full architecture migration in one patch."
+            ),
+            "implementation_hint": (
+                "Prefer one narrow edit that proves operand shape, dependency behavior, "
+                "or scheduling feasibility before expanding the tactic."
+            ),
+            "allowed_files": sorted(self._writable_files()),
+            "forbidden_patterns": [
+                "full build_kernel rewrite",
+                "changing tests or problem.py",
+                "mixing multiple independent tactics",
+            ],
+            "expected_signal": (
+                "Tests still pass and the cycle metric is present. A metric improvement is "
+                "welcome but not required for the first feasibility probe."
+            ),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "created_loop": self.state.loop_count,
+        }
+        self.state.scratch["active_todo"] = todo
+        self._persist_todo_plan(todo)
+
+    def _persist_todo_plan(self, todo: dict[str, Any]) -> None:
+        plan_path = self._workflow_artifact_path(
+            "todo_plan_path", ".local_micro_agent/todo_plan.json"
+        )
+        active_path = self._workflow_artifact_path(
+            "active_todo_path", ".local_micro_agent/active_todo.json"
+        )
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        plan = {
+            "version": 1,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "active_todo_id": todo.get("todo_id"),
+            "todos": [todo],
+        }
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+        active_path.write_text(json.dumps(todo, ensure_ascii=False, indent=2) + "\n")
+        self.state.notes.append(f"Persisted active todo: {active_path}")
 
     async def code(self) -> None:
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")
@@ -262,6 +316,20 @@ class MicroAgent:
                                 "explicitly requires them; prefer under-explored axes and explain "
                                 "the chosen axis in the candidate reason.\n"
                                 f"{search_memory}"
+                            ),
+                        },
+                    ]
+                active_todo = self._format_active_todo()
+                if active_todo:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Active durable todo follows. Implement only this todo. "
+                                "Candidate reason must preserve the todo context and should "
+                                "mention the todo_id.\n"
+                                f"{active_todo}"
                             ),
                         },
                     ]
@@ -1361,6 +1429,28 @@ class MicroAgent:
             )
         return tactic_library.strip()
 
+    def _format_active_todo(self) -> str:
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return ""
+        return json.dumps(active_todo, ensure_ascii=False, indent=2)
+
+    def _load_active_todo(self) -> dict[str, Any] | None:
+        path = self._workflow_artifact_path(
+            "active_todo_path", ".local_micro_agent/active_todo.json"
+        )
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
     def _format_recent_reject_summary(self) -> str:
         limit = int(self.config.get("workflow", {}).get("brainstorm_reject_summary_limit", 8))
         records = self._candidate_history_records(limit=limit)
@@ -1650,9 +1740,78 @@ class MicroAgent:
             "strategy_axis": candidate.strategy_axis,
             "strategy_axes": self._candidate_strategy_axes(candidate),
             "changes": self._summarize_changes(candidate.changes),
+            "todo_id": self._active_todo_id(),
         }
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        self._append_todo_attempt(record)
+
+    def _active_todo_id(self) -> str:
+        active_todo = self.state.scratch.get("active_todo")
+        if isinstance(active_todo, dict):
+            return str(active_todo.get("todo_id", ""))
+        return ""
+
+    def _append_todo_attempt(self, candidate_record: dict[str, Any]) -> None:
+        todo_id = str(candidate_record.get("todo_id", ""))
+        if not todo_id:
+            return
+        path = self._workflow_artifact_path(
+            "todo_attempts_path", ".local_micro_agent/todo_attempts.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        attempt = {
+            "ts": candidate_record.get("ts"),
+            "loop": candidate_record.get("loop"),
+            "todo_id": todo_id,
+            "candidate_id": candidate_record.get("candidate_id"),
+            "status": candidate_record.get("status"),
+            "metric": candidate_record.get("metric"),
+            "failed": candidate_record.get("failed"),
+            "strategy_axis": candidate_record.get("strategy_axis"),
+            "strategy_axes": candidate_record.get("strategy_axes"),
+            "reason": candidate_record.get("reason"),
+        }
+        with path.open("a") as handle:
+            handle.write(json.dumps(attempt, ensure_ascii=False, sort_keys=True) + "\n")
+        self._update_todo_status_from_attempt(attempt)
+
+    def _update_todo_status_from_attempt(self, attempt: dict[str, Any]) -> None:
+        plan_path = self._workflow_artifact_path(
+            "todo_plan_path", ".local_micro_agent/todo_plan.json"
+        )
+        active_path = self._workflow_artifact_path(
+            "active_todo_path", ".local_micro_agent/active_todo.json"
+        )
+        if not plan_path.exists():
+            return
+        try:
+            plan = json.loads(plan_path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            return
+        todos = plan.get("todos")
+        if not isinstance(todos, list):
+            return
+        status = str(attempt.get("status", ""))
+        if status in {"improved", "accepted"}:
+            next_status = "validated"
+        elif status.startswith("rejected"):
+            next_status = "failed"
+        else:
+            next_status = "attempted"
+        for todo in todos:
+            if isinstance(todo, dict) and todo.get("todo_id") == attempt.get("todo_id"):
+                todo["status"] = next_status
+                todo["last_attempt"] = attempt
+                todo.setdefault("attempts", 0)
+                todo["attempts"] = int(todo["attempts"]) + 1
+                if active_path.exists():
+                    active_path.write_text(
+                        json.dumps(todo, ensure_ascii=False, indent=2) + "\n"
+                    )
+                self.state.scratch["active_todo"] = todo
+        plan["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
 
     @staticmethod
     def _summarize_changes(changes: list[CodeChange]) -> list[dict[str, str]]:
