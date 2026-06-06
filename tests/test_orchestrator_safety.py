@@ -705,6 +705,9 @@ class OrchestratorSafetyTests(unittest.TestCase):
             joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
             self.assertIn("Recent reject summary", joined)
             self.assertIn("phase retry", joined)
+            tactics = repo / ".local_micro_agent" / "brainstorm_tactics.md"
+            self.assertIn("new tactic", tactics.read_text())
+            self.assertIn("phase retry", tactics.read_text())
 
     def test_code_prompt_includes_tactic_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

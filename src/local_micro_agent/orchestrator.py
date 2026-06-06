@@ -180,7 +180,25 @@ class MicroAgent:
         if brainstorm:
             self.state.scratch["tactic_library"] = brainstorm
             self.state.scratch["last_brainstorm_loop"] = self.state.loop_count
+            self._persist_brainstorm_tactics(brainstorm, reject_summary)
             self.state.notes.append("Brainstorm tactics added for next CODE attempt")
+
+    def _persist_brainstorm_tactics(self, brainstorm: str, reject_summary: str) -> None:
+        path = self._workflow_artifact_path(
+            "brainstorm_tactics_path", ".local_micro_agent/brainstorm_tactics.md"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = (
+            f"# Brainstorm Tactics\n\n"
+            f"- ts: {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
+            f"- loop: {self.state.loop_count}\n"
+            f"- best_metric: {self.state.scratch.get('best_metric', self.state.scratch.get('last_metric'))}\n\n"
+            f"## Tactics\n\n{brainstorm}\n\n"
+            f"## Recent Reject Summary\n\n```json\n{reject_summary}\n```\n\n"
+        )
+        with path.open("a") as handle:
+            handle.write(record)
+        self.state.notes.append(f"Persisted brainstorm tactics: {path}")
 
     async def code(self) -> None:
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")
@@ -1327,6 +1345,7 @@ class MicroAgent:
             "last_metric": self.state.scratch.get("last_metric"),
             "changes": self._summarize_changes(self.state.proposed_changes),
             "adaptive_search_memory": self.state.scratch.get("adaptive_search_memory", {}),
+            "tactic_library": self.state.scratch.get("tactic_library", ""),
             "notes_tail": self.state.notes[-12:],
         }
         state_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
