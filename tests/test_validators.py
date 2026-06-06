@@ -23,6 +23,7 @@ class ValidatorTests(unittest.TestCase):
             """
 <candidates>
 <candidate id="fast-path">
+<strategy_axis>instruction_scheduling</strategy_axis>
 <reason>hoist independent address calculations</reason>
 <change>
 <path>perf_takehome.py</path>
@@ -40,6 +41,7 @@ body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
         )
 
         self.assertEqual(data["candidates"][0]["id"], "fast-path")
+        self.assertEqual(data["candidates"][0]["strategy_axis"], "instruction_scheduling")
         change = data["candidates"][0]["changes"][0]
         self.assertEqual(change["path"], "perf_takehome.py")
         self.assertIn('self.scratch["inp_indices_p"]', change["replacement"])

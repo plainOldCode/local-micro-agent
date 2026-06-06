@@ -38,10 +38,17 @@ class CodeDecision:
 
 
 class CodeCandidate:
-    def __init__(self, candidate_id: str, changes: list[CodeChange], reason: str = ""):
+    def __init__(
+        self,
+        candidate_id: str,
+        changes: list[CodeChange],
+        reason: str = "",
+        strategy_axis: str = "",
+    ):
         self.candidate_id = candidate_id
         self.changes = changes
         self.reason = reason
+        self.strategy_axis = strategy_axis
 
 
 class TestDecision:
@@ -153,6 +160,20 @@ class MicroAgent:
                 messages = code_prompt(self.state, feedback_notes_limit, output_format)
                 if self.config.get("workflow", {}).get("candidate_queue"):
                     messages = [*messages, self._candidate_queue_message(output_format)]
+                axis_contract = self._format_axis_contract()
+                if axis_contract:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Strategy axis contract follows. Candidate output must obey it. "
+                                "A candidate with a missing, unknown, cooled, or wrong strategy_axis "
+                                "will be rejected before edits or tests.\n"
+                                f"{axis_contract}"
+                            ),
+                        },
+                    ]
                 search_memory = self._format_adaptive_search_memory()
                 if search_memory:
                     messages = [
@@ -236,6 +257,26 @@ class MicroAgent:
         best_applied = 0
 
         for candidate in candidates:
+            axis_rejection = self._candidate_axis_contract_rejection(candidate)
+            if axis_rejection is not None:
+                status, note = axis_rejection
+                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             duplicate_fingerprint = self._rejected_candidate_fingerprint(candidate)
             if duplicate_fingerprint is not None:
                 self.state.notes.append(
@@ -394,6 +435,7 @@ class MicroAgent:
     def _candidate_fingerprint(self, candidate: CodeCandidate) -> str:
         payload = {
             "reason": self._normalize_fingerprint_text(candidate.reason),
+            "strategy_axis": self._normalize_fingerprint_text(candidate.strategy_axis),
             "changes": [
                 {
                     "path": change.path,
@@ -410,6 +452,7 @@ class MicroAgent:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     def _candidate_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
+        declared = self._normalize_strategy_axis(candidate.strategy_axis)
         reason_parts = [candidate.reason]
         code_parts = []
         for change in candidate.changes:
@@ -451,6 +494,8 @@ class MicroAgent:
         axes = self._strategy_axes_for_text(reason_text, keyword_axes)
         if not axes:
             axes = self._strategy_axes_for_text(code_text, keyword_axes)
+        if declared and declared in self._strategy_axis_pool() and declared not in axes:
+            axes.append(declared)
         if not axes:
             axes = ["general_edit"]
         return sorted(set(axes))
@@ -464,6 +509,119 @@ class MicroAgent:
             for axis, keywords in keyword_axes.items()
             if any(keyword in text for keyword in keywords)
         ]
+
+    def _format_axis_contract(self) -> str:
+        if not self._axis_contract_enabled():
+            self.state.scratch.pop("required_strategy_axis", None)
+            return ""
+        required_axis = self._select_required_strategy_axis()
+        self.state.scratch["required_strategy_axis"] = required_axis
+        cooled_axes = self._current_cooled_axes()
+        payload = {
+            "required_strategy_axis": required_axis,
+            "allowed_strategy_axes": self._allowed_strategy_axes(),
+            "cooled_strategy_axes": cooled_axes,
+            "known_strategy_axes": self._strategy_axis_pool(),
+            "output_requirement": (
+                "Set candidate strategy_axis exactly to required_strategy_axis. "
+                "In XML mode include <strategy_axis>axis</strategy_axis> inside each <candidate>."
+            ),
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _axis_contract_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("adaptive_search_force_strategy_axis")) and (
+            self._adaptive_search_memory_enabled()
+        )
+
+    def _strategy_axis_pool(self) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        configured = workflow.get("adaptive_search_axis_pool")
+        if isinstance(configured, list) and configured:
+            return [self._normalize_strategy_axis(str(axis)) for axis in configured if str(axis)]
+        return [
+            "hash_build",
+            "phase_interleave",
+            "vector_unroll_lane",
+            "memory_store_layout",
+            "precompute_constants",
+            "branch_control",
+            "instruction_scheduling",
+            "parsing",
+            "api_contract",
+            "test_contract",
+            "runtime_control",
+            "general_edit",
+        ]
+
+    def _allowed_strategy_axes(self) -> list[str]:
+        cooled = set(self._current_cooled_axes())
+        return [axis for axis in self._strategy_axis_pool() if axis not in cooled]
+
+    def _select_required_strategy_axis(self) -> str:
+        allowed = self._allowed_strategy_axes()
+        if not allowed:
+            return "general_edit"
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            memory = self._adaptive_search_memory_from_history()
+            if memory:
+                self.state.scratch["adaptive_search_memory"] = memory
+        axes_state = memory.get("axes", {}) if isinstance(memory, dict) else {}
+
+        def score(axis: str) -> tuple[int, int, str]:
+            raw = axes_state.get(axis) if isinstance(axes_state, dict) else None
+            if not isinstance(raw, dict):
+                return (0, 0, axis)
+            return (int(raw.get("attempts", 0)), int(raw.get("failures", 0)), axis)
+
+        return sorted(allowed, key=score)[0]
+
+    def _current_cooled_axes(self) -> list[str]:
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            memory = self._adaptive_search_memory_from_history()
+            if memory:
+                self.state.scratch["adaptive_search_memory"] = memory
+        if not isinstance(memory, dict):
+            return []
+        axes_state = memory.get("axes")
+        if not isinstance(axes_state, dict):
+            return []
+        current_loop = self.state.loop_count
+        cooled = []
+        for axis, raw_state in axes_state.items():
+            if not isinstance(raw_state, dict):
+                continue
+            cooldown_until = raw_state.get("cooldown_until_loop")
+            if isinstance(cooldown_until, int) and cooldown_until > current_loop:
+                cooled.append(str(axis))
+        return sorted(cooled)
+
+    def _candidate_axis_contract_rejection(
+        self, candidate: CodeCandidate
+    ) -> tuple[str, str] | None:
+        if not self._axis_contract_enabled():
+            return None
+        declared = self._normalize_strategy_axis(candidate.strategy_axis)
+        if not declared:
+            return ("rejected_missing_axis", "missing strategy_axis")
+        if declared not in self._strategy_axis_pool():
+            return ("rejected_unknown_axis", f"unknown strategy_axis {declared}")
+        required = self.state.scratch.get("required_strategy_axis")
+        if isinstance(required, str) and required and declared != required:
+            return (
+                "rejected_wrong_axis",
+                f"strategy_axis {declared} does not match required {required}",
+            )
+        if declared in self._current_cooled_axes():
+            return ("rejected_cooled_axis", f"cooled strategy_axis {declared}")
+        return None
+
+    @staticmethod
+    def _normalize_strategy_axis(axis: str) -> str:
+        return re.sub(r"[^a-z0-9_]+", "_", axis.strip().lower()).strip("_")
 
     def _cooled_candidate_axes(self, candidate: CodeCandidate) -> list[str]:
         if not self._adaptive_search_reject_cooled_axes_enabled():
@@ -572,8 +730,11 @@ class MicroAgent:
         failure_statuses = {
             "rejected",
             "rejected_cooled_axis",
+            "rejected_missing_axis",
             "rejected_no_changes",
             "rejected_repeated_pattern",
+            "rejected_unknown_axis",
+            "rejected_wrong_axis",
             "rejected_no_metric",
         }
         if status not in failure_statuses:
@@ -639,8 +800,11 @@ class MicroAgent:
         failure_statuses = {
             "rejected",
             "rejected_cooled_axis",
+            "rejected_missing_axis",
             "rejected_no_changes",
             "rejected_repeated_pattern",
+            "rejected_unknown_axis",
+            "rejected_wrong_axis",
             "rejected_no_metric",
         }
         for line in lines:
@@ -742,7 +906,9 @@ class MicroAgent:
                 "content": (
                     "Candidate queue mode is enabled. Output one or more <candidate> "
                     "blocks inside a single <candidates> root. Each candidate must be "
-                    "independent and safe to apply from the same baseline."
+                    "independent and safe to apply from the same baseline. If a strategy "
+                    "axis contract is present, include <strategy_axis>axis</strategy_axis> "
+                    "inside each <candidate>."
                 ),
             }
         return {
@@ -750,7 +916,7 @@ class MicroAgent:
             "content": (
                 "Candidate queue mode is enabled. Output strict JSON with a top-level "
                 '"candidates" array, not a top-level "changes" array. Example: '
-                '{"candidates":[{"id":"1","reason":"short","changes":[{"path":"file.py",'
+                '{"candidates":[{"id":"1","strategy_axis":"general_edit","reason":"short","changes":[{"path":"file.py",'
                 '"target":"exact text","replacement":"new text","reason":"short"}]}]}. '
                 "Each candidate must be independent and safe to apply from the same baseline."
             ),
@@ -1117,6 +1283,7 @@ class MicroAgent:
                     "status": record.get("status"),
                     "metric": record.get("metric"),
                     "failed": record.get("failed"),
+                    "strategy_axis": record.get("strategy_axis", ""),
                     "strategy_axes": record.get("strategy_axes", []),
                     "changes": record.get("changes", []),
                 }
@@ -1147,6 +1314,7 @@ class MicroAgent:
             "failed": failed,
             "reason": candidate.reason,
             "fingerprint": self._candidate_fingerprint(candidate),
+            "strategy_axis": candidate.strategy_axis,
             "strategy_axes": self._candidate_strategy_axes(candidate),
             "changes": self._summarize_changes(candidate.changes),
         }
@@ -1247,6 +1415,7 @@ class MicroAgent:
                             candidate_id=str(item.get("id", index)),
                             changes=[CodeChange.from_dict(change) for change in item["changes"]],
                             reason=str(item.get("reason", "")),
+                            strategy_axis=str(item.get("strategy_axis", "")),
                         )
                     )
                 changes = candidates[0].changes if candidates else []

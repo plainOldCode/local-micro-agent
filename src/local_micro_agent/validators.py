@@ -53,6 +53,7 @@ def parse_xml_candidates(text: str) -> dict[str, Any]:
     for index, (candidate_id, candidate_content) in enumerate(candidate_blocks, start=1):
         changes = []
         reason = _tag_text(candidate_content, "reason")
+        strategy_axis = _tag_text(candidate_content, "strategy_axis")
         for change_content in re.findall(r"<change>(.*?)</change>", candidate_content, re.DOTALL):
             path = _tag_text(change_content, "path")
             search = _tag_text(change_content, "search", strip=False)
@@ -74,6 +75,7 @@ def parse_xml_candidates(text: str) -> dict[str, Any]:
             {
                 "id": candidate_id or str(index),
                 "reason": reason,
+                "strategy_axis": strategy_axis,
                 "changes": changes,
             }
         )

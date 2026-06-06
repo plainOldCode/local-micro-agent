@@ -749,6 +749,77 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertEqual(agent._candidate_strategy_axes(candidate), ["phase_interleave"])
 
+    def test_axis_contract_rejects_candidate_with_wrong_declared_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["hash_build", "phase_interleave"],
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            state.scratch["required_strategy_axis"] = "hash_build"
+            candidate = CodeCandidate(
+                "wrong-axis",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="phase interleave retry",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "phase interleave retry",
+                strategy_axis="phase_interleave",
+            )
+            agent = MicroAgent(config, state)
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            self.assertIn("does not match required hash_build", "\n".join(state.notes))
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_wrong_axis"', history)
+
+    def test_axis_contract_prompt_sets_required_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["hash_build", "phase_interleave"],
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            contract = agent._format_axis_contract()
+
+            self.assertIn('"required_strategy_axis": "hash_build"', contract)
+            self.assertEqual(state.scratch["required_strategy_axis"], "hash_build")
+
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

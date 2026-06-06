@@ -63,6 +63,11 @@ If the model ignores the cooled axes, set
 `workflow.adaptive_search_reject_cooled_axes=true`. That turns cooldowns into a
 controller-side pre-test gate: any candidate whose extracted axes are still in
 cooldown is rejected as `rejected_cooled_axis` before file edits or tests run.
+For stronger control, set `workflow.adaptive_search_force_strategy_axis=true`
+and optionally restrict `workflow.adaptive_search_axis_pool`. The controller
+then chooses a required axis for each `CODE` loop, injects it into the prompt,
+and rejects candidates with missing, unknown, cooled, or wrong declared
+`strategy_axis` values before applying edits.
 
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
