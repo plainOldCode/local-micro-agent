@@ -747,6 +747,12 @@ class OrchestratorSafetyTests(unittest.TestCase):
                         "failures": 3,
                         "successes": 0,
                         "cooldown_until_loop": 4,
+                    },
+                    "phase_interleave": {
+                        "attempts": 3,
+                        "failures": 3,
+                        "successes": 0,
+                        "cooldown_until_loop": 4,
                     }
                 },
                 "recent": [],
@@ -796,8 +802,15 @@ class OrchestratorSafetyTests(unittest.TestCase):
             agent = MicroAgent(config, state)
             candidate = CodeCandidate(
                 "selected",
-                [CodeChange("target.py", "hash build tactic", target="old", replacement="new")],
-                "hash build tactic",
+                [
+                    CodeChange(
+                        "target.py",
+                        "hash build tactic with phase overlap",
+                        target="old",
+                        replacement="new",
+                    )
+                ],
+                "hash build tactic with phase overlap",
                 strategy_axis="hash_build",
             )
 

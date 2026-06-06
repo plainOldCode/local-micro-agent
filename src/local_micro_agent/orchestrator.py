@@ -886,6 +886,8 @@ class MicroAgent:
         if not isinstance(axes_state, dict):
             return []
         current_loop = self.state.loop_count
+        if self._candidate_matches_selected_tactic(candidate):
+            return []
         selected_axis = self._selected_tactic_axis_for_current_loop()
         cooled = []
         for axis in self._candidate_strategy_axes(candidate):
@@ -898,6 +900,15 @@ class MicroAgent:
             if isinstance(cooldown_until, int) and cooldown_until > current_loop:
                 cooled.append(axis)
         return cooled
+
+    def _candidate_matches_selected_tactic(self, candidate: CodeCandidate) -> bool:
+        selected_axis = self._selected_tactic_axis_for_current_loop()
+        if not selected_axis:
+            return False
+        declared = self._normalize_strategy_axis(candidate.strategy_axis)
+        if declared != selected_axis:
+            return False
+        return selected_axis in self._candidate_reason_strategy_axes(candidate)
 
     def _selected_tactic_axis_for_current_loop(self) -> str | None:
         selected_tactic = self.state.scratch.get("selected_tactic")
