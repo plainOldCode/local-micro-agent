@@ -194,14 +194,13 @@ class MicroAgent:
 
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
         known_axes = set(self._strategy_axis_pool())
-        cooled_axes = set(self._current_cooled_axes())
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for block in blocks:
             match = re.search(r"strategy_axis\s*:\s*`?([a-zA-Z0-9_ -]+)`?", block)
             if not match:
                 continue
             axis = self._normalize_strategy_axis(match.group(1))
-            if axis in known_axes and axis not in cooled_axes:
+            if axis in known_axes:
                 return {"strategy_axis": axis, "text": block.strip()}
         return None
 
@@ -780,16 +779,17 @@ class MicroAgent:
 
     def _select_required_strategy_axis(self) -> str:
         allowed = self._allowed_strategy_axes()
-        if not allowed:
-            return "general_edit"
         selected_tactic = self.state.scratch.get("selected_tactic")
         selected_loop = self.state.scratch.get("selected_tactic_loop")
+        known_axes = self._strategy_axis_pool()
         if (
             isinstance(selected_tactic, dict)
             and selected_loop == self.state.loop_count
-            and selected_tactic.get("strategy_axis") in allowed
+            and selected_tactic.get("strategy_axis") in known_axes
         ):
             return str(selected_tactic["strategy_axis"])
+        if not allowed:
+            return "general_edit"
         memory = self.state.scratch.get("adaptive_search_memory")
         if not isinstance(memory, dict):
             memory = self._adaptive_search_memory_from_history()
@@ -863,6 +863,8 @@ class MicroAgent:
                     f"strategy_axis {required}",
                 )
         if declared in self._current_cooled_axes():
+            if self._selected_tactic_axis_for_current_loop() == declared:
+                return None
             return ("rejected_cooled_axis", f"cooled strategy_axis {declared}")
         return None
 
@@ -884,8 +886,11 @@ class MicroAgent:
         if not isinstance(axes_state, dict):
             return []
         current_loop = self.state.loop_count
+        selected_axis = self._selected_tactic_axis_for_current_loop()
         cooled = []
         for axis in self._candidate_strategy_axes(candidate):
+            if axis == selected_axis:
+                continue
             axis_state = axes_state.get(axis)
             if not isinstance(axis_state, dict):
                 continue
@@ -893,6 +898,17 @@ class MicroAgent:
             if isinstance(cooldown_until, int) and cooldown_until > current_loop:
                 cooled.append(axis)
         return cooled
+
+    def _selected_tactic_axis_for_current_loop(self) -> str | None:
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        if not isinstance(selected_tactic, dict):
+            return None
+        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+            return None
+        axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
+        if axis in self._strategy_axis_pool():
+            return axis
+        return None
 
     def _record_strategy_attempt(
         self,

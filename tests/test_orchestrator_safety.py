@@ -740,6 +740,17 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 "text": "1. strategy_axis: hash_build",
             }
             state.scratch["selected_tactic_loop"] = 0
+            state.scratch["adaptive_search_memory"] = {
+                "axes": {
+                    "hash_build": {
+                        "attempts": 3,
+                        "failures": 3,
+                        "successes": 0,
+                        "cooldown_until_loop": 4,
+                    }
+                },
+                "recent": [],
+            }
             agent = MicroAgent(config, state)
 
             contract = agent._format_axis_contract()
@@ -750,6 +761,48 @@ class OrchestratorSafetyTests(unittest.TestCase):
             state.loop_count = 1
             next_contract = agent._format_axis_contract()
             self.assertIn('"required_strategy_axis": "vector_unroll_lane"', next_contract)
+
+    def test_selected_brainstorm_tactic_overrides_cooldown_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "adaptive_search_memory": True,
+                    "adaptive_search_reject_cooled_axes": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["hash_build", "phase_interleave"],
+                },
+            }
+            state.scratch["selected_tactic"] = {
+                "strategy_axis": "hash_build",
+                "text": "1. strategy_axis: hash_build",
+            }
+            state.scratch["selected_tactic_loop"] = 0
+            state.scratch["required_strategy_axis"] = "hash_build"
+            state.scratch["adaptive_search_memory"] = {
+                "axes": {
+                    "hash_build": {
+                        "attempts": 3,
+                        "failures": 3,
+                        "successes": 0,
+                        "cooldown_until_loop": 4,
+                    }
+                },
+                "recent": [],
+            }
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "selected",
+                [CodeChange("target.py", "hash build tactic", target="old", replacement="new")],
+                "hash build tactic",
+                strategy_axis="hash_build",
+            )
+
+            self.assertIsNone(agent._candidate_axis_contract_rejection(candidate))
+            self.assertEqual(agent._cooled_candidate_axes(candidate), [])
 
     def test_code_prompt_includes_tactic_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
