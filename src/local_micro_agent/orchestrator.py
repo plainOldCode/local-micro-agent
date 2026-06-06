@@ -198,7 +198,7 @@ class MicroAgent:
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for block in blocks:
             match = re.search(
-                r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_ -]+)`?",
+                r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
                 block,
                 flags=re.IGNORECASE,
             )

@@ -697,8 +697,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
             models = _RoleModelManager(
                 {
                     "brainstorm": (
-                        "1. **Strategy Axis:** `hash_build`\n"
-                        "new_axis_suggestion: new tactic\n"
+                        "1. **Strategy Axis:** `hash_build` new_axis_suggestion: new tactic\n"
                         "Try a different hash build tactic.\n"
                         "2. strategy_axis: phase_interleave\nother\n"
                         "3. strategy_axis: branch_control\nthird"
