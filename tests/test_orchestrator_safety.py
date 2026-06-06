@@ -665,6 +665,68 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("phase_interleave", joined)
             self.assertIn("cooled_down_axes", joined)
 
+    def test_adaptive_search_can_reject_cooled_axis_before_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_memory": True,
+                    "adaptive_search_reject_cooled_axes": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            state.scratch["adaptive_search_memory"] = {
+                "axes": {
+                    "memory_store_layout": {
+                        "attempts": 3,
+                        "failures": 3,
+                        "successes": 0,
+                        "cooldown_until_loop": 4,
+                        "last_status": "rejected",
+                        "last_metric": 120,
+                        "best_metric": None,
+                    }
+                },
+                "recent": [],
+            }
+            candidate = CodeCandidate(
+                "cooled",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="store layout retry",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "retry memory store layout",
+            )
+            agent = MicroAgent(config, state)
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            self.assertIn("cooled strategy axes memory_store_layout", "\n".join(state.notes))
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_cooled_axis"', history)
+
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

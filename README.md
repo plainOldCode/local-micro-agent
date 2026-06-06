@@ -59,6 +59,11 @@ steered toward under-explored directions without hard-coding task-specific
 blacklists. The same axes are written to `workflow.candidate_history_path`
 records when candidate history is enabled.
 
+If the model ignores the cooled axes, set
+`workflow.adaptive_search_reject_cooled_axes=true`. That turns cooldowns into a
+controller-side pre-test gate: any candidate whose extracted axes are still in
+cooldown is rejected as `rejected_cooled_axis` before file edits or tests run.
+
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
 and `.local_micro_agent/best.patch`, updates the in-memory best metric, and

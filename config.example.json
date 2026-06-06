@@ -52,6 +52,7 @@
     "candidate_queue": false,
     "candidate_novelty_gate": false,
     "adaptive_search_memory": false,
+    "adaptive_search_reject_cooled_axes": false,
     "adaptive_search_axis_window": 8,
     "adaptive_search_axis_failure_threshold": 3,
     "adaptive_search_axis_cooldown_loops": 3,

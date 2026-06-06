@@ -259,6 +259,29 @@ class MicroAgent:
                 )
                 continue
 
+            cooled_axes = self._cooled_candidate_axes(candidate)
+            if cooled_axes:
+                self.state.notes.append(
+                    "Candidate "
+                    f"{candidate.candidate_id} rejected: cooled strategy axes "
+                    f"{', '.join(cooled_axes)}"
+                )
+                self._append_candidate_history(
+                    candidate,
+                    status="rejected_cooled_axis",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status="rejected_cooled_axis",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             await self._restore_snapshot(baseline_snapshot)
             applied = await self._apply_changes(candidate.changes, allowed)
             if applied == 0:
@@ -345,6 +368,12 @@ class MicroAgent:
     def _adaptive_search_memory_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("adaptive_search_memory"))
 
+    def _adaptive_search_reject_cooled_axes_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("adaptive_search_reject_cooled_axes")) and (
+            self._adaptive_search_memory_enabled()
+        )
+
     def _rejected_candidate_fingerprint(self, candidate: CodeCandidate) -> str | None:
         if not self._candidate_novelty_gate_enabled():
             return None
@@ -422,6 +451,30 @@ class MicroAgent:
         if not axes:
             axes = ["general_edit"]
         return sorted(set(axes))
+
+    def _cooled_candidate_axes(self, candidate: CodeCandidate) -> list[str]:
+        if not self._adaptive_search_reject_cooled_axes_enabled():
+            return []
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            memory = self._adaptive_search_memory_from_history()
+            if memory:
+                self.state.scratch["adaptive_search_memory"] = memory
+        if not isinstance(memory, dict):
+            return []
+        axes_state = memory.get("axes")
+        if not isinstance(axes_state, dict):
+            return []
+        current_loop = self.state.loop_count
+        cooled = []
+        for axis in self._candidate_strategy_axes(candidate):
+            axis_state = axes_state.get(axis)
+            if not isinstance(axis_state, dict):
+                continue
+            cooldown_until = axis_state.get("cooldown_until_loop")
+            if isinstance(cooldown_until, int) and cooldown_until > current_loop:
+                cooled.append(axis)
+        return cooled
 
     def _record_strategy_attempt(
         self,
@@ -505,6 +558,7 @@ class MicroAgent:
         )
         failure_statuses = {
             "rejected",
+            "rejected_cooled_axis",
             "rejected_no_changes",
             "rejected_repeated_pattern",
             "rejected_no_metric",
@@ -571,6 +625,7 @@ class MicroAgent:
         memory: dict[str, Any] = {"axes": {}, "recent": []}
         failure_statuses = {
             "rejected",
+            "rejected_cooled_axis",
             "rejected_no_changes",
             "rejected_repeated_pattern",
             "rejected_no_metric",
