@@ -763,8 +763,30 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 '{"status":"rejected_brainstorm_all_failed_families"}\n'
             )
             (history_dir / "brainstorm_selection.jsonl").write_text(
-                json.dumps({"all_skipped": True}) + "\n"
-                + json.dumps({"all_skipped": True}) + "\n"
+                json.dumps(
+                    {
+                        "all_skipped": True,
+                        "records": [
+                            {
+                                "skipped": True,
+                                "family_aliases": ["hash_reorder", "hash_build"],
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "all_skipped": True,
+                        "records": [
+                            {
+                                "skipped": True,
+                                "family_aliases": ["store_address_reuse"],
+                            }
+                        ],
+                    }
+                )
+                + "\n"
             )
             (history_dir / "failed_tactics.jsonl").write_text(
                 json.dumps(
@@ -806,6 +828,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
             joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
             self.assertIn("New family required:\ntrue", joined)
             self.assertIn("store_address_reuse", joined)
+            self.assertIn("hash_reorder", joined)
             self.assertEqual(state.scratch["selected_tactic"]["family_key"], "tree_shape_specialization")
 
     def test_selected_brainstorm_tactic_sets_required_axis_for_current_loop(self) -> None:

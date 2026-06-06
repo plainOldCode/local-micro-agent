@@ -525,7 +525,34 @@ class MicroAgent:
         return streak
 
     def _forbidden_tactic_family_aliases(self) -> list[str]:
-        return sorted(self._failed_tactic_family_keys())
+        aliases = set(self._failed_tactic_family_keys())
+        aliases.update(self._skipped_brainstorm_family_aliases())
+        return sorted(aliases)
+
+    def _skipped_brainstorm_family_aliases(self) -> set[str]:
+        path = self._workflow_artifact_path(
+            "brainstorm_selection_path", ".local_micro_agent/brainstorm_selection.jsonl"
+        )
+        if not path.exists():
+            return set()
+        limit = int(
+            self.config.get("workflow", {}).get("brainstorm_forbidden_selection_limit", 24)
+            or 24
+        )
+        aliases: set[str] = set()
+        for line in path.read_text(errors="replace").splitlines()[-limit:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for item in record.get("records", []) or []:
+                if not isinstance(item, dict) or not item.get("skipped"):
+                    continue
+                for alias in item.get("family_aliases", []) or []:
+                    normalized = self._normalize_strategy_axis(str(alias))
+                    if normalized:
+                        aliases.add(normalized)
+        return aliases
 
     def _create_active_todo_from_selected_tactic(self, selected_tactic: dict[str, str]) -> None:
         axis = str(selected_tactic.get("strategy_axis", "general_edit"))
