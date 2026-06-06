@@ -704,6 +704,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("new tactic", state.scratch["tactic_library"])
             joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
             self.assertIn("Recent reject summary", joined)
+            self.assertIn("Known strategy axes", joined)
+            self.assertIn("hash_build", joined)
             self.assertIn("phase retry", joined)
             tactics = repo / ".local_micro_agent" / "brainstorm_tactics.md"
             self.assertIn("new tactic", tactics.read_text())

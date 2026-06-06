@@ -36,7 +36,8 @@ Output exactly 3 numbered tactics in Markdown.
 Each tactic must:
 - be a different algorithmic or architectural paradigm
 - avoid repeating the rejected patterns
-- name the most relevant strategy_axis
+- name exactly one strategy_axis from the supplied Known strategy axes
+- put any new invented category name after "new_axis_suggestion:" instead of using it as strategy_axis
 - include one concrete implementation hook in the supplied source
 Keep each tactic to 2 short sentences."""
 
@@ -124,7 +125,11 @@ def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[di
 
 
 def brainstorm_prompt(
-    state: AgentState, reject_summary: str, cooled_axes: list[str], feedback_notes_limit: int = 8
+    state: AgentState,
+    reject_summary: str,
+    cooled_axes: list[str],
+    known_axes: list[str],
+    feedback_notes_limit: int = 8,
 ) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
@@ -138,6 +143,7 @@ def brainstorm_prompt(
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Source files:\n{source_blocks}\n\n"
                 f"Current best/test summary:\n{state.latest_test_summary()}\n\n"
+                f"Known strategy axes:\n{', '.join(known_axes)}\n\n"
                 f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
                 f"Recent reject summary:\n{reject_summary}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"

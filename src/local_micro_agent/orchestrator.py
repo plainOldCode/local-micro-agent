@@ -168,6 +168,7 @@ class MicroAgent:
                     self.state,
                     reject_summary=reject_summary,
                     cooled_axes=self._current_cooled_axes(),
+                    known_axes=self._strategy_axis_pool(),
                     feedback_notes_limit=feedback_notes_limit,
                 )
             )
