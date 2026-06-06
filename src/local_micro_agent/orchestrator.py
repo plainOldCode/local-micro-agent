@@ -410,47 +410,60 @@ class MicroAgent:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     def _candidate_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
-        text_parts = [candidate.reason]
+        reason_parts = [candidate.reason]
+        code_parts = []
         for change in candidate.changes:
-            text_parts.extend(
+            reason_parts.append(change.reason)
+            code_parts.extend(
                 [
                     change.path,
-                    change.reason,
                     change.target or "",
                     change.replacement or "",
                     change.patch or "",
                     change.content or "",
                 ]
             )
-        text = self._normalize_fingerprint_text("\n".join(text_parts))
+        reason_text = self._normalize_fingerprint_text("\n".join(reason_parts))
+        code_text = self._normalize_fingerprint_text("\n".join(code_parts))
         keyword_axes = {
             "hash_build": ("hash", "checksum", "digest", "build_hash"),
             "phase_interleave": ("phase", "stage", "interleave", "pipeline", "round"),
             "vector_unroll_lane": ("unroll", "vector", "simd", "lane", "parallel"),
             "memory_store_layout": (
+                "address",
+                "register",
+                "spill",
                 "store",
                 "write",
                 "buffer",
                 "cache",
                 "layout",
-                "scratch",
                 "memory",
             ),
             "precompute_constants": ("precompute", "lookup", "table", "constant", "fold"),
-            "branch_control": ("branch", "condition", "guard", "if ", "switch"),
+            "branch_control": ("branch", "condition", "guard", "switch", "flow", "select", "bounds"),
+            "instruction_scheduling": ("bundle", "slot", "hazard", "dependency", "dependent", "raw"),
             "parsing": ("parse", "parser", "regex", "xml", "json"),
             "api_contract": ("api", "interface", "signature", "schema", "contract"),
             "test_contract": ("test", "assert", "fixture", "threshold"),
             "runtime_control": ("timeout", "async", "process", "subprocess", "retry"),
         }
-        axes = [
+        axes = self._strategy_axes_for_text(reason_text, keyword_axes)
+        if not axes:
+            axes = self._strategy_axes_for_text(code_text, keyword_axes)
+        if not axes:
+            axes = ["general_edit"]
+        return sorted(set(axes))
+
+    @staticmethod
+    def _strategy_axes_for_text(
+        text: str, keyword_axes: dict[str, tuple[str, ...]]
+    ) -> list[str]:
+        return [
             axis
             for axis, keywords in keyword_axes.items()
             if any(keyword in text for keyword in keywords)
         ]
-        if not axes:
-            axes = ["general_edit"]
-        return sorted(set(axes))
 
     def _cooled_candidate_axes(self, candidate: CodeCandidate) -> list[str]:
         if not self._adaptive_search_reject_cooled_axes_enabled():

@@ -727,6 +727,28 @@ class OrchestratorSafetyTests(unittest.TestCase):
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"status": "rejected_cooled_axis"', history)
 
+    def test_strategy_axes_prefer_reason_over_code_body_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                state,
+            )
+            candidate = CodeCandidate(
+                "phase",
+                [
+                    CodeChange(
+                        path="perf_takehome.py",
+                        reason="interleave phase index updates",
+                        target='self.scratch["ptr"] = old_store\n',
+                        replacement='self.scratch["ptr"] = new_store\n',
+                    )
+                ],
+                "interleave phase index updates",
+            )
+
+            self.assertEqual(agent._candidate_strategy_axes(candidate), ["phase_interleave"])
+
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
