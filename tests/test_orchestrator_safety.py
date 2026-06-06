@@ -544,6 +544,127 @@ class OrchestratorSafetyTests(unittest.TestCase):
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"status": "rejected_repeated_pattern"', history)
 
+    def test_adaptive_search_memory_cools_down_repeated_failed_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 120')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_memory": True,
+                    "adaptive_search_axis_failure_threshold": 3,
+                    "adaptive_search_axis_cooldown_loops": 4,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            agent = MicroAgent(config, state)
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            candidate = CodeCandidate(
+                "phase",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="phase interleave tweak",
+                        target="value = 'old'\n",
+                        replacement="value = 'slow'\n",
+                    )
+                ],
+                "try phase interleave scheduling",
+            )
+
+            async def evaluate_three_times() -> None:
+                await agent.mcp.start()
+                try:
+                    for _ in range(3):
+                        await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_three_times())
+
+            memory_text = agent._format_adaptive_search_memory()
+            self.assertIn("phase_interleave", memory_text)
+            self.assertIn('"cooled_down_axes": [\n    "phase_interleave"\n  ]', memory_text)
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"strategy_axes": ["phase_interleave"]', history)
+
+    def test_code_prompt_includes_adaptive_search_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                    "adaptive_search_memory": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.CODE,
+                max_loops=1,
+            )
+            state.plan_markdown = "seeded"
+            state.planned_files = ["target.py"]
+            state.file_context = []
+            state.scratch["adaptive_search_memory"] = {
+                "axes": {
+                    "phase_interleave": {
+                        "attempts": 3,
+                        "failures": 3,
+                        "successes": 0,
+                        "cooldown_until_loop": 4,
+                        "last_status": "rejected",
+                        "last_metric": 120,
+                        "best_metric": None,
+                    }
+                },
+                "recent": [],
+            }
+            models = _RoleModelManager(
+                {
+                    "coder": (
+                        '{"changes":[{"path":"target.py","target":"value = '
+                        "'old'\\n\",\"replacement\":\"value = 'new'\\n\"}]}"
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            async def code_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_once())
+
+            coder_messages = models.seen["coder"][0]
+            joined = "\n".join(message["content"] for message in coder_messages)
+            self.assertIn("Adaptive search memory follows", joined)
+            self.assertIn("phase_interleave", joined)
+            self.assertIn("cooled_down_axes", joined)
+
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

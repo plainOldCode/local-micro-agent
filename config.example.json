@@ -50,6 +50,12 @@
     "log_raw_model_outputs": false,
     "raw_model_output_dir": ".local_micro_agent/raw_model_outputs",
     "candidate_queue": false,
+    "candidate_novelty_gate": false,
+    "adaptive_search_memory": false,
+    "adaptive_search_axis_window": 8,
+    "adaptive_search_axis_failure_threshold": 3,
+    "adaptive_search_axis_cooldown_loops": 3,
+    "adaptive_search_recent_limit": 20,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
     "feedback_notes_limit": 12

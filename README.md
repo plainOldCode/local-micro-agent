@@ -49,6 +49,16 @@ and an identical later candidate is rejected before tests run. The rejection is
 fed back as `forbidden repeated pattern`, which makes retry loops spend budget
 on new search directions instead of repeatedly testing the same failed patch.
 
+Set `workflow.adaptive_search_memory=true` when a long run should manage its
+own search budget. The agent tags each candidate with coarse strategy axes
+such as `hash_build`, `phase_interleave`, `vector_unroll_lane`, or
+`memory_store_layout`, records per-axis success/failure statistics, and feeds a
+compact search-memory summary into later `CODE` prompts. Axes that fail
+repeatedly in a recent window enter a temporary cooldown, so the model is
+steered toward under-explored directions without hard-coding task-specific
+blacklists. The same axes are written to `workflow.candidate_history_path`
+records when candidate history is enabled.
+
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
 and `.local_micro_agent/best.patch`, updates the in-memory best metric, and

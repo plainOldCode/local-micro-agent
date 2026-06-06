@@ -153,6 +153,21 @@ class MicroAgent:
                 messages = code_prompt(self.state, feedback_notes_limit, output_format)
                 if self.config.get("workflow", {}).get("candidate_queue"):
                     messages = [*messages, self._candidate_queue_message(output_format)]
+                search_memory = self._format_adaptive_search_memory()
+                if search_memory:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Adaptive search memory follows. Use it to allocate search budget. "
+                                "Do not repeat cooled-down strategy axes unless the user request "
+                                "explicitly requires them; prefer under-explored axes and explain "
+                                "the chosen axis in the candidate reason.\n"
+                                f"{search_memory}"
+                            ),
+                        },
+                    ]
                 history = self._format_candidate_history()
                 if history:
                     messages = [
@@ -235,6 +250,13 @@ class MicroAgent:
                     applied=0,
                     failed=True,
                 )
+                self._record_strategy_attempt(
+                    candidate,
+                    status="rejected_repeated_pattern",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
                 continue
 
             await self._restore_snapshot(baseline_snapshot)
@@ -243,6 +265,13 @@ class MicroAgent:
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: no changes applied")
                 self._remember_rejected_candidate(candidate)
                 self._append_candidate_history(
+                    candidate,
+                    status="rejected_no_changes",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                self._record_strategy_attempt(
                     candidate,
                     status="rejected_no_changes",
                     metric=None,
@@ -265,6 +294,13 @@ class MicroAgent:
                 f"metric={metric} failed={failed} improved={improved}"
             )
             self._append_candidate_history(
+                candidate,
+                status="improved" if improved and not failed else "rejected",
+                metric=metric,
+                applied=applied,
+                failed=failed,
+            )
+            self._record_strategy_attempt(
                 candidate,
                 status="improved" if improved and not failed else "rejected",
                 metric=metric,
@@ -306,6 +342,9 @@ class MicroAgent:
     def _candidate_novelty_gate_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("candidate_novelty_gate"))
 
+    def _adaptive_search_memory_enabled(self) -> bool:
+        return bool(self.config.get("workflow", {}).get("adaptive_search_memory"))
+
     def _rejected_candidate_fingerprint(self, candidate: CodeCandidate) -> str | None:
         if not self._candidate_novelty_gate_enabled():
             return None
@@ -340,6 +379,274 @@ class MicroAgent:
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _candidate_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
+        text_parts = [candidate.reason]
+        for change in candidate.changes:
+            text_parts.extend(
+                [
+                    change.path,
+                    change.reason,
+                    change.target or "",
+                    change.replacement or "",
+                    change.patch or "",
+                    change.content or "",
+                ]
+            )
+        text = self._normalize_fingerprint_text("\n".join(text_parts))
+        keyword_axes = {
+            "hash_build": ("hash", "checksum", "digest", "build_hash"),
+            "phase_interleave": ("phase", "stage", "interleave", "pipeline", "round"),
+            "vector_unroll_lane": ("unroll", "vector", "simd", "lane", "parallel"),
+            "memory_store_layout": (
+                "store",
+                "write",
+                "buffer",
+                "cache",
+                "layout",
+                "scratch",
+                "memory",
+            ),
+            "precompute_constants": ("precompute", "lookup", "table", "constant", "fold"),
+            "branch_control": ("branch", "condition", "guard", "if ", "switch"),
+            "parsing": ("parse", "parser", "regex", "xml", "json"),
+            "api_contract": ("api", "interface", "signature", "schema", "contract"),
+            "test_contract": ("test", "assert", "fixture", "threshold"),
+            "runtime_control": ("timeout", "async", "process", "subprocess", "retry"),
+        }
+        axes = [
+            axis
+            for axis, keywords in keyword_axes.items()
+            if any(keyword in text for keyword in keywords)
+        ]
+        if not axes:
+            axes = ["general_edit"]
+        return sorted(set(axes))
+
+    def _record_strategy_attempt(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+    ) -> None:
+        if not self._adaptive_search_memory_enabled():
+            return
+        axes = self._candidate_strategy_axes(candidate)
+        memory = self.state.scratch.setdefault(
+            "adaptive_search_memory",
+            {"axes": {}, "recent": []},
+        )
+        if not isinstance(memory, dict):
+            memory = {"axes": {}, "recent": []}
+            self.state.scratch["adaptive_search_memory"] = memory
+        axes_state = memory.setdefault("axes", {})
+        recent = memory.setdefault("recent", [])
+        improved = status in {"improved", "accepted"} and not failed
+        for axis in axes:
+            axis_state = axes_state.setdefault(
+                axis,
+                {
+                    "attempts": 0,
+                    "failures": 0,
+                    "successes": 0,
+                    "cooldown_until_loop": None,
+                    "last_status": None,
+                    "last_metric": None,
+                    "best_metric": None,
+                },
+            )
+            axis_state["attempts"] = int(axis_state.get("attempts", 0)) + 1
+            axis_state["last_status"] = status
+            axis_state["last_metric"] = metric
+            if improved:
+                axis_state["successes"] = int(axis_state.get("successes", 0)) + 1
+                axis_state["cooldown_until_loop"] = None
+                best_metric = axis_state.get("best_metric")
+                if metric is not None and (
+                    best_metric is None or self._metric_improved(metric, int(best_metric))
+                ):
+                    axis_state["best_metric"] = metric
+            else:
+                axis_state["failures"] = int(axis_state.get("failures", 0)) + 1
+                if self._axis_should_cool_down(axis, status):
+                    cooldown = int(
+                        self.config.get("workflow", {}).get(
+                            "adaptive_search_axis_cooldown_loops", 3
+                        )
+                    )
+                    axis_state["cooldown_until_loop"] = self.state.loop_count + cooldown
+        recent.append(
+            {
+                "loop": self.state.loop_count,
+                "candidate_id": candidate.candidate_id,
+                "axes": axes,
+                "status": status,
+                "metric": metric,
+                "applied": applied,
+                "failed": failed,
+            }
+        )
+        limit = int(self.config.get("workflow", {}).get("adaptive_search_recent_limit", 20))
+        if len(recent) > limit:
+            del recent[:-limit]
+
+    def _axis_should_cool_down(self, axis: str, status: str) -> bool:
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            return False
+        recent = memory.get("recent")
+        if not isinstance(recent, list):
+            return False
+        window = int(self.config.get("workflow", {}).get("adaptive_search_axis_window", 8))
+        threshold = int(
+            self.config.get("workflow", {}).get("adaptive_search_axis_failure_threshold", 3)
+        )
+        failure_statuses = {
+            "rejected",
+            "rejected_no_changes",
+            "rejected_repeated_pattern",
+            "rejected_no_metric",
+        }
+        if status not in failure_statuses:
+            return False
+        recent_failures = 1
+        for record in reversed(recent[-window:]):
+            if axis not in record.get("axes", []):
+                continue
+            if record.get("status") in failure_statuses or record.get("failed") is True:
+                recent_failures += 1
+        return recent_failures >= threshold
+
+    def _format_adaptive_search_memory(self) -> str:
+        if not self._adaptive_search_memory_enabled():
+            return ""
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            memory = self._adaptive_search_memory_from_history()
+            if memory:
+                self.state.scratch["adaptive_search_memory"] = memory
+        if not isinstance(memory, dict):
+            return ""
+        axes_state = memory.get("axes")
+        if not isinstance(axes_state, dict) or not axes_state:
+            return ""
+        current_loop = self.state.loop_count
+        axes = []
+        cooled_down = []
+        for axis, raw_state in sorted(axes_state.items()):
+            if not isinstance(raw_state, dict):
+                continue
+            cooldown_until = raw_state.get("cooldown_until_loop")
+            is_cooled = isinstance(cooldown_until, int) and cooldown_until > current_loop
+            item = {
+                "axis": axis,
+                "attempts": raw_state.get("attempts", 0),
+                "failures": raw_state.get("failures", 0),
+                "successes": raw_state.get("successes", 0),
+                "last_status": raw_state.get("last_status"),
+                "last_metric": raw_state.get("last_metric"),
+                "best_metric": raw_state.get("best_metric"),
+            }
+            if is_cooled:
+                item["cooldown_until_loop"] = cooldown_until
+                cooled_down.append(axis)
+            axes.append(item)
+        recent = memory.get("recent") if isinstance(memory.get("recent"), list) else []
+        payload = {
+            "current_loop": current_loop,
+            "cooled_down_axes": cooled_down,
+            "axes": axes,
+            "recent": recent[-5:],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _adaptive_search_memory_from_history(self) -> dict[str, Any] | None:
+        path = self._candidate_history_path()
+        if path is None or not path.exists():
+            return None
+        limit = int(self.config.get("workflow", {}).get("candidate_history_limit", 20))
+        lines = path.read_text(errors="replace").splitlines()[-limit:]
+        memory: dict[str, Any] = {"axes": {}, "recent": []}
+        failure_statuses = {
+            "rejected",
+            "rejected_no_changes",
+            "rejected_repeated_pattern",
+            "rejected_no_metric",
+        }
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            axes = record.get("strategy_axes")
+            if not isinstance(axes, list) or not axes:
+                continue
+            status = str(record.get("status", ""))
+            failed = bool(record.get("failed"))
+            metric = record.get("metric")
+            recent_record = {
+                "loop": record.get("loop"),
+                "candidate_id": record.get("candidate_id"),
+                "axes": [str(axis) for axis in axes],
+                "status": status,
+                "metric": metric,
+                "applied": record.get("applied", 0),
+                "failed": failed,
+            }
+            memory["recent"].append(recent_record)
+            for axis in recent_record["axes"]:
+                axis_state = memory["axes"].setdefault(
+                    axis,
+                    {
+                        "attempts": 0,
+                        "failures": 0,
+                        "successes": 0,
+                        "cooldown_until_loop": None,
+                        "last_status": None,
+                        "last_metric": None,
+                        "best_metric": None,
+                    },
+                )
+                axis_state["attempts"] += 1
+                axis_state["last_status"] = status
+                axis_state["last_metric"] = metric
+                if status in {"improved", "accepted"} and not failed:
+                    axis_state["successes"] += 1
+                    best_metric = axis_state.get("best_metric")
+                    if isinstance(metric, int) and (
+                        best_metric is None or self._metric_improved(metric, int(best_metric))
+                    ):
+                        axis_state["best_metric"] = metric
+                elif status in failure_statuses or failed:
+                    axis_state["failures"] += 1
+        self._apply_history_cooldowns(memory, failure_statuses)
+        return memory if memory["axes"] else None
+
+    def _apply_history_cooldowns(
+        self, memory: dict[str, Any], failure_statuses: set[str]
+    ) -> None:
+        recent = memory.get("recent")
+        axes_state = memory.get("axes")
+        if not isinstance(recent, list) or not isinstance(axes_state, dict):
+            return
+        window = int(self.config.get("workflow", {}).get("adaptive_search_axis_window", 8))
+        threshold = int(
+            self.config.get("workflow", {}).get("adaptive_search_axis_failure_threshold", 3)
+        )
+        cooldown = int(
+            self.config.get("workflow", {}).get("adaptive_search_axis_cooldown_loops", 3)
+        )
+        for axis, axis_state in axes_state.items():
+            recent_failures = 0
+            for record in reversed(recent[-window:]):
+                if axis not in record.get("axes", []):
+                    continue
+                if record.get("status") in failure_statuses or record.get("failed") is True:
+                    recent_failures += 1
+            if recent_failures >= threshold:
+                axis_state["cooldown_until_loop"] = self.state.loop_count + cooldown
 
     @staticmethod
     def _normalize_fingerprint_text(text: str) -> str:
@@ -546,6 +853,7 @@ class MicroAgent:
             "metric": self.state.scratch.get("best_metric", self.state.scratch.get("last_metric")),
             "last_metric": self.state.scratch.get("last_metric"),
             "changes": self._summarize_changes(self.state.proposed_changes),
+            "adaptive_search_memory": self.state.scratch.get("adaptive_search_memory", {}),
             "notes_tail": self.state.notes[-12:],
         }
         state_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
@@ -741,6 +1049,7 @@ class MicroAgent:
                     "status": record.get("status"),
                     "metric": record.get("metric"),
                     "failed": record.get("failed"),
+                    "strategy_axes": record.get("strategy_axes", []),
                     "changes": record.get("changes", []),
                 }
             )
@@ -770,6 +1079,7 @@ class MicroAgent:
             "failed": failed,
             "reason": candidate.reason,
             "fingerprint": self._candidate_fingerprint(candidate),
+            "strategy_axes": self._candidate_strategy_axes(candidate),
             "changes": self._summarize_changes(candidate.changes),
         }
         with path.open("a") as handle:
