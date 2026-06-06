@@ -48,6 +48,7 @@ Use only the supplied plan, source files, and latest test failure.
 Do not output JSON. Output exactly one small candidate in this XML-like format:
 <candidates>
 <candidate id="1">
+<strategy_axis>one_known_axis</strategy_axis>
 <reason>one short sentence</reason>
 <change>
 <path>relative/path.py</path>
@@ -63,6 +64,7 @@ new code, copied verbatim; 1-40 lines only
 Rules:
 - Modify only listed files.
 - Emit exactly one <candidate> and exactly one <change>.
+- Include exactly one <strategy_axis> tag inside <candidate>.
 - Keep <reason> to one sentence.
 - Keep <search> and <replace> under 40 lines each.
 - Never replace an entire function or class.
