@@ -876,6 +876,65 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(selected["strategy_axis"], "hash_build")
             self.assertIn("failed_family=branch_control", "\n".join(agent.state.notes))
 
+    def test_all_failed_brainstorm_tactics_are_persisted_and_skip_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "context": "Failed branch tactic",
+                        "strategy_axis": "branch_control",
+                        "family_key": "branch_mask",
+                        "status": "failed",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "context": "Failed memory tactic",
+                        "strategy_axis": "memory_store_layout",
+                        "family_key": "store_address_reuse",
+                        "status": "failed",
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.current = AgentStateName.CODE
+            state.max_loops = 3
+            agent = MicroAgent(config, state)
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: branch_control\n"
+                "Replace multiply with a mask.\n"
+                "family_key: branch_mask\n"
+                "2. strategy_axis: memory_store_layout\n"
+                "Reuse store addresses.\n"
+                "family_key: store_address_reuse\n"
+            )
+            agent._persist_brainstorm_selection()
+            asyncio.run(agent.code())
+
+            self.assertIsNone(selected)
+            self.assertEqual(state.loop_count, 1)
+            self.assertEqual(state.current, AgentStateName.REFLECT)
+            selection = json.loads(
+                (artifact_dir / "brainstorm_selection.jsonl").read_text().splitlines()[-1]
+            )
+            self.assertTrue(selection["all_skipped"])
+            history = (artifact_dir / "candidates.jsonl").read_text()
+            self.assertIn("rejected_brainstorm_all_failed_families", history)
+
     def test_selected_brainstorm_tactic_overrides_cooldown_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")

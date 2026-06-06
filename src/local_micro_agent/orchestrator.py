@@ -192,12 +192,15 @@ class MicroAgent:
                 )
             self.state.scratch["last_brainstorm_loop"] = self.state.loop_count
             self._persist_brainstorm_tactics(brainstorm, reject_summary)
+            self._persist_brainstorm_selection()
             self.state.notes.append("Brainstorm tactics added for next CODE attempt")
 
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
         known_axes = set(self._strategy_axis_pool())
         failed_signatures = self._failed_tactic_signatures()
         failed_family_keys = self._failed_tactic_family_keys()
+        selection_records: list[dict[str, Any]] = []
+        self.state.scratch.pop("brainstorm_all_tactics_failed_loop", None)
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for block in blocks:
             match = re.search(
@@ -208,22 +211,56 @@ class MicroAgent:
             if not match:
                 continue
             axis = self._normalize_strategy_axis(match.group(1))
+            family_aliases = sorted(self._tactic_family_aliases(block))
             if axis not in known_axes:
+                selection_records.append(
+                    {
+                        "axis": axis,
+                        "family_aliases": family_aliases,
+                        "selected": False,
+                        "skipped": True,
+                        "reason": "unknown_axis",
+                    }
+                )
                 continue
             failed_match = self._failed_tactic_match_reason(
                 block, failed_signatures, failed_family_keys
             )
             if failed_match:
+                selection_records.append(
+                    {
+                        "axis": axis,
+                        "family_aliases": family_aliases,
+                        "selected": False,
+                        "skipped": True,
+                        "reason": failed_match,
+                    }
+                )
                 self.state.notes.append(
                     "Skipped brainstorm tactic "
                     f"axis={axis} reason={failed_match}"
                 )
                 continue
-            return {
+            selected = {
                 "strategy_axis": axis,
                 "family_key": self._tactic_family_key(block),
                 "text": block.strip(),
             }
+            selection_records.append(
+                {
+                    "axis": axis,
+                    "family_aliases": family_aliases,
+                    "selected": True,
+                    "skipped": False,
+                    "reason": "",
+                }
+            )
+            self.state.scratch["brainstorm_selection"] = selection_records
+            return selected
+        self.state.scratch["brainstorm_selection"] = selection_records
+        if selection_records and all(record.get("skipped") for record in selection_records):
+            self.state.scratch["brainstorm_all_tactics_failed_loop"] = self.state.loop_count
+            self.state.notes.append("All brainstorm tactics matched failed families")
         return None
 
     def _failed_tactic_signatures(self) -> list[set[str]]:
@@ -425,6 +462,33 @@ class MicroAgent:
             handle.write(record)
         self.state.notes.append(f"Persisted brainstorm tactics: {path}")
 
+    def _persist_brainstorm_selection(self) -> None:
+        records = self.state.scratch.get("brainstorm_selection")
+        if not isinstance(records, list):
+            return
+        path = self._workflow_artifact_path(
+            "brainstorm_selection_path", ".local_micro_agent/brainstorm_selection.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        selected = next(
+            (record for record in records if isinstance(record, dict) and record.get("selected")),
+            None,
+        )
+        payload = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "selected": selected,
+            "all_skipped": bool(records)
+            and all(
+                isinstance(record, dict) and bool(record.get("skipped"))
+                for record in records
+            ),
+            "records": records,
+        }
+        with path.open("a") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        self.state.notes.append(f"Persisted brainstorm selection: {path}")
+
     def _create_active_todo_from_selected_tactic(self, selected_tactic: dict[str, str]) -> None:
         axis = str(selected_tactic.get("strategy_axis", "general_edit"))
         todo_id = f"todo-{self.state.loop_count:03d}-{axis}"
@@ -519,6 +583,31 @@ class MicroAgent:
         return plan
 
     async def code(self) -> None:
+        if self._brainstorm_all_tactics_failed_for_current_loop():
+            self.state.notes.append(
+                "Skipping CODE because all brainstorm tactics matched failed families"
+            )
+            self._append_candidate_history(
+                CodeCandidate(
+                    "brainstorm-all-skipped",
+                    [],
+                    "All brainstorm tactics matched failed tactic families",
+                    "general_edit",
+                ),
+                status="rejected_brainstorm_all_failed_families",
+                metric=None,
+                applied=0,
+                failed=True,
+            )
+            self.state.proposed_changes = []
+            self.state.scratch["applied_changes"] = 0
+            self.state.scratch.pop("brainstorm_all_tactics_failed_loop", None)
+            if self.state.loop_count + 1 >= self.state.max_loops:
+                self.state.current = AgentStateName.FAILED
+            else:
+                self.state.loop_count += 1
+                self.state.current = AgentStateName.REFLECT
+            return
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")
         if seeded_changes:
             decision = CodeDecision(changes=[CodeChange.from_dict(c) for c in seeded_changes])
@@ -1645,6 +1734,9 @@ class MicroAgent:
             self.state.scratch.get("metric_improved") is True
             and self.state.loop_count + 1 < self.state.max_loops
         )
+
+    def _brainstorm_all_tactics_failed_for_current_loop(self) -> bool:
+        return self.state.scratch.get("brainstorm_all_tactics_failed_loop") == self.state.loop_count
 
     def _should_brainstorm(self) -> bool:
         workflow = self.config.get("workflow", {})
