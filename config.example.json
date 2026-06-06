@@ -66,6 +66,10 @@
     "todo_plan_path": ".local_micro_agent/todo_plan.json",
     "active_todo_path": ".local_micro_agent/active_todo.json",
     "todo_attempts_path": ".local_micro_agent/todo_attempts.jsonl",
+    "failed_tactics_path": ".local_micro_agent/failed_tactics.jsonl",
+    "validated_patterns_path": ".local_micro_agent/validated_patterns.jsonl",
+    "todo_attempt_budget": 1,
+    "todo_ledger_summary_limit": 8,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
     "feedback_notes_limit": 12

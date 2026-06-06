@@ -169,6 +169,7 @@ class MicroAgent:
                     reject_summary=reject_summary,
                     cooled_axes=self._current_cooled_axes(),
                     known_axes=self._strategy_axis_pool(),
+                    todo_ledger_summary=self._format_todo_ledger_summary(),
                     feedback_notes_limit=feedback_notes_limit,
                 )
             )
@@ -1481,6 +1482,8 @@ class MicroAgent:
             return ""
         if active_todo.get("status") not in {"active", "attempted"}:
             return ""
+        if self._todo_attempt_budget_exhausted(active_todo):
+            return ""
         return json.dumps(active_todo, ensure_ascii=False, indent=2)
 
     def _load_active_todo(self) -> dict[str, Any] | None:
@@ -1494,6 +1497,47 @@ class MicroAgent:
         except json.JSONDecodeError:
             return None
         return data if isinstance(data, dict) else None
+
+    def _todo_attempt_budget_exhausted(self, todo: dict[str, Any]) -> bool:
+        budget = int(self.config.get("workflow", {}).get("todo_attempt_budget", 1) or 1)
+        attempts = int(todo.get("attempts", 0) or 0)
+        return attempts >= budget
+
+    def _format_todo_ledger_summary(self) -> str:
+        plan_path = self._workflow_artifact_path(
+            "todo_plan_path", ".local_micro_agent/todo_plan.json"
+        )
+        plan = self._load_todo_plan(plan_path)
+        todos = plan.get("todos")
+        if not isinstance(todos, list) or not todos:
+            return ""
+        limit = int(self.config.get("workflow", {}).get("todo_ledger_summary_limit", 8) or 8)
+        summary = []
+        for todo in todos[-limit:]:
+            if not isinstance(todo, dict):
+                continue
+            last_attempt = todo.get("last_attempt")
+            summary.append(
+                {
+                    "todo_id": todo.get("todo_id"),
+                    "status": todo.get("status"),
+                    "strategy_axis": todo.get("strategy_axis"),
+                    "attempts": todo.get("attempts", 0),
+                    "context": self._truncate_text(str(todo.get("context", "")), 280),
+                    "last_status": (
+                        last_attempt.get("status") if isinstance(last_attempt, dict) else None
+                    ),
+                    "last_metric": (
+                        last_attempt.get("metric") if isinstance(last_attempt, dict) else None
+                    ),
+                    "last_reason": self._truncate_text(
+                        str(last_attempt.get("reason", "")), 220
+                    )
+                    if isinstance(last_attempt, dict)
+                    else "",
+                }
+            )
+        return json.dumps(summary, ensure_ascii=False, indent=2)
 
     def _format_recent_reject_summary(self) -> str:
         limit = int(self.config.get("workflow", {}).get("brainstorm_reject_summary_limit", 8))
@@ -1792,7 +1836,9 @@ class MicroAgent:
 
     def _active_todo_id(self) -> str:
         active_todo = self.state.scratch.get("active_todo")
-        if isinstance(active_todo, dict):
+        if isinstance(active_todo, dict) and active_todo.get("status") in {"active", "attempted"}:
+            if self._todo_attempt_budget_exhausted(active_todo):
+                return ""
             return str(active_todo.get("todo_id", ""))
         return ""
 
@@ -1845,6 +1891,7 @@ class MicroAgent:
             next_status = "attempted"
         for todo in todos:
             if isinstance(todo, dict) and todo.get("todo_id") == attempt.get("todo_id"):
+                previous_status = todo.get("status")
                 if todo.get("status") == "validated" and next_status != "validated":
                     next_status = "validated"
                 todo["status"] = next_status
@@ -1861,8 +1908,40 @@ class MicroAgent:
                     "validated",
                 }:
                     plan["active_todo_id"] = None
+                if not (previous_status == "validated" and status.startswith("rejected")):
+                    self._append_todo_outcome_artifact(todo, next_status)
         plan["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+
+    def _append_todo_outcome_artifact(self, todo: dict[str, Any], status: str) -> None:
+        if status == "validated":
+            path = self._workflow_artifact_path(
+                "validated_patterns_path", ".local_micro_agent/validated_patterns.jsonl"
+            )
+        elif status == "failed":
+            path = self._workflow_artifact_path(
+                "failed_tactics_path", ".local_micro_agent/failed_tactics.jsonl"
+            )
+        else:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "todo_id": todo.get("todo_id"),
+            "strategy_axis": todo.get("strategy_axis"),
+            "status": status,
+            "attempts": todo.get("attempts", 0),
+            "context": todo.get("context", ""),
+            "last_attempt": todo.get("last_attempt"),
+        }
+        with path.open("a") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
 
     @staticmethod
     def _summarize_changes(changes: list[CodeChange]) -> list[dict[str, str]]:

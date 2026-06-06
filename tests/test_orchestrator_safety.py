@@ -683,6 +683,29 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 )
                 + "\n"
             )
+            (history_dir / "todo_plan.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "active_todo_id": None,
+                        "todos": [
+                            {
+                                "todo_id": "todo-007-hash_build",
+                                "status": "failed",
+                                "strategy_axis": "hash_build",
+                                "context": "failed hash tactic",
+                                "attempts": 1,
+                                "last_attempt": {
+                                    "status": "rejected",
+                                    "metric": 38423,
+                                    "reason": "hash got slower",
+                                },
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
             config = {
                 "models": {"default": "roles"},
                 "providers": {},
@@ -716,8 +739,10 @@ class OrchestratorSafetyTests(unittest.TestCase):
             joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
             self.assertIn("Recent reject summary", joined)
             self.assertIn("Known strategy axes", joined)
+            self.assertIn("Durable todo ledger summary", joined)
             self.assertIn("hash_build", joined)
             self.assertIn("phase retry", joined)
+            self.assertIn("hash got slower", joined)
             tactics = repo / ".local_micro_agent" / "brainstorm_tactics.md"
             self.assertIn("new tactic", tactics.read_text())
             self.assertIn("phase retry", tactics.read_text())
@@ -1284,6 +1309,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(active["status"], "validated")
             self.assertEqual(updated["todos"][0]["attempts"], 2)
             self.assertIsNone(updated["active_todo_id"])
+            self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
 
     def test_persist_todo_plan_appends_instead_of_overwriting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1347,6 +1373,44 @@ class OrchestratorSafetyTests(unittest.TestCase):
             )
 
             self.assertEqual(agent._format_active_todo(), "")
+
+    def test_failed_todo_writes_failed_tactic_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-hash_build",
+                "status": "active",
+                "strategy_axis": "hash_build",
+                "context": "hash tactic",
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            agent._update_todo_status_from_attempt(
+                {
+                    "todo_id": "todo-001-hash_build",
+                    "status": "rejected",
+                    "metric": 38423,
+                    "reason": "got slower",
+                }
+            )
+
+            failed = (artifact_dir / "failed_tactics.jsonl").read_text()
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            self.assertIn("todo-001-hash_build", failed)
+            self.assertIn("got slower", failed)
+            self.assertIsNone(updated["active_todo_id"])
 
 
 if __name__ == "__main__":

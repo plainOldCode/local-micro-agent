@@ -129,6 +129,7 @@ def brainstorm_prompt(
     reject_summary: str,
     cooled_axes: list[str],
     known_axes: list[str],
+    todo_ledger_summary: str = "",
     feedback_notes_limit: int = 8,
 ) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
@@ -146,6 +147,7 @@ def brainstorm_prompt(
                 f"Known strategy axes:\n{', '.join(known_axes)}\n\n"
                 f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
                 f"Recent reject summary:\n{reject_summary}\n\n"
+                f"Durable todo ledger summary:\n{todo_ledger_summary or 'none'}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
             ),
         },
