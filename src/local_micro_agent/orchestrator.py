@@ -210,9 +210,13 @@ class MicroAgent:
             axis = self._normalize_strategy_axis(match.group(1))
             if axis not in known_axes:
                 continue
-            if self._matches_failed_tactic(block, failed_signatures, failed_family_keys):
+            failed_match = self._failed_tactic_match_reason(
+                block, failed_signatures, failed_family_keys
+            )
+            if failed_match:
                 self.state.notes.append(
-                    "Skipped brainstorm tactic similar to failed tactic signature"
+                    "Skipped brainstorm tactic "
+                    f"axis={axis} reason={failed_match}"
                 )
                 continue
             return {
@@ -264,44 +268,55 @@ class MicroAgent:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            family_key = str(record.get("family_key", "")).strip()
-            if not family_key:
-                family_key = self._tactic_family_key(
-                    "\n".join(
-                        str(part)
-                        for part in (
-                            record.get("context", ""),
-                            (record.get("last_attempt") or {}).get("reason", "")
-                            if isinstance(record.get("last_attempt"), dict)
-                            else "",
-                        )
-                    )
+            context = "\n".join(
+                str(part)
+                for part in (
+                    record.get("context", ""),
+                    (record.get("last_attempt") or {}).get("reason", "")
+                    if isinstance(record.get("last_attempt"), dict)
+                    else "",
                 )
+            )
+            family_key = str(record.get("family_key", "")).strip()
             if family_key:
                 family_keys.add(family_key)
+            family_keys.update(self._tactic_family_aliases(context))
+            axis = self._normalize_strategy_axis(str(record.get("strategy_axis", "")))
+            if axis:
+                family_keys.add(axis)
+            last_attempt = record.get("last_attempt")
+            if isinstance(last_attempt, dict):
+                last_axis = self._normalize_strategy_axis(
+                    str(last_attempt.get("strategy_axis", ""))
+                )
+                if last_axis:
+                    family_keys.add(last_axis)
+                for raw_axis in last_attempt.get("strategy_axes", []) or []:
+                    normalized_axis = self._normalize_strategy_axis(str(raw_axis))
+                    if normalized_axis:
+                        family_keys.add(normalized_axis)
         return family_keys
 
-    def _matches_failed_tactic(
+    def _failed_tactic_match_reason(
         self,
         tactic_text: str,
         failed_signatures: list[set[str]],
         failed_family_keys: set[str],
-    ) -> bool:
-        family_key = self._tactic_family_key(tactic_text)
-        if family_key and family_key in failed_family_keys:
-            return True
-        if not failed_signatures:
-            return False
+    ) -> str:
+        family_matches = sorted(self._tactic_family_aliases(tactic_text) & failed_family_keys)
+        if family_matches:
+            return "failed_family=" + ",".join(family_matches)
         threshold = float(
             self.config.get("workflow", {}).get("failed_tactic_similarity_threshold", 0.45)
         )
         candidate_signature = self._tactic_signature(tactic_text)
         if not candidate_signature:
-            return False
-        return any(
-            self._signature_similarity(candidate_signature, failed_signature) >= threshold
-            for failed_signature in failed_signatures
-        )
+            return ""
+        for failed_signature in failed_signatures:
+            similarity = self._signature_similarity(candidate_signature, failed_signature)
+            if similarity >= threshold:
+                return f"signature_similarity={similarity:.2f}"
+        return ""
 
     @staticmethod
     def _tactic_signature(text: str) -> set[str]:
@@ -377,6 +392,21 @@ class MicroAgent:
         if any(keyword in normalized for keyword in ("interleave", "pipeline", "overlap", "ping pong")):
             return "phase_pipeline"
         return ""
+
+    def _tactic_family_aliases(self, text: str) -> set[str]:
+        aliases: set[str] = set()
+        family_key = self._tactic_family_key(text)
+        if family_key:
+            aliases.add(family_key)
+        for axis in re.findall(
+            r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            normalized_axis = self._normalize_strategy_axis(axis)
+            if normalized_axis:
+                aliases.add(normalized_axis)
+        return aliases
 
     def _persist_brainstorm_tactics(self, brainstorm: str, reject_summary: str) -> None:
         path = self._workflow_artifact_path(

@@ -840,6 +840,42 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(selected["strategy_axis"], "branch_control")
             self.assertIn("Skipped brainstorm tactic", "\n".join(agent.state.notes))
 
+    def test_failed_tactic_family_falls_back_to_strategy_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "context": "Old failed tactic with no family key.",
+                        "strategy_axis": "branch_control",
+                        "last_attempt": {
+                            "strategy_axis": "branch_control",
+                            "reason": "Use a compare result in a different branch-control shape.",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: branch_control\n"
+                "Use a fresh branch mask family not seen in old records.\n"
+                "family_key: fresh_branch_mask\n"
+                "2. strategy_axis: hash_build\n"
+                "Try a different hash emission shape.\n"
+                "family_key: hash_reorder\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "hash_build")
+            self.assertIn("failed_family=branch_control", "\n".join(agent.state.notes))
+
     def test_selected_brainstorm_tactic_overrides_cooldown_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")
