@@ -197,7 +197,11 @@ class MicroAgent:
         known_axes = set(self._strategy_axis_pool())
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for block in blocks:
-            match = re.search(r"strategy_axis\s*:\s*`?([a-zA-Z0-9_ -]+)`?", block)
+            match = re.search(
+                r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_ -]+)`?",
+                block,
+                flags=re.IGNORECASE,
+            )
             if not match:
                 continue
             axis = self._normalize_strategy_axis(match.group(1))
