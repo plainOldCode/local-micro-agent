@@ -37,6 +37,9 @@ Each tactic must:
 - be a different algorithmic or architectural paradigm
 - avoid repeating the rejected patterns
 - name exactly one strategy_axis from the supplied Known strategy axes
+- include one family_key line for the tactic family, such as valu_vectorization,
+  hash_constant_fold, store_address_reuse, list_scheduler_rewrite, branch_mask,
+  phase_pipeline, memory_cache_layout, hash_reorder, or unroll_factor_change
 - put any new invented category name after "new_axis_suggestion:" instead of using it as strategy_axis
 - include one concrete implementation hook in the supplied source
 Keep each tactic to 2 short sentences."""

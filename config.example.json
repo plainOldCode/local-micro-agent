@@ -71,6 +71,7 @@
     "todo_attempt_budget": 1,
     "todo_ledger_summary_limit": 8,
     "failed_tactic_signature_limit": 16,
+    "failed_tactic_family_limit": 24,
     "failed_tactic_similarity_threshold": 0.45,
     "candidate_history_path": null,
     "candidate_history_limit": 20,

@@ -197,6 +197,7 @@ class MicroAgent:
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
         known_axes = set(self._strategy_axis_pool())
         failed_signatures = self._failed_tactic_signatures()
+        failed_family_keys = self._failed_tactic_family_keys()
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for block in blocks:
             match = re.search(
@@ -209,12 +210,16 @@ class MicroAgent:
             axis = self._normalize_strategy_axis(match.group(1))
             if axis not in known_axes:
                 continue
-            if self._matches_failed_tactic(block, failed_signatures):
+            if self._matches_failed_tactic(block, failed_signatures, failed_family_keys):
                 self.state.notes.append(
                     "Skipped brainstorm tactic similar to failed tactic signature"
                 )
                 continue
-            return {"strategy_axis": axis, "text": block.strip()}
+            return {
+                "strategy_axis": axis,
+                "family_key": self._tactic_family_key(block),
+                "text": block.strip(),
+            }
         return None
 
     def _failed_tactic_signatures(self) -> list[set[str]]:
@@ -244,7 +249,47 @@ class MicroAgent:
                 signatures.append(signature)
         return signatures
 
-    def _matches_failed_tactic(self, tactic_text: str, failed_signatures: list[set[str]]) -> bool:
+    def _failed_tactic_family_keys(self) -> set[str]:
+        path = self._workflow_artifact_path(
+            "failed_tactics_path", ".local_micro_agent/failed_tactics.jsonl"
+        )
+        if not path.exists():
+            return set()
+        limit = int(
+            self.config.get("workflow", {}).get("failed_tactic_family_limit", 24) or 24
+        )
+        family_keys: set[str] = set()
+        for line in path.read_text(errors="replace").splitlines()[-limit:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            family_key = str(record.get("family_key", "")).strip()
+            if not family_key:
+                family_key = self._tactic_family_key(
+                    "\n".join(
+                        str(part)
+                        for part in (
+                            record.get("context", ""),
+                            (record.get("last_attempt") or {}).get("reason", "")
+                            if isinstance(record.get("last_attempt"), dict)
+                            else "",
+                        )
+                    )
+                )
+            if family_key:
+                family_keys.add(family_key)
+        return family_keys
+
+    def _matches_failed_tactic(
+        self,
+        tactic_text: str,
+        failed_signatures: list[set[str]],
+        failed_family_keys: set[str],
+    ) -> bool:
+        family_key = self._tactic_family_key(tactic_text)
+        if family_key and family_key in failed_family_keys:
+            return True
         if not failed_signatures:
             return False
         threshold = float(
@@ -293,6 +338,46 @@ class MicroAgent:
             return 0.0
         return len(left & right) / len(left | right)
 
+    @staticmethod
+    def _tactic_family_key(text: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9_]+", " ", text.lower())
+        explicit = re.search(r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?", normalized)
+        if explicit:
+            return explicit.group(1)
+        if any(
+            keyword in normalized
+            for keyword in ("list scheduling", "topological", "dependency depth", "scheduler")
+        ):
+            return "list_scheduler_rewrite"
+        if "hash" in normalized and any(
+            keyword in normalized for keyword in ("constant", "precompute", "lookup", "fold")
+        ):
+            return "hash_constant_fold"
+        if "store" in normalized and "address" in normalized and any(
+            keyword in normalized for keyword in ("reuse", "tmp_addrs", "phase 4")
+        ):
+            return "store_address_reuse"
+        if any(keyword in normalized for keyword in ("valu", "vload", "vstore", "simd", "vectorized")):
+            return "valu_vectorization"
+        if "unroll_factor" in normalized or "unroll factor" in normalized:
+            return "unroll_factor_change"
+        if any(keyword in normalized for keyword in ("bitwise", "mask")) and any(
+            keyword in normalized for keyword in ("bounds", "multiply", "conditional")
+        ):
+            return "branch_mask"
+        if any(
+            keyword in normalized
+            for keyword in ("scratch cache", "circular buffer", "random access", "cache")
+        ):
+            return "memory_cache_layout"
+        if "hash" in normalized and any(
+            keyword in normalized for keyword in ("reorder", "tmp1", "tmp2")
+        ):
+            return "hash_reorder"
+        if any(keyword in normalized for keyword in ("interleave", "pipeline", "overlap", "ping pong")):
+            return "phase_pipeline"
+        return ""
+
     def _persist_brainstorm_tactics(self, brainstorm: str, reject_summary: str) -> None:
         path = self._workflow_artifact_path(
             "brainstorm_tactics_path", ".local_micro_agent/brainstorm_tactics.md"
@@ -313,13 +398,15 @@ class MicroAgent:
     def _create_active_todo_from_selected_tactic(self, selected_tactic: dict[str, str]) -> None:
         axis = str(selected_tactic.get("strategy_axis", "general_edit"))
         todo_id = f"todo-{self.state.loop_count:03d}-{axis}"
+        tactic_text = selected_tactic.get("text", "")
         todo = {
             "todo_id": todo_id,
             "parent_tactic_id": f"brainstorm-loop-{self.state.loop_count}",
             "status": "active",
             "strategy_axis": axis,
+            "family_key": self._tactic_family_key(tactic_text),
             "title": f"Feasibility probe for {axis}",
-            "context": selected_tactic.get("text", ""),
+            "context": tactic_text,
             "micro_goal": (
                 "Implement the smallest correctness-preserving feasibility probe for this "
                 "tactic. Do not attempt the full architecture migration in one patch."
@@ -2012,6 +2099,7 @@ class MicroAgent:
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "todo_id": todo.get("todo_id"),
             "strategy_axis": todo.get("strategy_axis"),
+            "family_key": todo.get("family_key") or self._tactic_family_key(str(todo.get("context", ""))),
             "status": status,
             "attempts": todo.get("attempts", 0),
             "context": todo.get("context", ""),
