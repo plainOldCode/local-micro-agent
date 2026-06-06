@@ -850,6 +850,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
             state.scratch["tactic_library"] = "1. Try a tabula rasa data layout tactic."
             state.scratch["active_todo"] = {
                 "todo_id": "todo-001",
+                "status": "active",
                 "strategy_axis": "hash_build",
                 "micro_goal": "probe one operation",
             }
@@ -1282,6 +1283,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(updated["todos"][0]["status"], "validated")
             self.assertEqual(active["status"], "validated")
             self.assertEqual(updated["todos"][0]["attempts"], 2)
+            self.assertIsNone(updated["active_todo_id"])
 
     def test_persist_todo_plan_appends_instead_of_overwriting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1323,6 +1325,28 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(statuses["todo-001-vector_unroll_lane"], "validated")
             self.assertEqual(statuses["todo-002-hash_build"], "superseded")
             self.assertEqual(statuses["todo-003-memory_store_layout"], "active")
+
+    def test_terminal_active_todo_is_not_injected_into_code_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "active_todo.json").write_text(
+                json.dumps(
+                    {
+                        "todo_id": "todo-001-hash_build",
+                        "status": "failed",
+                        "strategy_axis": "hash_build",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            self.assertEqual(agent._format_active_todo(), "")
 
 
 if __name__ == "__main__":

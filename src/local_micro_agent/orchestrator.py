@@ -1479,6 +1479,8 @@ class MicroAgent:
                 self.state.scratch["active_todo"] = active_todo
         if not isinstance(active_todo, dict) or not active_todo:
             return ""
+        if active_todo.get("status") not in {"active", "attempted"}:
+            return ""
         return json.dumps(active_todo, ensure_ascii=False, indent=2)
 
     def _load_active_todo(self) -> dict[str, Any] | None:
@@ -1854,6 +1856,11 @@ class MicroAgent:
                         json.dumps(todo, ensure_ascii=False, indent=2) + "\n"
                     )
                 self.state.scratch["active_todo"] = todo
+                if plan.get("active_todo_id") == todo.get("todo_id") and next_status in {
+                    "failed",
+                    "validated",
+                }:
+                    plan["active_todo_id"] = None
         plan["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
 
