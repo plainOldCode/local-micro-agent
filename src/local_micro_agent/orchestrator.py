@@ -569,12 +569,17 @@ class MicroAgent:
             if memory:
                 self.state.scratch["adaptive_search_memory"] = memory
         axes_state = memory.get("axes", {}) if isinstance(memory, dict) else {}
+        axis_order = {axis: index for index, axis in enumerate(allowed)}
 
-        def score(axis: str) -> tuple[int, int, str]:
+        def score(axis: str) -> tuple[int, int, int]:
             raw = axes_state.get(axis) if isinstance(axes_state, dict) else None
             if not isinstance(raw, dict):
-                return (0, 0, axis)
-            return (int(raw.get("attempts", 0)), int(raw.get("failures", 0)), axis)
+                return (0, 0, axis_order.get(axis, 0))
+            return (
+                int(raw.get("attempts", 0)),
+                int(raw.get("failures", 0)),
+                axis_order.get(axis, 0),
+            )
 
         return sorted(allowed, key=score)[0]
 

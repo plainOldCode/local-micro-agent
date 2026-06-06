@@ -810,15 +810,15 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 "workflow": {
                     "adaptive_search_memory": True,
                     "adaptive_search_force_strategy_axis": True,
-                    "adaptive_search_axis_pool": ["hash_build", "phase_interleave"],
+                    "adaptive_search_axis_pool": ["vector_unroll_lane", "hash_build"],
                 },
             }
             agent = MicroAgent(config, state)
 
             contract = agent._format_axis_contract()
 
-            self.assertIn('"required_strategy_axis": "hash_build"', contract)
-            self.assertEqual(state.scratch["required_strategy_axis"], "hash_build")
+            self.assertIn('"required_strategy_axis": "vector_unroll_lane"', contract)
+            self.assertEqual(state.scratch["required_strategy_axis"], "vector_unroll_lane")
 
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
