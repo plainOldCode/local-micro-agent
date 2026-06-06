@@ -269,15 +269,53 @@ class MicroAgent:
         )
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         active_path.parent.mkdir(parents=True, exist_ok=True)
+        plan = self._load_todo_plan(plan_path)
+        previous_active_id = plan.get("active_todo_id")
+        todos = plan.setdefault("todos", [])
+        if not isinstance(todos, list):
+            todos = []
+            plan["todos"] = todos
+        if previous_active_id and previous_active_id != todo.get("todo_id"):
+            for existing in todos:
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("todo_id") == previous_active_id
+                    and existing.get("status") == "active"
+                ):
+                    existing["status"] = "superseded"
+                    existing["superseded_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                    break
+        replaced = False
+        for index, existing in enumerate(todos):
+            if isinstance(existing, dict) and existing.get("todo_id") == todo.get("todo_id"):
+                todos[index] = {**existing, **todo}
+                replaced = True
+                break
+        if not replaced:
+            todos.append(todo)
         plan = {
-            "version": 1,
+            **plan,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "active_todo_id": todo.get("todo_id"),
-            "todos": [todo],
+            "todos": todos,
         }
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
         active_path.write_text(json.dumps(todo, ensure_ascii=False, indent=2) + "\n")
         self.state.notes.append(f"Persisted active todo: {active_path}")
+
+    @staticmethod
+    def _load_todo_plan(plan_path: Path) -> dict[str, Any]:
+        if not plan_path.exists():
+            return {"version": 1, "todos": []}
+        try:
+            plan = json.loads(plan_path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            return {"version": 1, "todos": []}
+        if not isinstance(plan, dict):
+            return {"version": 1, "todos": []}
+        plan.setdefault("version", 1)
+        plan.setdefault("todos", [])
+        return plan
 
     async def code(self) -> None:
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")

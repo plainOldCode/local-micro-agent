@@ -1283,6 +1283,47 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(active["status"], "validated")
             self.assertEqual(updated["todos"][0]["attempts"], 2)
 
+    def test_persist_todo_plan_appends_instead_of_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            first = {
+                "todo_id": "todo-001-vector_unroll_lane",
+                "status": "validated",
+                "strategy_axis": "vector_unroll_lane",
+            }
+            active = {
+                "todo_id": "todo-002-hash_build",
+                "status": "active",
+                "strategy_axis": "hash_build",
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": active["todo_id"],
+                "todos": [first, active],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            agent._persist_todo_plan(
+                {
+                    "todo_id": "todo-003-memory_store_layout",
+                    "status": "active",
+                    "strategy_axis": "memory_store_layout",
+                }
+            )
+
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            statuses = {todo["todo_id"]: todo["status"] for todo in updated["todos"]}
+            self.assertEqual(updated["active_todo_id"], "todo-003-memory_store_layout")
+            self.assertEqual(statuses["todo-001-vector_unroll_lane"], "validated")
+            self.assertEqual(statuses["todo-002-hash_build"], "superseded")
+            self.assertEqual(statuses["todo-003-memory_store_layout"], "active")
+
 
 if __name__ == "__main__":
     unittest.main()
