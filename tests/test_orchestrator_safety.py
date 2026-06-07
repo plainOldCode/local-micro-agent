@@ -1552,6 +1552,27 @@ value = 'fast'
             records = agent.state.scratch["brainstorm_selection"]
             self.assertEqual(records[0]["reason"], "axis_family_mismatch")
 
+    def test_brainstorm_selection_canonicalizes_axis_from_family_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: store_address_reuse\n"
+                "family_key: store_address_reuse\n"
+                "Hook: reuse one stored address for repeated stores.\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "memory_store_layout")
+            records = agent.state.scratch["brainstorm_selection"]
+            self.assertEqual(records[0]["declared_axis"], "store_address_reuse")
+            self.assertEqual(records[0]["axis"], "memory_store_layout")
+            self.assertEqual(records[0]["axis_normalized_from"], "family_key")
+
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2785,6 +2806,87 @@ value = 'fast'
             self.assertEqual(updated["todos"][0]["status"], "attempted")
             self.assertEqual(updated["todos"][0]["attempts"], 2)
             self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
+
+    def test_active_todo_duplicate_variant_rejected_before_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            last_attempt = {
+                "loop": 4,
+                "todo_id": "todo-001-phase_interleave",
+                "candidate_id": "1",
+                "status": "rejected",
+                "metric": 147734,
+                "failed": False,
+                "strategy_axis": "phase_interleave",
+                "reason": "phase pipeline interleave adjacent batch items",
+            }
+            todo = {
+                "todo_id": "todo-001-phase_interleave",
+                "status": "attempted",
+                "strategy_axis": "phase_interleave",
+                "family_key": "phase_pipeline",
+                "context": "phase pipeline tactic",
+                "attempts": 1,
+                "last_attempt": last_attempt,
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "todo_attempt_budget": 3,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "duplicate",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="phase pipeline interleave adjacent batch items",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "phase pipeline interleave adjacent batch items",
+                strategy_axis="phase_interleave",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            history = (artifact_dir / "candidates.jsonl").read_text()
+            attempts = (artifact_dir / "todo_attempts.jsonl").read_text()
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            self.assertIn('"status": "rejected_todo_duplicate_variant"', history)
+            self.assertIn("repeats rejected variant", attempts)
+            self.assertEqual(updated["active_todo_id"], "todo-001-phase_interleave")
+            self.assertEqual(updated["todos"][0]["status"], "attempted")
+            self.assertEqual(updated["todos"][0]["attempts"], 2)
 
     def test_non_improving_todo_fails_when_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -106,6 +106,10 @@ By default, `workflow.todo_enforce_active_contract=true` also makes active todo
 contracts controller-enforced: a queued candidate whose declared
 `strategy_axis`, reason, or detected family drifts away from the active todo is
 rejected before edits or tests and counted against that todo's retry budget.
+`workflow.todo_reject_duplicate_variants=true` also rejects same-todo retries
+whose candidate/change reasons are effectively the same as a recent rejected
+attempt, preventing retry budget from being spent on retesting the same
+micro-variant.
 
 By default, `workflow.brainstorm_score_tactics=true` scores selectable
 BRAINSTORM tactics instead of accepting the first valid block. The score uses
@@ -113,8 +117,10 @@ only current-run harness evidence: recent validated pattern aliases,
 failed/patch-failure aliases, tactic specificity, novelty lane, hook detail, and
 original order as a tie-breaker. `workflow.brainstorm_reject_axis_family_mismatch=true`
 also skips tactics whose declared `strategy_axis` contradicts the axis implied
-by their `family_key`. This is controller-side selection logic, not a
-problem-specific winning-ladder prompt.
+by their `family_key`; if the model writes a tactic family such as
+`store_address_reuse` in the `strategy_axis` field, the selector canonicalizes it
+to the single known axis implied by the explicit `family_key`. This is
+controller-side selection logic, not a problem-specific winning-ladder prompt.
 
 Set `workflow.validated_pattern_followup=true` with
 `workflow.continue_after_improvement=true` to create a follow-up todo from the

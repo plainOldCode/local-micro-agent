@@ -351,15 +351,23 @@ class MicroAgent:
             )
             if not match:
                 continue
-            axis = self._normalize_strategy_axis(match.group(1))
+            declared_axis = self._normalize_strategy_axis(match.group(1))
+            axis = declared_axis
             explicit_family_key = self._explicit_tactic_family_key(block)
             family_key = self._tactic_family_key(block)
-            family_aliases = sorted(self._tactic_family_aliases(block))
             family_axes = self._family_key_strategy_axes(family_key)
+            family_aliases = sorted(self._tactic_family_aliases(block))
+            axis_normalized_from = ""
+            if axis not in known_axes:
+                family_axis = self._canonical_axis_from_family_key(family_key, known_axes)
+                if family_axis:
+                    axis = family_axis
+                    axis_normalized_from = "family_key"
             if axis not in known_axes:
                 selection_records.append(
                     {
                         "axis": axis,
+                        "declared_axis": declared_axis,
                         "family_key": family_key,
                         "family_aliases": family_aliases,
                         "selected": False,
@@ -373,6 +381,7 @@ class MicroAgent:
                     selection_records.append(
                         {
                             "axis": axis,
+                            "declared_axis": declared_axis,
                             "family_key": family_key,
                             "family_aliases": family_aliases,
                             "family_axes": family_axes,
@@ -411,6 +420,7 @@ class MicroAgent:
                     }
                     record = {
                         "axis": axis,
+                        "declared_axis": declared_axis,
                         "family_key": family_key,
                         "family_aliases": family_aliases,
                         "selected": False,
@@ -419,6 +429,8 @@ class MicroAgent:
                         "gate_mode": gate_decision["mode"],
                         "gate_reason": gate_decision["reason"],
                     }
+                    if axis_normalized_from:
+                        record["axis_normalized_from"] = axis_normalized_from
                     score, reasons = self._score_brainstorm_tactic(
                         block,
                         axis,
@@ -435,6 +447,7 @@ class MicroAgent:
                 selection_records.append(
                     {
                         "axis": axis,
+                        "declared_axis": declared_axis,
                         "family_key": family_key,
                         "family_aliases": family_aliases,
                         "selected": False,
@@ -466,6 +479,7 @@ class MicroAgent:
             )
             record = {
                 "axis": axis,
+                "declared_axis": declared_axis,
                 "family_key": family_key,
                 "family_aliases": family_aliases,
                 "selected": False,
@@ -474,6 +488,8 @@ class MicroAgent:
                 "score": score,
                 "score_reasons": reasons,
             }
+            if axis_normalized_from:
+                record["axis_normalized_from"] = axis_normalized_from
             selection_records.append(record)
             selectable.append((score, order, selected, record))
         if selectable:
@@ -502,6 +518,13 @@ class MicroAgent:
             return axes
         normalized_axis = self._normalize_strategy_axis(family_key)
         return [normalized_axis] if normalized_axis in self._strategy_axis_pool() else []
+
+    def _canonical_axis_from_family_key(
+        self, family_key: str, known_axes: set[str] | None = None
+    ) -> str:
+        known = known_axes or set(self._strategy_axis_pool())
+        axes = sorted({axis for axis in self._family_key_strategy_axes(family_key) if axis in known})
+        return axes[0] if len(axes) == 1 else ""
 
     @staticmethod
     def _explicit_tactic_family_key(text: str) -> str:
@@ -912,6 +935,7 @@ class MicroAgent:
         if family_key:
             aliases.add(family_key)
             aliases.add(self._normalize_strategy_axis(family_key))
+            aliases.update(self._family_key_strategy_axes(family_key))
         if not include_axes:
             return aliases
         for axis in re.findall(
@@ -1321,6 +1345,28 @@ class MicroAgent:
             todo_rejection = self._active_todo_contract_rejection(candidate)
             if todo_rejection is not None:
                 status, note = todo_rejection
+                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                extra = self._candidate_rejection_extra(candidate, status, note)
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    extra=extra,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
+            duplicate_todo_variant = self._active_todo_duplicate_variant_rejection(candidate)
+            if duplicate_todo_variant is not None:
+                status, note = duplicate_todo_variant
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
                 extra = self._candidate_rejection_extra(candidate, status, note)
                 self._append_candidate_history(
@@ -2035,6 +2081,102 @@ class MicroAgent:
                     f"{todo_id} family_key {required_family}",
                 )
         return None
+
+    def _active_todo_duplicate_variant_rejection(
+        self, candidate: CodeCandidate
+    ) -> tuple[str, str] | None:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("todo_reject_duplicate_variants", True) is False:
+            return None
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return None
+        if active_todo.get("status") not in {"active", "attempted"}:
+            return None
+        if self._todo_attempt_budget_exhausted(active_todo):
+            return None
+        todo_id = str(active_todo.get("todo_id", ""))
+        if not todo_id:
+            return None
+        candidate_signature = self._todo_variant_signature_for_candidate(candidate)
+        if not candidate_signature:
+            return None
+        threshold = float(
+            workflow.get("todo_duplicate_variant_similarity_threshold", 0.92) or 0.92
+        )
+        for attempt in reversed(self._recent_todo_attempts(todo_id)):
+            status = str(attempt.get("status", ""))
+            if not status.startswith("rejected"):
+                continue
+            attempt_signature = self._todo_variant_signature_for_attempt(attempt)
+            if not attempt_signature:
+                continue
+            similarity = self._signature_similarity(
+                candidate_signature, attempt_signature
+            )
+            if similarity >= threshold:
+                loop = attempt.get("loop", "?")
+                return (
+                    "rejected_todo_duplicate_variant",
+                    f"active todo {todo_id} repeats rejected variant from loop {loop} "
+                    f"(similarity={similarity:.2f})",
+                )
+        return None
+
+    def _recent_todo_attempts(self, todo_id: str) -> list[dict[str, Any]]:
+        attempts: list[dict[str, Any]] = []
+        active_todo = self.state.scratch.get("active_todo")
+        if isinstance(active_todo, dict):
+            last_attempt = active_todo.get("last_attempt")
+            if isinstance(last_attempt, dict) and last_attempt.get("todo_id") == todo_id:
+                attempts.append(last_attempt)
+        path = self._workflow_artifact_path(
+            "todo_attempts_path", ".local_micro_agent/todo_attempts.jsonl"
+        )
+        if path.exists():
+            limit = int(
+                self.config.get("workflow", {}).get("todo_duplicate_variant_window", 6)
+                or 6
+            )
+            for line in path.read_text(errors="replace").splitlines()[-limit:]:
+                try:
+                    attempt = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(attempt, dict) and attempt.get("todo_id") == todo_id:
+                    attempts.append(attempt)
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[Any, Any, Any]] = set()
+        for attempt in attempts:
+            key = (
+                attempt.get("loop"),
+                attempt.get("candidate_id"),
+                attempt.get("reason"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(attempt)
+        return deduped
+
+    def _todo_variant_signature_for_candidate(
+        self, candidate: CodeCandidate
+    ) -> set[str]:
+        return self._tactic_signature(
+            "\n".join(
+                [
+                    candidate.reason,
+                    *(change.reason for change in candidate.changes),
+                ]
+            )
+        )
+
+    def _todo_variant_signature_for_attempt(self, attempt: dict[str, Any]) -> set[str]:
+        return self._tactic_signature(str(attempt.get("reason", "")))
 
     def _candidate_family_contract_rejection(
         self, candidate: CodeCandidate
