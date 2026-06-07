@@ -47,6 +47,7 @@
     "retry_rejected_candidates": false,
     "reflect_before_retry": false,
     "code_output_format": "json",
+    "prompt_cache_friendly_layout": true,
     "log_raw_model_outputs": false,
     "raw_model_output_dir": ".local_micro_agent/raw_model_outputs",
     "candidate_queue": false,

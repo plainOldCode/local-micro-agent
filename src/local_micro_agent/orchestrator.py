@@ -876,95 +876,94 @@ class MicroAgent:
                 output_format = str(
                     self.config.get("workflow", {}).get("code_output_format", "json")
                 )
-                messages = code_prompt(self.state, feedback_notes_limit, output_format)
+                cache_friendly_layout = bool(
+                    self.config.get("workflow", {}).get(
+                        "prompt_cache_friendly_layout", True
+                    )
+                )
+                messages = code_prompt(
+                    self.state,
+                    feedback_notes_limit,
+                    output_format,
+                    cache_friendly_layout=cache_friendly_layout,
+                )
+                dynamic_suffix_blocks: list[str] = []
+                if (
+                    cache_friendly_layout
+                    and messages
+                    and messages[-1].get("role") == "user"
+                    and messages[-1]
+                    .get("content", "")
+                    .startswith("Dynamic context for this CODE attempt:")
+                ):
+                    dynamic_suffix_blocks.append(messages.pop()["content"])
+
+                def add_runtime_context(content: str) -> None:
+                    if cache_friendly_layout:
+                        dynamic_suffix_blocks.append(content)
+                    else:
+                        messages.append({"role": "system", "content": content})
+
                 if self.config.get("workflow", {}).get("candidate_queue"):
                     messages = [*messages, self._candidate_queue_message(output_format)]
                 axis_contract = self._format_axis_contract()
                 if axis_contract:
-                    messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Strategy axis contract follows. Candidate output must obey it. "
-                                "A candidate with a missing, unknown, cooled, or wrong strategy_axis "
-                                "will be rejected before edits or tests.\n"
-                                f"{axis_contract}"
-                            ),
-                        },
-                    ]
+                    add_runtime_context(
+                        "Strategy axis contract follows. Candidate output must obey it. "
+                        "A candidate with a missing, unknown, cooled, or wrong strategy_axis "
+                        "will be rejected before edits or tests.\n"
+                        f"{axis_contract}"
+                    )
                 search_memory = self._format_adaptive_search_memory()
                 if search_memory:
-                    messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Adaptive search memory follows. Use it to allocate search budget. "
-                                "Do not repeat cooled-down strategy axes unless the user request "
-                                "explicitly requires them; prefer under-explored axes and explain "
-                                "the chosen axis in the candidate reason.\n"
-                                f"{search_memory}"
-                            ),
-                        },
-                    ]
+                    add_runtime_context(
+                        "Adaptive search memory follows. Use it to allocate search budget. "
+                        "Do not repeat cooled-down strategy axes unless the user request "
+                        "explicitly requires them; prefer under-explored axes and explain "
+                        "the chosen axis in the candidate reason.\n"
+                        f"{search_memory}"
+                    )
                 gate_memory = self._format_adaptive_gate_memory()
                 if gate_memory:
-                    messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Adaptive gate controller telemetry follows. Use it to "
-                                "notice when controller gates may be overblocking useful "
-                                "search. If gates are in shadow or soft mode, choose a "
-                                "small evidence-producing probe instead of renaming old "
-                                "ideas.\n"
-                                f"{gate_memory}"
-                            ),
-                        },
-                    ]
+                    add_runtime_context(
+                        "Adaptive gate controller telemetry follows. Use it to "
+                        "notice when controller gates may be overblocking useful "
+                        "search. If gates are in shadow or soft mode, choose a "
+                        "small evidence-producing probe instead of renaming old "
+                        "ideas.\n"
+                        f"{gate_memory}"
+                    )
                 active_todo = self._format_active_todo()
                 if active_todo:
-                    messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Active durable todo follows. Implement only this todo. "
-                                "Candidate strategy_axis must exactly match the todo "
-                                "strategy_axis. Candidate reason and change reasons must "
-                                "preserve the todo context, stay on its family_key when one "
-                                "is present, and should mention the todo_id. Todo drift is "
-                                "rejected before edits or tests.\n"
-                                f"{active_todo}"
-                            ),
-                        },
-                    ]
+                    add_runtime_context(
+                        "Active durable todo follows. Implement only this todo. "
+                        "Candidate strategy_axis must exactly match the todo "
+                        "strategy_axis. Candidate reason and change reasons must "
+                        "preserve the todo context, stay on its family_key when one "
+                        "is present, and should mention the todo_id. Todo drift is "
+                        "rejected before edits or tests.\n"
+                        f"{active_todo}"
+                    )
                 tactic_library = self._format_tactic_library()
                 if tactic_library:
-                    messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Stagnation brainstorm tactics follow. Prefer one tactic that "
-                                "matches the required strategy axis and has not been rejected.\n"
-                                f"{tactic_library}"
-                            ),
-                        },
-                    ]
+                    add_runtime_context(
+                        "Stagnation brainstorm tactics follow. Prefer one tactic that "
+                        "matches the required strategy axis and has not been rejected.\n"
+                        f"{tactic_library}"
+                    )
                 history = self._format_candidate_history()
                 if history:
+                    add_runtime_context(
+                        "Recent candidate history follows. Avoid repeating rejected changes. "
+                        "Preserve ideas that were accepted unless the current plan says otherwise.\n"
+                        f"{history}"
+                    )
+                if dynamic_suffix_blocks:
                     messages = [
                         *messages,
                         {
-                            "role": "system",
-                            "content": (
-                                "Recent candidate history follows. Avoid repeating rejected changes. "
-                                "Preserve ideas that were accepted unless the current plan says otherwise.\n"
-                                f"{history}"
-                            ),
+                            "role": "user",
+                            "content": "\n\n".join(dynamic_suffix_blocks),
                         },
                     ]
                 decision = await self._json_call("coder", messages, CodeDecision)

@@ -115,6 +115,25 @@ multi-line code inside JSON strings. Set `workflow.log_raw_model_outputs=true`
 to save malformed model outputs under `.local_micro_agent/raw_model_outputs`
 when parsing or repair fails.
 
+By default, `workflow.prompt_cache_friendly_layout=true` splits CODE prompts
+into a stable prefix and a dynamic suffix. The stable prefix keeps the CODE
+system instruction, user request, plan, and source context at the front. Runtime
+feedback such as test output, retry reflection, active todo contracts, adaptive
+search memory, gate telemetry, tactic libraries, and recent candidate history is
+merged into one trailing dynamic message. This does not implement prompt/KV
+caching inside the agent; it only keeps prompt layout friendly to provider or
+self-hosted serving-layer prefix caches such as OpenAI/Gemini implicit prompt
+caching, Anthropic cache breakpoints, Gemini cached content, or vLLM/SGLang
+automatic prefix caching. Avoid placing volatile timestamps, request IDs, or
+tool-output snippets before stable repo context if cache hit rate matters.
+
+For clean model-evaluation runs, do not inject prior-run winning patches or
+human-discovered transformation ladders into the prompt. Candidate ladders used
+by CODE should come from the current run's own PLAN, BRAINSTORM, READ, or
+future RESEARCH artifacts. Solver-oriented runs may enable explicit research or
+external context gathering, but that context should carry provenance instead of
+being silently mixed into clean-eval prompts.
+
 Use `workflow.project_instruction_files` to name instruction files explicitly.
 Use `workflow.project_context_files` to fully override the auto-detected context
 set, or set `workflow.readme_first=false` for controlled experiments.

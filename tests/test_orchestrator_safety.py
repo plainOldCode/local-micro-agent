@@ -266,9 +266,9 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             messages = code_prompt(state)
 
-            self.assertIn("Recent agent feedback", messages[1]["content"])
-            self.assertIn("target not found", messages[1]["content"])
-            self.assertIn("only changes comments", messages[1]["content"])
+            self.assertIn("Recent agent feedback", messages[2]["content"])
+            self.assertIn("target not found", messages[2]["content"])
+            self.assertIn("only changes comments", messages[2]["content"])
 
     def test_reflect_prompt_carries_retry_context_without_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,8 +290,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             messages = code_prompt(state)
 
-            self.assertIn("Retry reflection", messages[1]["content"])
-            self.assertIn("invalid JSON", messages[1]["content"])
+            self.assertIn("Retry reflection", messages[2]["content"])
+            self.assertIn("invalid JSON", messages[2]["content"])
 
     def test_code_prompt_can_request_xml_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1304,11 +1304,16 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             asyncio.run(code_once())
 
-            joined = "\n".join(message["content"] for message in models.seen["coder"][0])
+            coder_messages = models.seen["coder"][0]
+            joined = "\n".join(message["content"] for message in coder_messages)
             self.assertIn("Active durable todo follows", joined)
             self.assertIn("todo-001", joined)
             self.assertIn("Stagnation brainstorm tactics follow", joined)
             self.assertIn("tabula rasa data layout", joined)
+            self.assertEqual([message["role"] for message in coder_messages], ["system", "user", "user"])
+            self.assertNotIn("Active durable todo follows", coder_messages[1]["content"])
+            self.assertIn("Active durable todo follows", coder_messages[-1]["content"])
+            self.assertIn("Stagnation brainstorm tactics follow", coder_messages[-1]["content"])
 
     def test_adaptive_search_can_reject_cooled_axis_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1651,16 +1656,29 @@ class OrchestratorSafetyTests(unittest.TestCase):
             state.file_context = [FileSnapshot("target.py", "value = 1\n")]
             state.notes.append("dynamic feedback")
 
-            user_content = code_prompt(state)[1]["content"]
+            messages = code_prompt(state)
+            stable_content = messages[1]["content"]
+            dynamic_content = messages[2]["content"]
 
-            self.assertLess(
-                user_content.index("Source files:"),
-                user_content.index("Latest test summary:"),
-            )
-            self.assertLess(
-                user_content.index("Latest test summary:"),
-                user_content.index("Recent agent feedback:"),
-            )
+            self.assertIn("Source files:", stable_content)
+            self.assertNotIn("Recent agent feedback:", stable_content)
+            self.assertIn("Dynamic context for this CODE attempt", dynamic_content)
+            self.assertIn("Latest test summary:", dynamic_content)
+            self.assertIn("Recent agent feedback:", dynamic_content)
+
+    def test_code_prompt_can_use_legacy_single_user_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "Plan text"
+            state.file_context = [FileSnapshot("target.py", "value = 1\n")]
+            state.notes.append("dynamic feedback")
+
+            messages = code_prompt(state, cache_friendly_layout=False)
+
+            self.assertEqual(len(messages), 2)
+            self.assertIn("Source files:", messages[1]["content"])
+            self.assertIn("Latest test summary:", messages[1]["content"])
+            self.assertIn("dynamic feedback", messages[1]["content"])
 
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

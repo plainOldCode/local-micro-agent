@@ -170,7 +170,10 @@ def brainstorm_prompt(
 
 
 def code_prompt(
-    state: AgentState, feedback_notes_limit: int = 12, output_format: str = "json"
+    state: AgentState,
+    feedback_notes_limit: int = 12,
+    output_format: str = "json",
+    cache_friendly_layout: bool = True,
 ) -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
@@ -181,6 +184,26 @@ def code_prompt(
         if isinstance(reflection, str) and reflection.strip()
         else ""
     )
+    stable_content = (
+        f"User request:\n{state.user_request}\n\n"
+        f"Plan:\n{state.plan_markdown}\n\n"
+        f"Source files:\n{source_blocks}"
+    )
+    dynamic_content = (
+        "Dynamic context for this CODE attempt:\n\n"
+        f"Latest test summary:\n{state.latest_test_summary()}\n\n"
+        f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
+        f"{reflection_block}"
+    )
+    if cache_friendly_layout:
+        return [
+            {
+                "role": "system",
+                "content": CODE_XML_SYSTEM if output_format == "xml" else CODE_SYSTEM,
+            },
+            {"role": "user", "content": stable_content},
+            {"role": "user", "content": dynamic_content},
+        ]
     return [
         {
             "role": "system",
@@ -189,9 +212,7 @@ def code_prompt(
         {
             "role": "user",
             "content": (
-                f"User request:\n{state.user_request}\n\n"
-                f"Plan:\n{state.plan_markdown}\n\n"
-                f"Source files:\n{source_blocks}"
+                f"{stable_content}"
                 f"\n\nLatest test summary:\n{state.latest_test_summary()}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
                 f"{reflection_block}"
