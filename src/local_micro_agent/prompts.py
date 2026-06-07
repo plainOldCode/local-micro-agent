@@ -36,7 +36,8 @@ Output exactly 3 numbered tactics in Markdown.
 Each tactic must:
 - be a different algorithmic or architectural paradigm
 - avoid repeating the rejected patterns
-- name exactly one strategy_axis from the supplied Known strategy axes
+- name exactly one stable strategy_axis; prefer any domain axes explicitly
+  requested by the task, otherwise use the supplied Known strategy axes
 - if Open novelty lanes are provided, include one novelty_lane line copied from
   those lanes before choosing the family_key
 - include one family_key line with a concise lowercase_snake_case tactic-family
@@ -44,7 +45,7 @@ Each tactic must:
   error_recovery, performance_hot_path, parser_variant, or state_lifecycle
 - if New family required is true, every tactic must use a family_key that is not
   listed in Forbidden family aliases and must avoid the same idea under a new name
-- put any new invented category name after "new_axis_suggestion:" instead of using it as strategy_axis
+- put only secondary or uncertain category names after "new_axis_suggestion:"
 - include one concrete implementation hook in the supplied source
 Keep each tactic to 2 short sentences."""
 

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
 from .mcp_client import McpServerSpec, McpToolClient
 from .models import ModelManager
 from .prompts import (
@@ -24,6 +25,21 @@ from .prompts import (
     test_prompt,
 )
 from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
+from .strategy import (
+    DEFAULT_STRATEGY_AXIS_GUIDANCE,
+    DEFAULT_STRATEGY_AXIS_KEYWORDS,
+    axis_label_matches_text,
+    explicit_tactic_family_key,
+    extract_tactic_axis,
+    keyword_phrase_matches,
+    keyword_token_matches,
+    normalize_fingerprint_text,
+    normalize_strategy_axis,
+    signature_similarity,
+    strategy_axes_for_text,
+    tactic_novelty_lane,
+    tactic_signature,
+)
 from .validators import (
     JsonValidationError,
     parse_json_object,
@@ -31,39 +47,6 @@ from .validators import (
     require_keys,
     retry_repair_prompt,
 )
-
-
-class ReadDecision:
-    def __init__(self, files: list[str], reason: str = ""):
-        self.files = files
-        self.reason = reason
-
-
-class CodeDecision:
-    def __init__(self, changes: list[CodeChange], candidates: list["CodeCandidate"] | None = None):
-        self.changes = changes
-        self.candidates = candidates or [CodeCandidate("1", changes, "single candidate")]
-
-
-class CodeCandidate:
-    def __init__(
-        self,
-        candidate_id: str,
-        changes: list[CodeChange],
-        reason: str = "",
-        strategy_axis: str = "",
-    ):
-        self.candidate_id = candidate_id
-        self.changes = changes
-        self.reason = reason
-        self.strategy_axis = strategy_axis
-
-
-class TestDecision:
-    def __init__(self, status: str, reason: str = "", next_focus: str = ""):
-        self.status = status
-        self.reason = reason
-        self.next_focus = next_focus
 
 
 class MicroAgent:
@@ -386,7 +369,7 @@ class MicroAgent:
                     self.state,
                     reject_summary=reject_summary,
                     cooled_axes=self._current_cooled_axes(),
-                    known_axes=self._strategy_axis_pool(),
+                    known_axes=self._brainstorm_known_axes(),
                     todo_ledger_summary=self._format_todo_ledger_summary(),
                     forbidden_family_aliases=self._forbidden_tactic_family_aliases()
                     if new_family_required
@@ -422,7 +405,8 @@ class MicroAgent:
             self.state.notes.append("Brainstorm tactics added for next CODE attempt")
 
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
-        known_axes = set(self._strategy_axis_pool())
+        strict_axis_pool = self._strict_strategy_axis_pool_enabled()
+        known_axes = set(self._brainstorm_known_axes())
         failed_signatures = self._failed_tactic_signatures()
         failed_family_keys = self._failed_tactic_family_keys()
         selection_records: list[dict[str, Any]] = []
@@ -444,7 +428,7 @@ class MicroAgent:
                 if family_axis:
                     axis = family_axis
                     axis_normalized_from = "family_key"
-            if axis not in known_axes:
+            if strict_axis_pool and axis not in self._strategy_axis_pool():
                 selection_records.append(
                     {
                         "axis": axis,
@@ -601,92 +585,31 @@ class MicroAgent:
         return bool(workflow.get("brainstorm_reject_axis_family_mismatch", True))
 
     def _extract_tactic_axis(self, text: str, known_axes: set[str]) -> tuple[str, str]:
-        patterns = (
-            (
-                r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
-                "strategy_axis",
-            ),
-            (
-                r"\bunder\s+(?:the\s+)?`?([a-zA-Z0-9_-]+)`?\s+axis\b",
-                "axis_phrase",
-            ),
-            (
-                r"\b`?([a-zA-Z0-9_-]+)`?\s+axis\b",
-                "axis_phrase",
-            ),
-        )
-        for pattern, source in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                return self._normalize_strategy_axis(match.group(1)), source
-        mentioned = [
-            axis
-            for axis in sorted(known_axes)
-            if re.search(rf"\b{re.escape(axis)}\b", text, flags=re.IGNORECASE)
-        ]
-        if len(mentioned) == 1:
-            return mentioned[0], "known_axis_mention"
-        family_axis = self._canonical_axis_from_family_key(
-            self._tactic_family_key(text), known_axes
-        )
-        if family_axis:
-            return family_axis, "family_key"
-        return "", ""
+        return extract_tactic_axis(text, known_axes)
 
     def _family_key_strategy_axes(self, family_key: str) -> list[str]:
         normalized_axis = self._normalize_strategy_axis(family_key)
         if not normalized_axis:
             return []
-        mapped = self._configured_family_axis_map().get(normalized_axis)
-        if mapped:
-            return [axis for axis in mapped if axis in self._strategy_axis_pool()]
-        if normalized_axis in self._strategy_axis_pool():
+        axes = (
+            self._strategy_axis_pool()
+            if self._strict_strategy_axis_pool_enabled()
+            else self._known_strategy_axes()
+        )
+        if normalized_axis in axes:
             return [normalized_axis]
-        if self.config.get("workflow", {}).get("adaptive_search_infer_family_axis_from_keywords"):
-            normalized = self._normalize_fingerprint_text(family_key)
-            return self._strategy_axes_for_text(normalized, self._strategy_axis_keywords())
         return []
-
-    def _configured_family_axis_map(self) -> dict[str, list[str]]:
-        workflow = self.config.get("workflow", {})
-        raw_map = workflow.get("adaptive_search_family_axis_map", {})
-        if not isinstance(raw_map, dict):
-            return {}
-        mapped: dict[str, list[str]] = {}
-        for raw_family, raw_axes in raw_map.items():
-            family = self._normalize_strategy_axis(str(raw_family))
-            if not family:
-                continue
-            if isinstance(raw_axes, str):
-                axes = [raw_axes]
-            elif isinstance(raw_axes, list):
-                axes = [str(axis) for axis in raw_axes if str(axis)]
-            else:
-                axes = []
-            normalized_axes = [
-                self._normalize_strategy_axis(axis)
-                for axis in axes
-                if self._normalize_strategy_axis(axis)
-            ]
-            if normalized_axes:
-                mapped[family] = normalized_axes
-        return mapped
 
     def _canonical_axis_from_family_key(
         self, family_key: str, known_axes: set[str] | None = None
     ) -> str:
-        known = known_axes or set(self._strategy_axis_pool())
+        known = known_axes or set(self._known_strategy_axes())
         axes = sorted({axis for axis in self._family_key_strategy_axes(family_key) if axis in known})
         return axes[0] if len(axes) == 1 else ""
 
     @staticmethod
     def _explicit_tactic_family_key(text: str) -> str:
-        match = re.search(
-            r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?",
-            text,
-            re.IGNORECASE,
-        )
-        return match.group(1).strip().lower() if match else ""
+        return explicit_tactic_family_key(text)
 
     def _score_brainstorm_tactic(
         self,
@@ -998,92 +921,18 @@ class MicroAgent:
 
     @staticmethod
     def _tactic_signature(text: str) -> set[str]:
-        normalized = re.sub(r"[^a-zA-Z0-9_]+", " ", text.lower())
-        stopwords = {
-            "the",
-            "and",
-            "for",
-            "with",
-            "from",
-            "into",
-            "this",
-            "that",
-            "todo",
-            "tactic",
-            "strategy_axis",
-            "new_axis_suggestion",
-            "hook",
-            "modify",
-            "replace",
-            "implement",
-            "feasibility",
-            "probe",
-        }
-        return {
-            token
-            for token in normalized.split()
-            if len(token) >= 4 and token not in stopwords and not token.isdigit()
-        }
+        return tactic_signature(text)
 
     @staticmethod
     def _signature_similarity(left: set[str], right: set[str]) -> float:
-        if not left or not right:
-            return 0.0
-        return len(left & right) / len(left | right)
+        return signature_similarity(left, right)
 
     def _tactic_family_key(self, text: str) -> str:
-        explicit = re.search(r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?", text, re.IGNORECASE)
-        if explicit:
-            return explicit.group(1).strip().lower()
-        for rule in self._configured_family_rules():
-            family_key = self._family_key_from_rule(text, rule)
-            if family_key:
-                return family_key
-        return ""
-
-    def _configured_family_rules(self) -> list[dict[str, Any]]:
-        workflow = self.config.get("workflow", {})
-        raw_rules = workflow.get("adaptive_search_family_rules", [])
-        if not isinstance(raw_rules, list):
-            return []
-        return [rule for rule in raw_rules if isinstance(rule, dict)]
-
-    def _family_key_from_rule(self, text: str, rule: dict[str, Any]) -> str:
-        family_key = self._normalize_strategy_axis(str(rule.get("family_key", "")))
-        if not family_key:
-            return ""
-        normalized = re.sub(r"[^a-zA-Z0-9]+", " ", text.lower())
-        tokens = set(normalized.split())
-
-        def has(keyword: str, allow_variants: bool = True) -> bool:
-            return MicroAgent._keyword_phrase_matches(
-                tokens, keyword, allow_variants=allow_variants
-            )
-
-        def has_any(keywords: list[str], allow_variants: bool = True) -> bool:
-            return any(has(keyword, allow_variants=allow_variants) for keyword in keywords)
-
-        all_keywords = [str(item) for item in rule.get("all", []) if str(item)]
-        any_keywords = [str(item) for item in rule.get("any", []) if str(item)]
-        allow_variants = bool(rule.get("allow_variants", True))
-        if all_keywords and not all(has(keyword, allow_variants) for keyword in all_keywords):
-            return ""
-        if any_keywords and not has_any(any_keywords, allow_variants):
-            return ""
-        if not all_keywords and not any_keywords:
-            return ""
-        return family_key
+        return explicit_tactic_family_key(text)
 
     @staticmethod
     def _tactic_novelty_lane(text: str) -> str:
-        match = re.search(
-            r"novelty[\s_*.-]*lane\s*:\s*`?([a-zA-Z0-9_-]+)`?",
-            text,
-            re.IGNORECASE,
-        )
-        if match:
-            return MicroAgent._normalize_strategy_axis(match.group(1))
-        return ""
+        return tactic_novelty_lane(text)
 
     def _tactic_family_aliases(self, text: str, include_axes: bool = True) -> set[str]:
         aliases: set[str] = set()
@@ -1874,16 +1723,26 @@ class MicroAgent:
         )
         if not axes:
             axes = self._strategy_axes_for_text(code_text, self._strategy_axis_keywords())
-        if declared and declared in self._strategy_axis_pool() and declared not in axes:
+        if (
+            declared
+            and (
+                not self._strict_strategy_axis_pool_enabled()
+                or declared in self._strategy_axis_pool()
+            )
+            and declared not in axes
+        ):
             axes.append(declared)
         if not axes:
             axes = ["general_edit"]
         return sorted(set(axes))
 
     def _candidate_reason_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
+        declared = self._normalize_strategy_axis(candidate.strategy_axis)
         reason_parts = [candidate.reason, *(change.reason for change in candidate.changes)]
         reason_text = self._normalize_fingerprint_text("\n".join(reason_parts))
         axes = self._strategy_axes_for_text(reason_text, self._strategy_axis_keywords())
+        if declared and axis_label_matches_text(declared, reason_text) and declared not in axes:
+            axes.append(declared)
         return axes or ["general_edit"]
 
     def _strategy_axis_keywords(self) -> dict[str, tuple[str, ...]]:
@@ -1914,125 +1773,25 @@ class MicroAgent:
                 keyword_axes[axis] = tuple([label, *axis_tokens])
         if keyword_axes:
             return keyword_axes
-        return {
-            "correctness": (
-                "bug",
-                "correctness",
-                "behavior",
-                "regression",
-                "invariant",
-                "validation",
-            ),
-            "api_contract": (
-                "api",
-                "interface",
-                "signature",
-                "schema",
-                "contract",
-                "parameter",
-                "compatibility",
-            ),
-            "data_flow": (
-                "data",
-                "flow",
-                "transform",
-                "mapping",
-                "pipeline",
-                "dependency",
-                "input",
-                "output",
-            ),
-            "state_management": (
-                "state",
-                "cache",
-                "memo",
-                "persistence",
-                "lifecycle",
-                "mutation",
-            ),
-            "error_handling": (
-                "error",
-                "exception",
-                "failure",
-                "recover",
-                "fallback",
-                "retry",
-            ),
-            "parsing": ("parse", "parser", "regex", "xml", "json", "yaml", "csv"),
-            "performance": (
-                "performance",
-                "speed",
-                "latency",
-                "throughput",
-                "optimize",
-                "hot path",
-            ),
-            "resource_management": (
-                "memory",
-                "resource",
-                "file",
-                "handle",
-                "buffer",
-                "process",
-                "leak",
-            ),
-            "test_contract": ("test", "assert", "fixture", "coverage", "mock", "threshold"),
-            "runtime_control": (
-                "timeout",
-                "async",
-                "process",
-                "subprocess",
-                "concurrency",
-                "scheduler",
-            ),
-        }
+        return DEFAULT_STRATEGY_AXIS_KEYWORDS
 
     @staticmethod
     def _strategy_axes_for_text(
         text: str, keyword_axes: dict[str, tuple[str, ...]]
     ) -> list[str]:
-        normalized = re.sub(r"[^a-zA-Z0-9]+", " ", text.lower())
-        tokens = set(normalized.split())
-        axes: list[str] = []
-        for axis, keywords in keyword_axes.items():
-            for keyword in keywords:
-                if MicroAgent._keyword_phrase_matches(tokens, keyword):
-                    axes.append(axis)
-                    break
-        return axes
+        return strategy_axes_for_text(text, keyword_axes)
 
     @staticmethod
     def _keyword_phrase_matches(
         tokens: set[str], keyword: str, allow_variants: bool = True
     ) -> bool:
-        key = re.sub(r"[^a-zA-Z0-9]+", " ", keyword.lower()).strip()
-        if not key:
-            return False
-        return all(
-            MicroAgent._keyword_token_matches(
-                tokens, token, allow_variants=allow_variants
-            )
-            for token in key.split()
-        )
+        return keyword_phrase_matches(tokens, keyword, allow_variants=allow_variants)
 
     @staticmethod
     def _keyword_token_matches(
         tokens: set[str], keyword_token: str, allow_variants: bool = True
     ) -> bool:
-        if keyword_token in tokens:
-            return True
-        if not allow_variants or len(keyword_token) < 4:
-            return False
-        variants = {keyword_token + "s", keyword_token + "es"}
-        if keyword_token.endswith("e"):
-            variants.add(keyword_token + "d")
-            variants.add(keyword_token[:-1] + "ing")
-        else:
-            variants.add(keyword_token + "ed")
-            variants.add(keyword_token + "ing")
-        if keyword_token.endswith("y") and len(keyword_token) > 4:
-            variants.add(keyword_token[:-1] + "ies")
-        return bool(tokens & variants)
+        return keyword_token_matches(tokens, keyword_token, allow_variants=allow_variants)
 
     def _format_axis_contract(self) -> str:
         if not self._axis_contract_enabled():
@@ -2046,9 +1805,9 @@ class MicroAgent:
             "required_family_key": self._selected_tactic_family_for_current_loop(),
             "allowed_strategy_axes": self._allowed_strategy_axes(),
             "cooled_strategy_axes": cooled_axes,
-            "known_strategy_axes": self._strategy_axis_pool(),
+            "known_strategy_axes": self._brainstorm_known_axes(),
             "required_axis_guidance": self._strategy_axis_guidance(required_axis),
-            "selected_tactic": self.state.scratch.get("selected_tactic", {}),
+            "selected_tactic": self._selected_tactic_for_current_loop(),
             "output_requirement": (
                 "Set candidate strategy_axis exactly to required_strategy_axis. "
                 "In XML mode include <strategy_axis>axis</strategy_axis> inside each "
@@ -2075,111 +1834,7 @@ class MicroAgent:
                     "try": ["choose one small concrete tactic for this axis"],
                     "avoid_drift": ["renaming another strategy as this axis"],
                 }
-        guidance = {
-            "correctness": {
-                "focus": "Fix a behavior, invariant, or regression with a narrow edit.",
-                "try": [
-                    "target the smallest failing behavior boundary",
-                    "preserve public behavior outside the failing case",
-                    "keep the change easy to validate with existing tests",
-                ],
-                "avoid_drift": ["unrelated refactor", "test-only change"],
-            },
-            "api_contract": {
-                "focus": "Align one caller/callee, schema, signature, or interface contract.",
-                "try": [
-                    "make parameter handling explicit",
-                    "normalize one input/output shape",
-                    "preserve backward-compatible public behavior when possible",
-                ],
-                "avoid_drift": ["broad architecture rewrite", "hidden behavior change"],
-            },
-            "data_flow": {
-                "focus": "Change how data moves, is transformed, or is reused locally.",
-                "try": [
-                    "remove one redundant conversion or copy",
-                    "make one dependency or transformation boundary explicit",
-                    "keep the edit close to the observed data-flow issue",
-                ],
-                "avoid_drift": ["global rewrite", "unrelated API cleanup"],
-            },
-            "state_management": {
-                "focus": "Adjust state, cache, lifecycle, or persistence behavior.",
-                "try": [
-                    "fix one initialization, invalidation, or update path",
-                    "reduce stale or duplicated state",
-                    "keep state ownership boundaries intact",
-                ],
-                "avoid_drift": ["unrelated data model rewrite", "changing persistence format broadly"],
-            },
-            "error_handling": {
-                "focus": "Improve one concrete error, retry, fallback, or recovery path.",
-                "try": [
-                    "handle one known exception or failed result shape",
-                    "preserve useful diagnostic output",
-                    "avoid hiding failures that should stay visible",
-                ],
-                "avoid_drift": ["catch-all masking", "silent failure"],
-            },
-            "parsing": {
-                "focus": "Improve one parser, serializer, or text/data format boundary.",
-                "try": [
-                    "accept one real input variant",
-                    "tighten one ambiguous parse branch",
-                    "keep invalid input rejection explicit",
-                ],
-                "avoid_drift": ["format rewrite outside the failing boundary"],
-            },
-            "performance": {
-                "focus": "Reduce repeated work or latency in a measured hot path.",
-                "try": [
-                    "remove one redundant calculation, lookup, allocation, or I/O",
-                    "cache or reuse a value only where lifetime is clear",
-                    "keep correctness and observability unchanged",
-                ],
-                "avoid_drift": ["unsafe caching", "large speculative rewrite"],
-            },
-            "resource_management": {
-                "focus": "Adjust memory, file, process, or other resource lifetime.",
-                "try": [
-                    "close or bound one resource lifecycle",
-                    "reduce one unnecessary allocation or buffer copy",
-                    "make cleanup behavior explicit",
-                ],
-                "avoid_drift": ["changing ownership broadly", "hiding resource failures"],
-            },
-            "test_contract": {
-                "focus": "Align implementation with tests or add a focused test when allowed.",
-                "try": [
-                    "target one assertion boundary",
-                    "use the smallest fixture or expectation update",
-                    "keep production changes separate from test-only changes",
-                ],
-                "avoid_drift": ["weakening tests to pass", "broad fixture churn"],
-            },
-            "runtime_control": {
-                "focus": "Adjust timeout, async, subprocess, retry, or concurrency control.",
-                "try": [
-                    "bound one wait/retry path",
-                    "make process or task lifecycle explicit",
-                    "preserve deterministic cleanup",
-                ],
-                "avoid_drift": ["unbounded retries", "global scheduling rewrite"],
-            },
-            "general_edit": {
-                "focus": "Make a small novel edit that does not fit a cooled specialist axis.",
-                "try": [
-                    "remove dead or duplicate work",
-                    "simplify a local invariant",
-                    "make one correctness-preserving local cleanup with measurable effect",
-                ],
-                "avoid_drift": [
-                    "repeating any cooled axis under a generic label",
-                    "mixing multiple independent tactics",
-                ],
-            },
-        }
-        return guidance.get(
+        return DEFAULT_STRATEGY_AXIS_GUIDANCE.get(
             normalized_axis,
             {
                 "focus": f"Make a candidate centered on {normalized_axis or axis}.",
@@ -2188,11 +1843,29 @@ class MicroAgent:
             },
         )
 
+    def _selected_tactic_for_current_loop(self) -> dict[str, Any]:
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        if not isinstance(selected_tactic, dict):
+            return {}
+        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+            return {}
+        axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
+        if (
+            self._strict_strategy_axis_pool_enabled()
+            and axis not in self._strategy_axis_pool()
+        ):
+            return {}
+        return selected_tactic
+
     def _axis_contract_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("adaptive_search_force_strategy_axis")) and (
             self._adaptive_search_memory_enabled()
         )
+
+    def _strict_strategy_axis_pool_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("adaptive_search_strict_axis_pool", False))
 
     def _strategy_axis_pool(self) -> list[str]:
         workflow = self.config.get("workflow", {})
@@ -2204,18 +1877,59 @@ class MicroAgent:
             axes.append("general_edit")
         return axes
 
+    def _known_strategy_axes(self) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for axis in [*self._strategy_axis_pool(), *sorted(self._observed_strategy_axes())]:
+            normalized = self._normalize_strategy_axis(str(axis))
+            if normalized and normalized not in seen:
+                ordered.append(normalized)
+                seen.add(normalized)
+        if "general_edit" not in seen:
+            ordered.append("general_edit")
+        return ordered
+
+    def _observed_strategy_axes(self) -> set[str]:
+        axes: set[str] = set()
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        if isinstance(selected_tactic, dict):
+            axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
+            if axis:
+                axes.add(axis)
+        active_todo = self.state.scratch.get("active_todo")
+        if isinstance(active_todo, dict):
+            axis = self._normalize_strategy_axis(str(active_todo.get("strategy_axis", "")))
+            if axis:
+                axes.add(axis)
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if isinstance(memory, dict) and isinstance(memory.get("axes"), dict):
+            axes.update(
+                self._normalize_strategy_axis(str(axis))
+                for axis in memory["axes"]
+                if self._normalize_strategy_axis(str(axis))
+            )
+        return axes
+
+    def _brainstorm_known_axes(self) -> list[str]:
+        if self._strict_strategy_axis_pool_enabled():
+            return self._strategy_axis_pool()
+        return self._known_strategy_axes()
+
     def _allowed_strategy_axes(self) -> list[str]:
         cooled = set(self._current_cooled_axes())
-        return [axis for axis in self._strategy_axis_pool() if axis not in cooled]
+        pool = (
+            self._strategy_axis_pool()
+            if self._strict_strategy_axis_pool_enabled()
+            else self._known_strategy_axes()
+        )
+        return [axis for axis in pool if axis not in cooled]
 
     def _select_required_strategy_axis(self) -> str:
         allowed = self._allowed_strategy_axes()
-        selected_tactic = self.state.scratch.get("selected_tactic")
-        selected_loop = self.state.scratch.get("selected_tactic_loop")
-        known_axes = self._strategy_axis_pool()
+        selected_tactic = self._selected_tactic_for_current_loop()
+        known_axes = self._brainstorm_known_axes()
         if (
-            isinstance(selected_tactic, dict)
-            and selected_loop == self.state.loop_count
+            selected_tactic
             and selected_tactic.get("strategy_axis") in known_axes
         ):
             return str(selected_tactic["strategy_axis"])
@@ -2265,13 +1979,15 @@ class MicroAgent:
     def _candidate_axis_contract_rejection(
         self, candidate: CodeCandidate
     ) -> tuple[str, str] | None:
-        if not self._axis_contract_enabled():
-            return None
+        strict_axis_pool = self._strict_strategy_axis_pool_enabled()
+        axis_contract = self._axis_contract_enabled()
         declared = self._normalize_strategy_axis(candidate.strategy_axis)
+        if strict_axis_pool and declared and declared not in self._strategy_axis_pool():
+            return ("rejected_unknown_axis", f"unknown strategy_axis {declared}")
+        if not axis_contract:
+            return None
         if not declared:
             return ("rejected_missing_axis", "missing strategy_axis")
-        if declared not in self._strategy_axis_pool():
-            return ("rejected_unknown_axis", f"unknown strategy_axis {declared}")
         required = self.state.scratch.get("required_strategy_axis")
         if isinstance(required, str) and required and declared != required:
             return (
@@ -2499,7 +2215,7 @@ class MicroAgent:
 
     @staticmethod
     def _normalize_strategy_axis(axis: str) -> str:
-        return re.sub(r"[^a-z0-9_]+", "_", axis.strip().lower()).strip("_")
+        return normalize_strategy_axis(axis)
 
     def _cooled_candidate_axes(self, candidate: CodeCandidate) -> list[str]:
         if not self._adaptive_search_reject_cooled_axes_enabled():
@@ -2540,21 +2256,15 @@ class MicroAgent:
         return selected_axis in self._candidate_reason_strategy_axes(candidate)
 
     def _selected_tactic_axis_for_current_loop(self) -> str | None:
-        selected_tactic = self.state.scratch.get("selected_tactic")
-        if not isinstance(selected_tactic, dict):
-            return None
-        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+        selected_tactic = self._selected_tactic_for_current_loop()
+        if not selected_tactic:
             return None
         axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
-        if axis in self._strategy_axis_pool():
-            return axis
-        return None
+        return axis or None
 
     def _selected_tactic_family_for_current_loop(self) -> str | None:
-        selected_tactic = self.state.scratch.get("selected_tactic")
-        if not isinstance(selected_tactic, dict):
-            return None
-        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+        selected_tactic = self._selected_tactic_for_current_loop()
+        if not selected_tactic:
             return None
         family_key = self._normalize_strategy_axis(str(selected_tactic.get("family_key", "")))
         return family_key or None
@@ -2853,7 +2563,7 @@ class MicroAgent:
 
     @staticmethod
     def _normalize_fingerprint_text(text: str) -> str:
-        return re.sub(r"\s+", " ", text.strip()).lower()
+        return normalize_fingerprint_text(text)
 
     async def _run_test_commands(self) -> list[TestResult]:
         commands = self.config.get("workflow", {}).get("test_commands", [])
@@ -3091,7 +2801,7 @@ class MicroAgent:
         if not record:
             return
         axis = self._normalize_strategy_axis(str(record.get("strategy_axis", "")))
-        if axis not in self._strategy_axis_pool():
+        if self._strict_strategy_axis_pool_enabled() and axis not in self._strategy_axis_pool():
             axes = record.get("strategy_axes")
             if isinstance(axes, list):
                 axis = next(
@@ -3100,6 +2810,19 @@ class MicroAgent:
                         for raw_axis in axes
                         if (normalized := self._normalize_strategy_axis(str(raw_axis)))
                         in self._strategy_axis_pool()
+                    ),
+                    "general_edit",
+                )
+            else:
+                axis = "general_edit"
+        if not axis:
+            axes = record.get("strategy_axes")
+            if isinstance(axes, list):
+                axis = next(
+                    (
+                        normalized
+                        for raw_axis in axes
+                        if (normalized := self._normalize_strategy_axis(str(raw_axis)))
                     ),
                     "general_edit",
                 )
