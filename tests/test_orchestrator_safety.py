@@ -47,6 +47,24 @@ class _StaticModelManager:
         return _StaticModel(self.output)
 
 
+class _SequenceModel:
+    def __init__(self, outputs: list[str]):
+        self.outputs = outputs
+
+    async def chat(self, messages):
+        if len(self.outputs) > 1:
+            return self.outputs.pop(0)
+        return self.outputs[0]
+
+
+class _SequenceModelManager:
+    def __init__(self, outputs: list[str]):
+        self.outputs = outputs
+
+    def get(self, role):
+        return _SequenceModel(self.outputs)
+
+
 class _RoleModel:
     def __init__(self, outputs: dict[str, str], seen: dict[str, list[list[dict[str, str]]]], role: str):
         self.outputs = outputs
@@ -751,6 +769,79 @@ value = 'fast'
             self.assertEqual(record["status"], "rejected_no_changes")
             self.assertEqual(record["repair_parent_id"], "miss")
             self.assertIn("Replacement target not found", record["failure_detail"])
+
+    def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": True,
+                    "code_output_format": "xml",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            agent.models = _SequenceModelManager(
+                [
+                    "<candidates><candidate><search>value = 'old'</search></candidate></candidates>",
+                    json.dumps(
+                        {
+                            "candidates": [
+                                {
+                                    "search": "value = 'old'",
+                                    "replacement": "value = 'fast'",
+                                    "strategy_axis": "general_edit",
+                                    "reason": "loose repaired json",
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            )
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="make it fast",
+                        target="value = 'missing'\n",
+                        replacement="value = 'fast'\n",
+                    )
+                ],
+                "make it fast",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'fast'\n")
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["candidate_id"], "miss-repair1")
+            self.assertEqual(record["repair_parent_id"], "miss")
+            self.assertEqual(record["status"], "improved")
 
     def test_candidate_artifacts_record_patch_and_test_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

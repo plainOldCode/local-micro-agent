@@ -2923,15 +2923,28 @@ class MicroAgent:
                     repaired = await self.models.get("coder").chat(
                         retry_repair_prompt(output, exc)
                     )
-                    return self._parse_decision(repaired, CodeDecision)
-                except Exception as repair_exc:
-                    if isinstance(repair_exc, JsonValidationError):
-                        self._record_raw_model_output(
-                            "coder", "target-not-found-repair-json", repaired, repair_exc
-                        )
+                except Exception as repair_call_exc:
                     raise JsonValidationError(
-                        f"target-not-found repair parse failed: {repair_exc}"
-                    ) from repair_exc
+                        "target-not-found repair JSON repair model call failed: "
+                        f"{type(repair_call_exc).__name__}: {repair_call_exc}"
+                    ) from repair_call_exc
+                try:
+                    return self._parse_decision(repaired, CodeDecision)
+                except JsonValidationError as repair_parse_exc:
+                    try:
+                        return self._parse_loose_target_not_found_repair(
+                            repaired, candidate
+                        )
+                    except JsonValidationError:
+                        self._record_raw_model_output(
+                            "coder",
+                            "target-not-found-repair-json",
+                            repaired,
+                            repair_parse_exc,
+                        )
+                        raise JsonValidationError(
+                            f"target-not-found repair parse failed: {repair_parse_exc}"
+                        ) from repair_parse_exc
 
     def _parse_loose_target_not_found_repair(
         self, output: str, original: CodeCandidate
