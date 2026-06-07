@@ -2448,7 +2448,7 @@ value = 'fast'
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"status": "rejected_wrong_axis"', history)
 
-    def test_axis_contract_rejects_reason_drift_from_required_axis(self) -> None:
+    def test_axis_contract_allows_reason_drift_with_matching_declared_axis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             target = repo / "target.py"
@@ -2495,9 +2495,10 @@ value = 'fast'
             asyncio.run(evaluate_once())
 
             self.assertEqual(target.read_text(), "value = 'old'\n")
-            self.assertIn("does not substantively target required", "\n".join(state.notes))
+            self.assertNotIn("does not substantively target required", "\n".join(state.notes))
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
-            self.assertIn('"status": "rejected_axis_drift"', history)
+            self.assertNotIn('"status": "rejected_axis_drift"', history)
+            self.assertIn('"status": "rejected"', history)
 
     def test_family_contract_rejects_selected_tactic_drift_to_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3342,6 +3343,89 @@ value = 'fast'
             )
 
             self.assertIsNone(agent._active_todo_contract_rejection(candidate))
+
+    def test_active_todo_contract_trusts_matching_declared_dynamic_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            todo = {
+                "todo_id": "todo-001-vliw_packing",
+                "status": "attempted",
+                "strategy_axis": "vliw_packing",
+                "family_key": "",
+                "context": "bundle scheduler tactic",
+                "attempts": 1,
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"todo_soft_until_first_improvement": False},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "declared-axis",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="basic hazard-aware VLIW bundle packer",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Implement a hazard-aware VLIW bundle scheduler.",
+                strategy_axis="vliw_packing",
+            )
+
+            self.assertIn("vliw_packing", agent._candidate_strategy_axes(candidate))
+            self.assertNotIn(
+                "vliw_packing", agent._candidate_reason_strategy_axes(candidate)
+            )
+            self.assertIsNone(agent._active_todo_contract_rejection(candidate))
+
+    def test_axis_contract_trusts_matching_declared_dynamic_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "adaptive_search_force_strategy_axis": True,
+                        "adaptive_search_axis_pool": ["multi_engine_slot_accumulation"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["required_strategy_axis"] = (
+                "multi_engine_slot_accumulation"
+            )
+            candidate = CodeCandidate(
+                "declared-axis",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="basic hazard-aware VLIW bundle packer",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Implement a hazard-aware VLIW bundle scheduler.",
+                strategy_axis="multi_engine_slot_accumulation",
+            )
+
+            self.assertIn(
+                "multi_engine_slot_accumulation",
+                agent._candidate_strategy_axes(candidate),
+            )
+            self.assertNotIn(
+                "multi_engine_slot_accumulation",
+                agent._candidate_reason_strategy_axes(candidate),
+            )
+            self.assertIsNone(agent._candidate_axis_contract_rejection(candidate))
 
     def test_active_todo_contract_rejects_family_drift_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1996,18 +1996,18 @@ class MicroAgent:
                 f"strategy_axis {declared} does not match required {required}",
             )
         if isinstance(required, str) and required:
-            reason_axes = self._candidate_reason_strategy_axes(candidate)
+            candidate_axes = self._candidate_strategy_axes(candidate)
             if required == "general_edit":
-                if reason_axes != ["general_edit"]:
+                if candidate_axes != ["general_edit"]:
                     return (
                         "rejected_axis_drift",
                         "candidate reason targets "
-                        f"{', '.join(reason_axes)} instead of required general_edit",
+                        f"{', '.join(candidate_axes)} instead of required general_edit",
                     )
-            elif required not in reason_axes:
+            elif required not in candidate_axes:
                 return (
                     "rejected_axis_drift",
-                    "candidate reason does not substantively target required "
+                    "candidate does not substantively target required "
                     f"strategy_axis {required}",
                 )
         if declared in self._current_cooled_axes():
@@ -2049,11 +2049,11 @@ class MicroAgent:
             )
 
         if required_axis:
-            reason_axes = self._candidate_reason_strategy_axes(candidate)
-            if required_axis not in reason_axes:
+            candidate_axes = self._candidate_strategy_axes(candidate)
+            if required_axis not in candidate_axes:
                 return (
                     "rejected_todo_axis_drift",
-                    "candidate reason does not substantively target active todo "
+                    "candidate does not substantively target active todo "
                     f"{todo_id} axis {required_axis}",
                 )
 
@@ -2254,7 +2254,7 @@ class MicroAgent:
         declared = self._normalize_strategy_axis(candidate.strategy_axis)
         if declared != selected_axis:
             return False
-        return selected_axis in self._candidate_reason_strategy_axes(candidate)
+        return selected_axis in self._candidate_strategy_axes(candidate)
 
     def _selected_tactic_axis_for_current_loop(self) -> str | None:
         selected_tactic = self._selected_tactic_for_current_loop()

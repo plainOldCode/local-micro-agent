@@ -114,8 +114,12 @@ discarded just because generated patch/search text did not match the current
 source.
 By default, `workflow.todo_enforce_active_contract=true` also makes active todo
 contracts controller-enforced: a queued candidate whose declared
-`strategy_axis`, reason, or detected family drifts away from the active todo is
-rejected before edits or tests and counted against that todo's retry budget.
+`strategy_axis` or detected family drifts away from the active todo is rejected
+before edits or tests and counted against that todo's retry budget. The
+controller trusts a matching declared `strategy_axis` as structured intent;
+natural-language reason axis matching is used as supporting evidence, not as a
+separate hard reject, so dynamic axes from the request are not overblocked by
+lexical wording misses.
 `workflow.todo_reject_duplicate_variants=true` also rejects same-todo retries
 whose candidate/change reasons are effectively the same as a recent rejected
 attempt, preventing retry budget from being spent on retesting the same
