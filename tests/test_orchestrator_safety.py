@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from local_micro_agent.orchestrator import CodeCandidate, MicroAgent
+from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent
 from local_micro_agent.prompts import code_prompt, reflect_prompt
 from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot
 
@@ -145,6 +145,81 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.current, AgentStateName.FAILED)
             self.assertFalse((repo / "created.py").exists())
+
+    def test_profile_agent_records_phase_and_test_command_spans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+
+            result = run_agent(
+                repo,
+                {
+                    "profile_agent": True,
+                    "writable_files": ["target.py"],
+                    "seed_changes": [
+                        {
+                            "path": "target.py",
+                            "target": "value = 'old'\n",
+                            "replacement": "value = 'new'\n",
+                        }
+                    ],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            profile_path = repo / ".local_micro_agent" / "profile_events.jsonl"
+            rows = [
+                json.loads(line)
+                for line in profile_path.read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(any(row["event_type"] == "phase" for row in rows))
+            self.assertTrue(any(row.get("phase") == "CODE" for row in rows))
+            command_events = [
+                row for row in rows if row["event_type"] == "test_command"
+            ]
+            self.assertEqual(len(command_events), 1)
+            self.assertEqual(command_events[0]["exit_code"], 0)
+            self.assertGreaterEqual(command_events[0]["elapsed_ms"], 0)
+
+    def test_profile_agent_records_model_call_spans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"profile_agent": True},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager('{"changes":[]}')
+
+            decision = asyncio.run(
+                agent._json_call(
+                    "coder",
+                    [{"role": "user", "content": "make no changes"}],
+                    schema=CodeDecision,
+                )
+            )
+
+            self.assertIsNotNone(decision)
+            profile_path = repo / ".local_micro_agent" / "profile_events.jsonl"
+            rows = [
+                json.loads(line)
+                for line in profile_path.read_text().splitlines()
+                if line.strip()
+            ]
+            model_events = [
+                row for row in rows if row["event_type"] == "model_call"
+            ]
+            self.assertEqual(len(model_events), 1)
+            self.assertEqual(model_events[0]["role"], "coder")
+            self.assertEqual(model_events[0]["call_site"], "json_call")
+            self.assertGreater(model_events[0]["prompt_chars"], 0)
+            self.assertGreater(model_events[0]["output_chars"], 0)
 
     def test_metric_rejects_non_improvement_and_restores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

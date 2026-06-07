@@ -78,25 +78,149 @@ class MicroAgent:
             }
         )
 
+    def _profile_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(
+            workflow.get("profile_agent")
+            or workflow.get("debug_profile_agent")
+            or workflow.get("profile_agent_debug")
+        )
+
+    def _profile_span_start(self) -> dict[str, float]:
+        return {"wall": time.time(), "perf": time.perf_counter()}
+
+    def _record_profile_span(
+        self,
+        event_type: str,
+        start: dict[str, float],
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not self._profile_enabled():
+            return
+        now_wall = time.time()
+        elapsed_ms = (time.perf_counter() - start["perf"]) * 1000
+        record: dict[str, Any] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event_type": event_type,
+            "loop": self.state.loop_count,
+            "state": str(self.state.current),
+            "elapsed_ms": round(elapsed_ms, 3),
+            "started_at_epoch": round(start["wall"], 6),
+            "ended_at_epoch": round(now_wall, 6),
+        }
+        if extra:
+            record.update(
+                {
+                    key: value
+                    for key, value in extra.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        path = self._workflow_artifact_path(
+            "profile_events_path", ".local_micro_agent/profile_events.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    async def _profiled_phase(self, phase: str, func) -> None:
+        start = self._profile_span_start()
+        start_loop = self.state.loop_count
+        start_state = str(self.state.current)
+        try:
+            await func()
+        except Exception as exc:
+            self._record_profile_span(
+                "phase",
+                start,
+                {
+                    "phase": phase,
+                    "start_loop": start_loop,
+                    "end_loop": self.state.loop_count,
+                    "start_state": start_state,
+                    "end_state": str(self.state.current),
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            raise
+        self._record_profile_span(
+            "phase",
+            start,
+            {
+                "phase": phase,
+                "start_loop": start_loop,
+                "end_loop": self.state.loop_count,
+                "start_state": start_state,
+                "end_state": str(self.state.current),
+                "success": True,
+            },
+        )
+
+    async def _model_chat(
+        self, role: str, messages: list[dict[str, str]], call_site: str = ""
+    ) -> str:
+        start = self._profile_span_start()
+        prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
+        model_name = self.config.get("models", {}).get(role) or self.config.get(
+            "models", {}
+        ).get("default")
+        provider = self.config.get("providers", {}).get(str(model_name), {})
+        try:
+            output = await self.models.get(role).chat(messages)
+        except Exception as exc:
+            self._record_profile_span(
+                "model_call",
+                start,
+                {
+                    "role": role,
+                    "call_site": call_site,
+                    "model_name": model_name,
+                    "provider_kind": provider.get("kind"),
+                    "provider_model": provider.get("model"),
+                    "message_count": len(messages),
+                    "prompt_chars": prompt_chars,
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            raise
+        self._record_profile_span(
+            "model_call",
+            start,
+            {
+                "role": role,
+                "call_site": call_site,
+                "model_name": model_name,
+                "provider_kind": provider.get("kind"),
+                "provider_model": provider.get("model"),
+                "message_count": len(messages),
+                "prompt_chars": prompt_chars,
+                "output_chars": len(output),
+                "success": True,
+            },
+        )
+        return output
+
     async def run(self) -> AgentState:
         await self.mcp.start()
         try:
             while self.state.current not in {AgentStateName.DONE, AgentStateName.FAILED}:
                 if self.state.current == AgentStateName.PLAN:
                     self._log("PLAN")
-                    await self.plan()
+                    await self._profiled_phase("PLAN", self.plan)
                 elif self.state.current == AgentStateName.READ:
                     self._log("READ")
-                    await self.read()
+                    await self._profiled_phase("READ", self.read)
                 elif self.state.current == AgentStateName.REFLECT:
                     self._log(f"REFLECT loop={self.state.loop_count}")
-                    await self.reflect()
+                    await self._profiled_phase("REFLECT", self.reflect)
                 elif self.state.current == AgentStateName.CODE:
                     self._log(f"CODE loop={self.state.loop_count}")
-                    await self.code()
+                    await self._profiled_phase("CODE", self.code)
                 elif self.state.current == AgentStateName.TEST:
                     self._log(f"TEST loop={self.state.loop_count}")
-                    await self.test()
+                    await self._profiled_phase("TEST", self.test)
                 else:
                     self.state.current = AgentStateName.FAILED
         finally:
@@ -114,7 +238,11 @@ class MicroAgent:
         workflow_context = self._workflow_plan_context()
         if workflow_context:
             project_context = "\n\n".join(part for part in [project_context, workflow_context] if part)
-        output = await self.models.get("planner").chat(plan_prompt(self.state, project_context))
+        output = await self._model_chat(
+            "planner",
+            plan_prompt(self.state, project_context),
+            call_site="plan",
+        )
         self.state.plan_markdown = output.strip()
         self.state.current = AgentStateName.READ
 
@@ -142,8 +270,10 @@ class MicroAgent:
             self.config.get("workflow", {}).get("feedback_notes_limit", 12)
         )
         try:
-            output = await self.models.get("reflector").chat(
-                reflect_prompt(self.state, feedback_notes_limit)
+            output = await self._model_chat(
+                "reflector",
+                reflect_prompt(self.state, feedback_notes_limit),
+                call_site="reflect",
             )
         except Exception as exc:
             self.state.notes.append(
@@ -164,7 +294,8 @@ class MicroAgent:
         )
         try:
             new_family_required = self._brainstorm_new_family_required()
-            output = await self.models.get("brainstorm").chat(
+            output = await self._model_chat(
+                "brainstorm",
                 brainstorm_prompt(
                     self.state,
                     reject_summary=reject_summary,
@@ -179,7 +310,8 @@ class MicroAgent:
                     else [],
                     new_family_required=new_family_required,
                     feedback_notes_limit=feedback_notes_limit,
-                )
+                ),
+                call_site="brainstorm",
             )
         except Exception as exc:
             self.state.notes.append(
@@ -2147,11 +2279,37 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         results = []
         for command in commands:
-            result = await self.mcp.run_command(
-                command,
-                cwd=str(self.state.repo_root),
-                timeout_seconds=workflow.get("command_timeout_seconds", 120),
-                output_limit=workflow.get("command_output_limit", 200_000),
+            start = self._profile_span_start()
+            try:
+                result = await self.mcp.run_command(
+                    command,
+                    cwd=str(self.state.repo_root),
+                    timeout_seconds=workflow.get("command_timeout_seconds", 120),
+                    output_limit=workflow.get("command_output_limit", 200_000),
+                )
+            except Exception as exc:
+                self._record_profile_span(
+                    "test_command",
+                    start,
+                    {
+                        "command": command,
+                        "cwd": str(self.state.repo_root),
+                        "success": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                raise
+            self._record_profile_span(
+                "test_command",
+                start,
+                {
+                    "command": command,
+                    "cwd": str(self.state.repo_root),
+                    "exit_code": result.get("exit_code"),
+                    "stdout_chars": len(str(result.get("stdout", ""))),
+                    "stderr_chars": len(str(result.get("stderr", ""))),
+                    "success": result.get("exit_code") == 0,
+                },
             )
             results.append(TestResult(**result))
         return results
@@ -2905,7 +3063,11 @@ class MicroAgent:
         self, candidate: CodeCandidate, messages: list[dict[str, str]]
     ) -> CodeDecision:
         try:
-            output = await self.models.get("coder").chat(messages)
+            output = await self._model_chat(
+                "coder",
+                messages,
+                call_site="target_not_found_repair",
+            )
         except Exception as exc:
             raise JsonValidationError(
                 f"coder target-not-found repair model call failed: {type(exc).__name__}: {exc}"
@@ -2920,8 +3082,10 @@ class MicroAgent:
                     "coder", "target-not-found-repair", output, exc
                 )
                 try:
-                    repaired = await self.models.get("coder").chat(
-                        retry_repair_prompt(output, exc)
+                    repaired = await self._model_chat(
+                        "coder",
+                        retry_repair_prompt(output, exc),
+                        call_site="target_not_found_repair_json_repair",
                     )
                 except Exception as repair_call_exc:
                     raise JsonValidationError(
@@ -3366,7 +3530,7 @@ class MicroAgent:
 
     async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type):
         try:
-            output = await self.models.get(role).chat(messages)
+            output = await self._model_chat(role, messages, call_site="json_call")
         except Exception as exc:
             raise JsonValidationError(
                 f"{role} model call failed: {type(exc).__name__}: {exc}"
@@ -3376,7 +3540,11 @@ class MicroAgent:
         except JsonValidationError as exc:
             self._record_raw_model_output(role, "initial", output, exc)
             try:
-                repaired = await self.models.get(role).chat(retry_repair_prompt(output, exc))
+                repaired = await self._model_chat(
+                    role,
+                    retry_repair_prompt(output, exc),
+                    call_site="json_repair",
+                )
             except Exception as repair_exc:
                 raise JsonValidationError(
                     f"{role} repair model call failed: {type(repair_exc).__name__}: {repair_exc}"

@@ -145,6 +145,15 @@ candidate inside the same todo attempt. The repair is recorded with
 `repair_parent_id` so later analysis can distinguish normal candidates from
 search-block repairs.
 
+Set `workflow.profile_agent=true` for structured controller profiling. The
+agent writes `.local_micro_agent/profile_events.jsonl` by default, with phase
+spans for `PLAN`/`READ`/`CODE`/`TEST`/`REFLECT`, model-call spans, and test
+command spans. Each record includes `elapsed_ms`, loop/state metadata, success
+or error information, and compact call metadata such as role, prompt/output
+character counts, command exit code, and stdout/stderr sizes. This is intended
+for comparing bottlenecks across local serving backends such as Ollama, LM
+Studio, vLLM, or SGLang; it is diagnostic logging, not prompt/KV caching.
+
 For clean model-evaluation runs, do not inject prior-run winning patches or
 human-discovered transformation ladders into the prompt. Candidate ladders used
 by CODE should come from the current run's own PLAN, BRAINSTORM, READ, or
