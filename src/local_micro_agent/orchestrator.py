@@ -175,7 +175,7 @@ class MicroAgent:
                     if new_family_required
                     else [],
                     open_novelty_lanes=self._open_novelty_lanes()
-                    if new_family_required
+                    if self._brainstorm_open_novelty_lanes_enabled()
                     else [],
                     new_family_required=new_family_required,
                     feedback_notes_limit=feedback_notes_limit,
@@ -677,6 +677,10 @@ class MicroAgent:
             or 0
         )
         return threshold > 0 and self._brainstorm_all_skipped_streak() >= threshold
+
+    def _brainstorm_open_novelty_lanes_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("brainstorm_include_open_novelty_lanes", True))
 
     def _open_novelty_lanes(self) -> list[str]:
         workflow = self.config.get("workflow", {})

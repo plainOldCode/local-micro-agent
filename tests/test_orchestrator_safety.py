@@ -839,6 +839,58 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(state.scratch["selected_tactic"]["family_key"], "tree_shape_specialization")
             self.assertEqual(state.scratch["selected_tactic"]["novelty_lane"], "layout_or_tiling_change")
 
+    def test_brainstorm_includes_open_novelty_lanes_before_all_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            history_dir = repo / ".local_micro_agent"
+            history_dir.mkdir()
+            (history_dir / "candidates.jsonl").write_text(
+                '{"status":"rejected","strategy_axis":"general_edit","reason":"same baseline"}\n'
+                '{"status":"rejected","strategy_axis":"general_edit","reason":"same baseline"}\n'
+            )
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "brainstorm_after_rejections": 2,
+                    "brainstorm_new_family_after_all_skipped": 0,
+                    "brainstorm_open_novelty_lanes": [
+                        "coarse_unroll_lane_restructure: try a small unroll probe",
+                        "load_latency_scheduling: move one load-use boundary",
+                    ],
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
+            state.plan_markdown = "seeded"
+            state.file_context = [FileSnapshot("target.py", target.read_text())]
+            models = _RoleModelManager(
+                {
+                    "brainstorm": (
+                        "1. strategy_axis: vector_unroll_lane\n"
+                        "novelty_lane: coarse_unroll_lane_restructure\n"
+                        "Try a small unroll probe.\n"
+                        "family_key: unroll_factor_change\n"
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            asyncio.run(agent.reflect())
+
+            joined = "\n".join(message["content"] for message in models.seen["brainstorm"][0])
+            self.assertIn("New family required:\nfalse", joined)
+            self.assertIn("Open novelty lanes", joined)
+            self.assertIn("coarse_unroll_lane_restructure", joined)
+            self.assertEqual(
+                state.scratch["selected_tactic"]["novelty_lane"],
+                "coarse_unroll_lane_restructure",
+            )
+
     def test_selected_brainstorm_tactic_sets_required_axis_for_current_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")

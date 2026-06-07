@@ -86,6 +86,13 @@ default and summarized back into later `CODE` prompts. Useful knobs include
 `adaptive_gate_all_skipped_relax_streak`, `adaptive_gate_recent_limit`, and
 `adaptive_gate_decisions_path`.
 
+Use `workflow.brainstorm_open_novelty_lanes` to give `BRAINSTORM` a compact
+menu of still-open exploration lanes. These lanes are included whenever
+brainstorming runs by default, even before the all-skipped/new-family gate
+fires, so clean-start searches can see coarse structural routes early. Set
+`workflow.brainstorm_include_open_novelty_lanes=false` to suppress that prompt
+section.
+
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
 and `.local_micro_agent/best.patch`, updates the in-memory best metric, and
