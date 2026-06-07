@@ -388,6 +388,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
                     "writable_files": ["target.py"],
                     "test_commands": ["python3 -c \"print('ok')\""],
                     "deterministic_test_decision": True,
+                    "todo_soft_until_first_improvement": False,
                 },
             }
             state = AgentState(repo_root=repo, user_request="test", max_loops=1)
@@ -1949,6 +1950,7 @@ value = 'fast'
                     "writable_files": ["target.py"],
                     "test_commands": ["python3 -c \"print('ok')\""],
                     "deterministic_test_decision": True,
+                    "todo_soft_until_first_improvement": False,
                 },
             }
             state = AgentState(
@@ -2706,6 +2708,7 @@ value = 'fast'
                     "workflow": {
                         "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                         "todo_attempt_budget": 3,
+                        "todo_soft_until_first_improvement": False,
                     },
                 },
                 AgentState(repo_root=repo, user_request="test"),
@@ -2813,6 +2816,7 @@ value = 'fast'
                         "brainstorm_after_rejections": 2,
                         "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                         "todo_attempt_budget": 3,
+                        "todo_soft_until_first_improvement": False,
                     },
                 },
                 AgentState(repo_root=repo, user_request="test", loop_count=2),
@@ -2824,6 +2828,98 @@ value = 'fast'
             (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
             agent.state.scratch.pop("active_todo", None)
             self.assertTrue(agent._should_brainstorm())
+
+    def test_active_todo_is_soft_before_first_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-memory_store_layout",
+                "status": "attempted",
+                "strategy_axis": "memory_store_layout",
+                "family_key": "store_address_reuse",
+                "context": "store address reuse tactic",
+                "attempts": 1,
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempt_budget": 3,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "vliw-recovery",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="hazard-aware VLIW bundle scheduler",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Implement a hazard-aware VLIW bundle scheduler.",
+                strategy_axis="instruction_scheduling",
+            )
+
+            self.assertFalse(agent._has_active_todo_budget())
+            self.assertEqual(agent._format_active_todo(), "")
+            self.assertEqual(agent._active_todo_id(), "")
+            self.assertIsNone(agent._active_todo_contract_rejection(candidate))
+
+    def test_active_todo_is_hard_after_first_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "candidates.jsonl").write_text(
+                '{"status":"improved","metric":119062,"failed":false}\n'
+            )
+            todo = {
+                "todo_id": "todo-001-memory_store_layout",
+                "status": "attempted",
+                "strategy_axis": "memory_store_layout",
+                "family_key": "store_address_reuse",
+                "context": "store address reuse tactic",
+                "attempts": 1,
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempt_budget": 3,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "late-drift",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="hazard-aware VLIW bundle scheduler",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Implement a hazard-aware VLIW bundle scheduler.",
+                strategy_axis="instruction_scheduling",
+            )
+
+            rejection = agent._active_todo_contract_rejection(candidate)
+            self.assertIsNotNone(rejection)
+            self.assertEqual(rejection[0], "rejected_todo_axis_drift")
 
     def test_active_todo_contract_rejects_axis_drift_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2857,6 +2953,7 @@ value = 'fast'
                     "candidate_queue": True,
                     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                     "todo_attempt_budget": 3,
+                    "todo_soft_until_first_improvement": False,
                 },
             }
             state = AgentState(repo_root=repo, user_request="test")
@@ -2908,7 +3005,12 @@ value = 'fast'
                 "attempts": 1,
             }
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"todo_soft_until_first_improvement": False},
+                },
                 AgentState(repo_root=repo, user_request="test"),
             )
             agent.state.scratch["active_todo"] = todo
@@ -2960,6 +3062,7 @@ value = 'fast'
                     "candidate_queue": True,
                     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                     "todo_attempt_budget": 3,
+                    "todo_soft_until_first_improvement": False,
                 },
             }
             state = AgentState(repo_root=repo, user_request="test")
@@ -3040,6 +3143,7 @@ value = 'fast'
                     "candidate_queue": True,
                     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
                     "todo_attempt_budget": 3,
+                    "todo_soft_until_first_improvement": False,
                 },
             }
             state = AgentState(repo_root=repo, user_request="test")

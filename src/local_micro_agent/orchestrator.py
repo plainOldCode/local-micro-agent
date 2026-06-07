@@ -2202,6 +2202,8 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         if workflow.get("todo_enforce_active_contract", True) is False:
             return None
+        if self._todo_contract_soft_now():
+            return None
         active_todo = self.state.scratch.get("active_todo")
         if not isinstance(active_todo, dict):
             active_todo = self._load_active_todo()
@@ -2254,6 +2256,8 @@ class MicroAgent:
     ) -> tuple[str, str] | None:
         workflow = self.config.get("workflow", {})
         if workflow.get("todo_reject_duplicate_variants", True) is False:
+            return None
+        if self._todo_contract_soft_now():
             return None
         active_todo = self.state.scratch.get("active_todo")
         if not isinstance(active_todo, dict):
@@ -2953,6 +2957,24 @@ class MicroAgent:
             and self.state.loop_count + 1 < self.state.max_loops
         )
 
+    def _has_current_run_improvement(self) -> bool:
+        if self.state.scratch.get("metric_improved") is True:
+            return True
+        return bool(
+            self._latest_candidate_record_with_status("improved")
+            or self._latest_candidate_record_with_status("accepted")
+        )
+
+    def _todo_soft_until_first_improvement_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("todo_soft_until_first_improvement", True))
+
+    def _todo_contract_soft_now(self) -> bool:
+        return (
+            self._todo_soft_until_first_improvement_enabled()
+            and not self._has_current_run_improvement()
+        )
+
     def _validated_pattern_followup_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("validated_pattern_followup"))
@@ -3068,6 +3090,8 @@ class MicroAgent:
         return all(str(record.get("status", "")).startswith("rejected") for record in records)
 
     def _has_active_todo_budget(self) -> bool:
+        if self._todo_contract_soft_now():
+            return False
         active_todo = self.state.scratch.get("active_todo")
         if not isinstance(active_todo, dict):
             active_todo = self._load_active_todo()
@@ -3094,6 +3118,8 @@ class MicroAgent:
         return tactic_library.strip()
 
     def _format_active_todo(self) -> str:
+        if self._todo_contract_soft_now():
+            return ""
         active_todo = self.state.scratch.get("active_todo")
         if not isinstance(active_todo, dict):
             active_todo = self._load_active_todo()
@@ -3936,6 +3962,8 @@ class MicroAgent:
         self._append_todo_attempt(record)
 
     def _active_todo_id(self) -> str:
+        if self._todo_contract_soft_now():
+            return ""
         active_todo = self.state.scratch.get("active_todo")
         if isinstance(active_todo, dict) and active_todo.get("status") in {"active", "attempted"}:
             if self._todo_attempt_budget_exhausted(active_todo):
