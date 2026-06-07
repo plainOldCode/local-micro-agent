@@ -195,6 +195,81 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 "",
             )
 
+    def test_patch_change_applies_when_touched_files_are_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                reason="allowed patch",
+                patch=(
+                    "diff --git a/target.py b/target.py\n"
+                    "--- a/target.py\n"
+                    "+++ b/target.py\n"
+                    "@@ -1 +1 @@\n"
+                    "-value = 'old'\n"
+                    "+value = 'new'\n"
+                ),
+            )
+
+            async def apply_once() -> int:
+                await agent.mcp.start()
+                try:
+                    return await agent._apply_changes([change], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            applied = asyncio.run(apply_once())
+
+            self.assertEqual(applied, 1)
+            self.assertEqual(target.read_text(), "value = 'new'\n")
+
+    def test_patch_change_cannot_touch_files_outside_allowed_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            forbidden = repo / "forbidden.py"
+            target.write_text("value = 'old'\n")
+            forbidden.write_text("secret = 'old'\n")
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                reason="spoofed allowed path",
+                patch=(
+                    "diff --git a/forbidden.py b/forbidden.py\n"
+                    "--- a/forbidden.py\n"
+                    "+++ b/forbidden.py\n"
+                    "@@ -1 +1 @@\n"
+                    "-secret = 'old'\n"
+                    "+secret = 'new'\n"
+                ),
+            )
+
+            async def apply_once() -> int:
+                await agent.mcp.start()
+                try:
+                    return await agent._apply_changes([change], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            applied = asyncio.run(apply_once())
+
+            self.assertEqual(applied, 0)
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            self.assertEqual(forbidden.read_text(), "secret = 'old'\n")
+            self.assertIn(
+                "Patch rejected: touches out-of-plan files: forbidden.py",
+                "\n".join(agent.state.notes),
+            )
+
     def test_failed_candidate_restores_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

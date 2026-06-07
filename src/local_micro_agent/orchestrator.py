@@ -7,6 +7,7 @@ import difflib
 import hashlib
 import json
 import re
+import shlex
 import tempfile
 import time
 from pathlib import Path
@@ -1321,7 +1322,7 @@ class MicroAgent:
                     applied += 1
                 continue
             if change.patch:
-                if await self._apply_patch(change.patch):
+                if await self._apply_patch(change.patch, allowed):
                     applied += 1
                 continue
             if change.content is not None:
@@ -4122,19 +4123,74 @@ class MicroAgent:
             lines.append(line)
         return "\n".join(lines)
 
-    async def _apply_patch(self, patch: str) -> bool:
+    async def _apply_patch(self, patch: str, allowed: set[str]) -> bool:
+        touched_files = self._patch_touched_files(patch)
+        if not touched_files:
+            self.state.notes.append("Patch rejected: no changed files detected")
+            return False
+        rejected_files = sorted(path for path in touched_files if path not in allowed)
+        if rejected_files:
+            self.state.notes.append(
+                "Patch rejected: touches out-of-plan files: "
+                + ", ".join(rejected_files[:8])
+            )
+            return False
         with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as handle:
             handle.write(patch)
             patch_path = handle.name
-        result = await self.mcp.run_command(f"git apply --check {patch_path}", cwd=str(self.state.repo_root))
-        if result["exit_code"] != 0:
-            self.state.notes.append(f"Patch rejected: {result['stderr'][-1000:]}")
-            return False
-        result = await self.mcp.run_command(f"git apply {patch_path}", cwd=str(self.state.repo_root))
-        if result["exit_code"] != 0:
-            self.state.notes.append(f"Patch apply failed: {result['stderr'][-1000:]}")
-            return False
-        return True
+        patch_arg = shlex.quote(patch_path)
+        try:
+            result = await self.mcp.run_command(
+                f"git apply --check {patch_arg}", cwd=str(self.state.repo_root)
+            )
+            if result["exit_code"] != 0:
+                self.state.notes.append(f"Patch rejected: {result['stderr'][-1000:]}")
+                return False
+            result = await self.mcp.run_command(
+                f"git apply {patch_arg}", cwd=str(self.state.repo_root)
+            )
+            if result["exit_code"] != 0:
+                self.state.notes.append(f"Patch apply failed: {result['stderr'][-1000:]}")
+                return False
+            return True
+        finally:
+            Path(patch_path).unlink(missing_ok=True)
+
+    @classmethod
+    def _patch_touched_files(cls, patch: str) -> set[str]:
+        paths: set[str] = set()
+        for line in patch.splitlines():
+            if line.startswith("diff --git "):
+                match = re.match(r"^diff --git a/(.*) b/(.*)$", line)
+                if not match:
+                    continue
+                for raw_path in match.groups():
+                    normalized = cls._normalize_patch_path(raw_path)
+                    if normalized:
+                        paths.add(normalized)
+                continue
+            if line.startswith("--- ") or line.startswith("+++ "):
+                normalized = cls._normalize_patch_path(line[4:])
+                if normalized:
+                    paths.add(normalized)
+        return paths
+
+    @staticmethod
+    def _normalize_patch_path(raw_path: str) -> str:
+        path = raw_path.strip()
+        if not path or path == "/dev/null":
+            return ""
+        if path.startswith('"'):
+            try:
+                parsed = shlex.split(path)
+            except ValueError:
+                parsed = []
+            if parsed:
+                path = parsed[0]
+        path = path.split("\t", 1)[0]
+        if path.startswith("a/") or path.startswith("b/"):
+            path = path[2:]
+        return path
 
     @staticmethod
     def _log(message: str) -> None:
