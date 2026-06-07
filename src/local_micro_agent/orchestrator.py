@@ -2788,7 +2788,7 @@ class MicroAgent:
             allowed=allowed,
         )
         try:
-            decision = await self._json_call("coder", messages, CodeDecision)
+            decision = await self._target_not_found_repair_call(candidate, messages)
         except JsonValidationError as exc:
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} target-not-found repair rejected: {exc}"
@@ -2900,6 +2900,113 @@ class MicroAgent:
                 f"### {change.path}\n```text\n{self._slice_text(content, limit)}\n```"
             )
         return "\n\n".join(blocks) if blocks else "No writable source context available."
+
+    async def _target_not_found_repair_call(
+        self, candidate: CodeCandidate, messages: list[dict[str, str]]
+    ) -> CodeDecision:
+        try:
+            output = await self.models.get("coder").chat(messages)
+        except Exception as exc:
+            raise JsonValidationError(
+                f"coder target-not-found repair model call failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        try:
+            return self._parse_decision(output, CodeDecision)
+        except JsonValidationError as exc:
+            try:
+                return self._parse_loose_target_not_found_repair(output, candidate)
+            except JsonValidationError:
+                self._record_raw_model_output(
+                    "coder", "target-not-found-repair", output, exc
+                )
+                try:
+                    repaired = await self.models.get("coder").chat(
+                        retry_repair_prompt(output, exc)
+                    )
+                    return self._parse_decision(repaired, CodeDecision)
+                except Exception as repair_exc:
+                    if isinstance(repair_exc, JsonValidationError):
+                        self._record_raw_model_output(
+                            "coder", "target-not-found-repair-json", repaired, repair_exc
+                        )
+                    raise JsonValidationError(
+                        f"target-not-found repair parse failed: {repair_exc}"
+                    ) from repair_exc
+
+    def _parse_loose_target_not_found_repair(
+        self, output: str, original: CodeCandidate
+    ) -> CodeDecision:
+        if not original.changes:
+            raise JsonValidationError("No original change available for loose repair")
+        original_change = original.changes[0]
+        path = self._loose_repair_field(output, "path") or original_change.path
+        target = (
+            self._loose_repair_field(output, "search")
+            or self._loose_repair_field(output, "target")
+        )
+        replacement = (
+            self._loose_repair_field(output, "replace")
+            or self._loose_repair_field(output, "replacement")
+        )
+        if not target or not replacement:
+            raise JsonValidationError("Loose repair output missing search/replace")
+        reason = self._loose_repair_field(output, "reason") or original_change.reason
+        strategy_axis = self._loose_repair_field(output, "strategy_axis") or original.strategy_axis
+        change = CodeChange(
+            path=path,
+            reason=reason,
+            target=self._trim_repair_block(target),
+            replacement=self._trim_repair_block(replacement),
+        )
+        candidate_id = self._loose_repair_candidate_id(output) or original.candidate_id
+        repaired = CodeCandidate(
+            candidate_id=candidate_id,
+            changes=[change],
+            reason=reason or original.reason,
+            strategy_axis=strategy_axis,
+        )
+        return CodeDecision(changes=[change], candidates=[repaired])
+
+    def _loose_repair_field(self, output: str, field: str) -> str:
+        match = re.search(rf"<{field}>(.*?)</{field}>", output, re.DOTALL)
+        if match:
+            return match.group(1)
+        try:
+            data = parse_json_object(output)
+        except JsonValidationError:
+            return ""
+        candidates = data.get("candidates")
+        if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+            data = candidates[0]
+        value = data.get(field)
+        if value is None and field == "search":
+            value = data.get("target")
+        if value is None and field == "replace":
+            value = data.get("replacement")
+        return str(value) if value is not None else ""
+
+    @staticmethod
+    def _loose_repair_candidate_id(output: str) -> str:
+        match = re.search(r"<candidate(?:\s+id=\"([^\"]*)\")?", output)
+        if match and match.group(1):
+            return match.group(1).strip()
+        try:
+            data = parse_json_object(output)
+        except JsonValidationError:
+            return ""
+        candidates = data.get("candidates")
+        if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+            return str(candidates[0].get("id") or "")
+        return str(data.get("id") or "")
+
+    @staticmethod
+    def _trim_repair_block(text: str) -> str:
+        lines = text.splitlines()
+        if lines and not lines[0].strip():
+            lines = lines[1:]
+        if lines and not lines[-1].strip():
+            lines = lines[:-1]
+        return "\n".join(lines)
 
     def _candidate_failure_detail(
         self,

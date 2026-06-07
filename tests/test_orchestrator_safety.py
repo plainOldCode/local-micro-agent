@@ -634,16 +634,12 @@ class OrchestratorSafetyTests(unittest.TestCase):
 <candidate id="fixed">
 <strategy_axis>general_edit</strategy_axis>
 <reason>Repair stale search text using the current source.</reason>
-<change>
-<path>target.py</path>
 <search>
 value = 'old'
 </search>
 <replace>
 value = 'fast'
 </replace>
-<reason>Use exact current source text.</reason>
-</change>
 </candidate>
 </candidates>
 """
