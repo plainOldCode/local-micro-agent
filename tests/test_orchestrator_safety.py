@@ -139,52 +139,6 @@ TAKEHOME_AXIS_POOL = [
     "general_edit",
 ]
 
-TAKEHOME_FAMILY_AXIS_MAP = {
-    "hash_constant_fold": "precompute_constants",
-    "hash_reorder": "hash_build",
-    "store_address_reuse": "memory_store_layout",
-    "list_scheduler_rewrite": "instruction_scheduling",
-    "branch_mask": "branch_control",
-    "phase_pipeline": "phase_interleave",
-    "memory_cache_layout": "memory_store_layout",
-    "unroll_factor_change": "vector_unroll_lane",
-    "valu_vectorization": "vector_unroll_lane",
-}
-
-TAKEHOME_FAMILY_RULES = [
-    {
-        "family_key": "list_scheduler_rewrite",
-        "any": ["list scheduling", "topological", "dependency depth", "scheduler"],
-    },
-    {
-        "family_key": "store_address_reuse",
-        "all": ["store", "address"],
-        "any": ["reuse", "precompute", "computed", "hoist", "cache", "tmp_addrs", "phase 4"],
-    },
-    {
-        "family_key": "hash_constant_fold",
-        "all": ["hash"],
-        "any": ["constant", "precompute", "lookup", "fold"],
-    },
-    {
-        "family_key": "valu_vectorization",
-        "any": ["valu", "vload", "vstore", "simd", "vectorized"],
-        "allow_variants": False,
-    },
-    {"family_key": "unroll_factor_change", "any": ["unroll_factor", "unroll factor"]},
-    {
-        "family_key": "branch_mask",
-        "all": ["mask"],
-        "any": ["bounds", "multiply", "conditional", "bitwise"],
-    },
-    {
-        "family_key": "memory_cache_layout",
-        "any": ["scratch cache", "circular buffer", "random access", "cache"],
-    },
-    {"family_key": "hash_reorder", "all": ["hash"], "any": ["reorder", "tmp1", "tmp2"]},
-    {"family_key": "phase_pipeline", "any": ["interleave", "pipeline", "overlap", "ping pong"]},
-]
-
 TAKEHOME_AXIS_GUIDANCE = {
     "vector_unroll_lane": {
         "focus": "Change per-lane or unroll-lane structure.",
@@ -197,8 +151,6 @@ TAKEHOME_AXIS_GUIDANCE = {
 def takehome_workflow(**overrides: object) -> dict:
     workflow = {
         "adaptive_search_axis_pool": TAKEHOME_AXIS_POOL,
-        "adaptive_search_family_axis_map": TAKEHOME_FAMILY_AXIS_MAP,
-        "adaptive_search_family_rules": TAKEHOME_FAMILY_RULES,
         "adaptive_search_axis_guidance": TAKEHOME_AXIS_GUIDANCE,
     }
     workflow.update(overrides)
@@ -1713,7 +1665,7 @@ value = 'fast'
                 selected_record["score_reasons"],
             )
 
-    def test_brainstorm_selection_skips_axis_family_mismatch(self) -> None:
+    def test_brainstorm_selection_treats_family_key_as_freeform_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
@@ -1731,11 +1683,12 @@ value = 'fast'
             )
 
             self.assertIsNotNone(selected)
-            self.assertEqual(selected["strategy_axis"], "memory_store_layout")
+            self.assertEqual(selected["strategy_axis"], "instruction_scheduling")
             records = agent.state.scratch["brainstorm_selection"]
-            self.assertEqual(records[0]["reason"], "axis_family_mismatch")
+            self.assertEqual(records[0]["family_key"], "unroll_factor_change")
+            self.assertFalse(records[0]["skipped"])
 
-    def test_brainstorm_selection_canonicalizes_axis_from_family_key(self) -> None:
+    def test_brainstorm_selection_accepts_dynamic_axis_from_request_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
@@ -1750,11 +1703,10 @@ value = 'fast'
             )
 
             self.assertIsNotNone(selected)
-            self.assertEqual(selected["strategy_axis"], "memory_store_layout")
+            self.assertEqual(selected["strategy_axis"], "store_address_reuse")
             records = agent.state.scratch["brainstorm_selection"]
             self.assertEqual(records[0]["declared_axis"], "store_address_reuse")
-            self.assertEqual(records[0]["axis"], "memory_store_layout")
-            self.assertEqual(records[0]["axis_normalized_from"], "family_key")
+            self.assertEqual(records[0]["axis"], "store_address_reuse")
 
     def test_brainstorm_selection_parses_axis_phrase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1775,7 +1727,7 @@ value = 'fast'
             records = agent.state.scratch["brainstorm_selection"]
             self.assertEqual(records[0]["axis_source"], "axis_phrase")
 
-    def test_family_axis_matching_is_token_based(self) -> None:
+    def test_family_axis_matching_only_matches_explicit_known_axis_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
@@ -1784,13 +1736,10 @@ value = 'fast'
             )
 
             self.assertEqual(
-                agent._family_key_strategy_axes("list_scheduler_rewrite"),
-                ["instruction_scheduling"],
+                agent._family_key_strategy_axes("memory_store_layout"),
+                ["memory_store_layout"],
             )
-            self.assertNotIn(
-                "memory_store_layout",
-                agent._family_key_strategy_axes("list_scheduler_rewrite"),
-            )
+            self.assertEqual(agent._family_key_strategy_axes("list_scheduler_rewrite"), [])
 
     def test_axis_matching_accepts_safe_word_variants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1823,7 +1772,7 @@ value = 'fast'
             self.assertNotEqual(agent._tactic_family_key(text), "valu_vectorization")
             self.assertNotIn("valu_vectorization", agent._tactic_family_aliases(text))
 
-    def test_store_address_precompute_stays_store_family(self) -> None:
+    def test_family_key_requires_explicit_model_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
@@ -1835,8 +1784,11 @@ value = 'fast'
                 "to eliminate redundant ALU operations."
             )
 
-            self.assertEqual(agent._tactic_family_key(text), "store_address_reuse")
-            self.assertIn("store_address_reuse", agent._tactic_family_aliases(text))
+            self.assertEqual(agent._tactic_family_key(text), "")
+            self.assertEqual(agent._tactic_family_aliases(text), set())
+            explicit = f"{text}\nfamily_key: store_address_reuse\n"
+            self.assertEqual(agent._tactic_family_key(explicit), "store_address_reuse")
+            self.assertIn("store_address_reuse", agent._tactic_family_aliases(explicit))
             self.assertNotIn("hash_constant_fold", agent._tactic_family_aliases(text))
 
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
@@ -2339,12 +2291,12 @@ value = 'fast'
                 [
                     CodeChange(
                         path="target.py",
-                        reason="Phase 4 store address reuse",
+                        reason="family_key: store_address_reuse\nPhase 4 store address reuse",
                         target="value = 'old'\n",
                         replacement="value = 'new'\n",
                     )
                 ],
-                "Phase 4 store address reuse",
+                "family_key: store_address_reuse\nPhase 4 store address reuse",
                 strategy_axis="memory_store_layout",
             )
             agent = MicroAgent(config, state)
@@ -3180,12 +3132,12 @@ value = 'fast'
                 [
                     CodeChange(
                         path="target.py",
-                        reason="phase stage hash reorder tmp1 tmp2",
+                        reason="family_key: hash_reorder\nphase stage hash reorder tmp1 tmp2",
                         target="value = 'old'\n",
                         replacement="value = 'new'\n",
                     )
                 ],
-                "phase stage hash reorder tmp1 tmp2",
+                "family_key: hash_reorder\nphase stage hash reorder tmp1 tmp2",
                 strategy_axis="phase_interleave",
             )
 

@@ -64,21 +64,20 @@ If the model ignores the cooled axes, set
 controller-side pre-test gate: any candidate whose extracted axes are still in
 cooldown is rejected as `rejected_cooled_axis` before file edits or tests run.
 For stronger control, set `workflow.adaptive_search_force_strategy_axis=true`
-and optionally restrict `workflow.adaptive_search_axis_pool`. The controller
-then chooses a required axis for each `CODE` loop, injects it into the prompt,
-and rejects candidates with missing, unknown, cooled, or wrong declared
-`strategy_axis` values before applying edits.
+and optionally provide `workflow.adaptive_search_axis_pool` as a prompt
+vocabulary. The controller then chooses a required axis for each `CODE` loop,
+injects it into the prompt, and rejects candidates with missing, cooled, or
+wrong declared `strategy_axis` values before applying edits. Set
+`workflow.adaptive_search_strict_axis_pool=true` only when you intentionally
+want to reject explicit axes that are not in `adaptive_search_axis_pool`.
 
 The built-in axis set is intentionally domain-neutral. If a benchmark or
-project needs specialized axes, provide them explicitly through
-`workflow.adaptive_search_axis_pool`. Optional
-`workflow.adaptive_search_axis_keywords`,
-`workflow.adaptive_search_axis_guidance`,
-`workflow.adaptive_search_family_axis_map`, and
-`workflow.adaptive_search_family_rules` let a run define how domain-specific
-candidate reasons and `family_key` labels map back to those axes. Without those
-settings, the orchestrator treats `family_key` as a free-form label and does not
-infer problem-specific families from text.
+project needs specialized axes or tactic families, put that domain vocabulary in
+the task request, for example in `request.txt`, and ask the agent to emit
+explicit `strategy_axis` and optional `family_key` labels. The orchestrator does
+not infer problem-specific tactic families from keywords. `family_key` is a
+free-form label supplied by the model and is used only as an explicit
+current-run grouping signal.
 
 For v0.2-style adaptive gate control, set
 `workflow.adaptive_gate_controller=true` together with
@@ -127,12 +126,10 @@ BRAINSTORM tactics instead of accepting the first valid block. The score uses
 only current-run harness evidence: recent validated pattern aliases,
 failed/patch-failure aliases, tactic specificity, novelty lane, hook detail, and
 original order as a tie-breaker. `workflow.brainstorm_reject_axis_family_mismatch=true`
-also skips tactics whose declared `strategy_axis` contradicts the axis implied
-by their `family_key` when `adaptive_search_family_axis_map` supplies that
-mapping; if the model writes a mapped tactic family in the `strategy_axis` field,
-the selector canonicalizes it to the single configured axis implied by the
-explicit `family_key`. This is controller-side selection logic, not a
-problem-specific winning-ladder prompt.
+also skips tactics only when the explicit `family_key` is itself the same as a
+known axis but the tactic declares a different axis. The controller no longer
+uses domain-specific family-to-axis maps or keyword rules. This keeps selection
+logic in the harness and benchmark/domain hints in the request.
 
 Set `workflow.validated_pattern_followup=true` with
 `workflow.continue_after_improvement=true` to create a follow-up todo from the
