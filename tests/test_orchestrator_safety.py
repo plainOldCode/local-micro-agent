@@ -1715,6 +1715,22 @@ value = 'fast'
             self.assertNotEqual(MicroAgent._tactic_family_key(text), "valu_vectorization")
             self.assertNotIn("valu_vectorization", agent._tactic_family_aliases(text))
 
+    def test_store_address_precompute_stays_store_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            text = (
+                "Precompute store addresses for indices and values outside the hash loop "
+                "to eliminate redundant ALU operations."
+            )
+
+            self.assertEqual(MicroAgent._tactic_family_key(text), "store_address_reuse")
+            self.assertIn("store_address_reuse", agent._tactic_family_aliases(text))
+            self.assertNotIn("hash_constant_fold", agent._tactic_family_aliases(text))
+
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

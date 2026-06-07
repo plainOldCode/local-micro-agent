@@ -1020,10 +1020,12 @@ class MicroAgent:
 
         if has_any(("list scheduling", "topological", "dependency depth", "scheduler")):
             return "list_scheduler_rewrite"
+        if has("store") and has("address") and has_any(
+            ("reuse", "precompute", "computed", "hoist", "cache", "tmp_addrs", "phase 4")
+        ):
+            return "store_address_reuse"
         if has("hash") and has_any(("constant", "precompute", "lookup", "fold")):
             return "hash_constant_fold"
-        if has("store") and has("address") and has_any(("reuse", "tmp_addrs", "phase 4")):
-            return "store_address_reuse"
         if has_any(("valu", "vload", "vstore", "simd", "vectorized"), allow_variants=False):
             return "valu_vectorization"
         if has("unroll_factor") or has("unroll factor"):
