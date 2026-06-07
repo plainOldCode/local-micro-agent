@@ -1512,6 +1512,130 @@ value = 'fast'
             next_contract = agent._format_axis_contract()
             self.assertIn('"required_strategy_axis": "vector_unroll_lane"', next_contract)
 
+    def test_strict_axis_pool_rejects_observed_non_pool_brainstorm_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "adaptive_search_axis_pool": ["allowed_axis"],
+                    "adaptive_search_strict_axis_pool": True,
+                },
+            }
+            state.scratch["adaptive_search_memory"] = {
+                "axes": {
+                    "outside_axis": {
+                        "attempts": 1,
+                        "failures": 1,
+                        "successes": 0,
+                    }
+                },
+                "recent": [],
+            }
+            agent = MicroAgent(config, state)
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: outside_axis\n"
+                "family_key: outside_family\n"
+                "Hook: retry the observed outside axis.\n"
+                "2. strategy_axis: allowed_axis\n"
+                "family_key: allowed_family\n"
+                "Hook: try the configured strict-pool axis.\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "allowed_axis")
+            records = agent.state.scratch["brainstorm_selection"]
+            self.assertEqual(records[0]["reason"], "unknown_axis")
+            self.assertTrue(records[0]["skipped"])
+
+    def test_strict_axis_contract_ignores_selected_non_pool_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "adaptive_search_memory": True,
+                    "adaptive_search_force_strategy_axis": True,
+                    "adaptive_search_axis_pool": ["allowed_axis"],
+                    "adaptive_search_strict_axis_pool": True,
+                },
+            }
+            state.scratch["selected_tactic"] = {
+                "strategy_axis": "outside_axis",
+                "text": "1. strategy_axis: outside_axis",
+            }
+            state.scratch["selected_tactic_loop"] = 0
+            state.scratch["adaptive_search_memory"] = {
+                "axes": {
+                    "outside_axis": {
+                        "attempts": 1,
+                        "failures": 1,
+                        "successes": 0,
+                    }
+                },
+                "recent": [],
+            }
+            agent = MicroAgent(config, state)
+
+            contract = agent._format_axis_contract()
+
+            self.assertIn('"required_strategy_axis": "allowed_axis"', contract)
+            self.assertIn('"known_strategy_axes": [\n    "allowed_axis"', contract)
+            self.assertNotIn('"outside_axis"', contract)
+
+    def test_strict_axis_pool_rejects_unknown_candidate_without_force_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                    "candidate_queue": True,
+                    "adaptive_search_axis_pool": ["allowed_axis"],
+                    "adaptive_search_strict_axis_pool": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "outside",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="outside axis edit",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "outside axis edit",
+                strategy_axis="outside_axis",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_unknown_axis"', history)
+
     def test_failed_tactic_signature_skips_similar_brainstorm_tactic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

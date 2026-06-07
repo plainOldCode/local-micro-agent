@@ -369,7 +369,7 @@ class MicroAgent:
                     self.state,
                     reject_summary=reject_summary,
                     cooled_axes=self._current_cooled_axes(),
-                    known_axes=self._known_strategy_axes(),
+                    known_axes=self._brainstorm_known_axes(),
                     todo_ledger_summary=self._format_todo_ledger_summary(),
                     forbidden_family_aliases=self._forbidden_tactic_family_aliases()
                     if new_family_required
@@ -405,8 +405,8 @@ class MicroAgent:
             self.state.notes.append("Brainstorm tactics added for next CODE attempt")
 
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
-        known_axes = set(self._known_strategy_axes())
         strict_axis_pool = self._strict_strategy_axis_pool_enabled()
+        known_axes = set(self._brainstorm_known_axes())
         failed_signatures = self._failed_tactic_signatures()
         failed_family_keys = self._failed_tactic_family_keys()
         selection_records: list[dict[str, Any]] = []
@@ -428,7 +428,7 @@ class MicroAgent:
                 if family_axis:
                     axis = family_axis
                     axis_normalized_from = "family_key"
-            if strict_axis_pool and axis not in known_axes:
+            if strict_axis_pool and axis not in self._strategy_axis_pool():
                 selection_records.append(
                     {
                         "axis": axis,
@@ -591,7 +591,12 @@ class MicroAgent:
         normalized_axis = self._normalize_strategy_axis(family_key)
         if not normalized_axis:
             return []
-        if normalized_axis in self._known_strategy_axes():
+        axes = (
+            self._strategy_axis_pool()
+            if self._strict_strategy_axis_pool_enabled()
+            else self._known_strategy_axes()
+        )
+        if normalized_axis in axes:
             return [normalized_axis]
         return []
 
@@ -1800,9 +1805,9 @@ class MicroAgent:
             "required_family_key": self._selected_tactic_family_for_current_loop(),
             "allowed_strategy_axes": self._allowed_strategy_axes(),
             "cooled_strategy_axes": cooled_axes,
-            "known_strategy_axes": self._known_strategy_axes(),
+            "known_strategy_axes": self._brainstorm_known_axes(),
             "required_axis_guidance": self._strategy_axis_guidance(required_axis),
-            "selected_tactic": self.state.scratch.get("selected_tactic", {}),
+            "selected_tactic": self._selected_tactic_for_axis_contract(),
             "output_requirement": (
                 "Set candidate strategy_axis exactly to required_strategy_axis. "
                 "In XML mode include <strategy_axis>axis</strategy_axis> inside each "
@@ -1837,6 +1842,18 @@ class MicroAgent:
                 "avoid_drift": ["renaming another strategy as this axis"],
             },
         )
+
+    def _selected_tactic_for_axis_contract(self) -> dict[str, Any]:
+        selected_tactic = self.state.scratch.get("selected_tactic")
+        if not isinstance(selected_tactic, dict):
+            return {}
+        axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
+        if (
+            self._strict_strategy_axis_pool_enabled()
+            and axis not in self._strategy_axis_pool()
+        ):
+            return {}
+        return selected_tactic
 
     def _axis_contract_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -1891,6 +1908,11 @@ class MicroAgent:
             )
         return axes
 
+    def _brainstorm_known_axes(self) -> list[str]:
+        if self._strict_strategy_axis_pool_enabled():
+            return self._strategy_axis_pool()
+        return self._known_strategy_axes()
+
     def _allowed_strategy_axes(self) -> list[str]:
         cooled = set(self._current_cooled_axes())
         pool = (
@@ -1904,7 +1926,7 @@ class MicroAgent:
         allowed = self._allowed_strategy_axes()
         selected_tactic = self.state.scratch.get("selected_tactic")
         selected_loop = self.state.scratch.get("selected_tactic_loop")
-        known_axes = self._known_strategy_axes()
+        known_axes = self._brainstorm_known_axes()
         if (
             isinstance(selected_tactic, dict)
             and selected_loop == self.state.loop_count
@@ -1960,13 +1982,15 @@ class MicroAgent:
     def _candidate_axis_contract_rejection(
         self, candidate: CodeCandidate
     ) -> tuple[str, str] | None:
-        if not self._axis_contract_enabled():
-            return None
+        strict_axis_pool = self._strict_strategy_axis_pool_enabled()
+        axis_contract = self._axis_contract_enabled()
         declared = self._normalize_strategy_axis(candidate.strategy_axis)
+        if strict_axis_pool and declared and declared not in self._strategy_axis_pool():
+            return ("rejected_unknown_axis", f"unknown strategy_axis {declared}")
+        if not axis_contract:
+            return None
         if not declared:
             return ("rejected_missing_axis", "missing strategy_axis")
-        if self._strict_strategy_axis_pool_enabled() and declared not in self._strategy_axis_pool():
-            return ("rejected_unknown_axis", f"unknown strategy_axis {declared}")
         required = self.state.scratch.get("required_strategy_axis")
         if isinstance(required, str) and required and declared != required:
             return (
