@@ -1146,6 +1146,8 @@ class MicroAgent:
                 continue
 
             await self._restore_snapshot(baseline_snapshot)
+            candidate_for_record = candidate
+            repair_parent_id = ""
             note_start = len(self.state.notes)
             applied = await self._apply_changes(candidate.changes, allowed)
             current_snapshot = await self._snapshot_files(sorted(allowed))
@@ -1157,38 +1159,75 @@ class MicroAgent:
                     failed=True,
                 )
                 no_change_reason = failure_detail or "No writable file content changed"
+                repaired_candidate = await self._repair_target_not_found_candidate(
+                    candidate,
+                    failure_detail=no_change_reason,
+                    allowed=allowed,
+                )
+                if repaired_candidate is not None:
+                    repair_parent_id = candidate.candidate_id
+                    candidate_for_record = repaired_candidate
+                    self.state.notes.append(
+                        "Candidate "
+                        f"{candidate.candidate_id} target-not-found repair generated "
+                        f"{repaired_candidate.candidate_id}"
+                    )
+                    await self._restore_snapshot(baseline_snapshot)
+                    note_start = len(self.state.notes)
+                    applied = await self._apply_changes(repaired_candidate.changes, allowed)
+                    current_snapshot = await self._snapshot_files(sorted(allowed))
+                    patch_text = self._snapshot_patch(baseline_snapshot, current_snapshot)
+                    if applied == 0:
+                        failure_detail = self._candidate_failure_detail(
+                            self.state.notes[note_start:],
+                            [],
+                            failed=True,
+                        )
+                        no_change_reason = failure_detail or "No writable file content changed"
+                if applied == 0:
+                    self.state.notes.append(
+                        "Candidate "
+                        f"{candidate_for_record.candidate_id} rejected: no changes applied"
+                        f" ({no_change_reason})"
+                    )
+                    self._remember_rejected_candidate(candidate_for_record)
+                    extra = self._candidate_history_extra(
+                        candidate_for_record,
+                        status="rejected_no_changes",
+                        metric=None,
+                        applied=0,
+                        failed=True,
+                        patch_text=patch_text,
+                        results=[],
+                        failure_detail=failure_detail,
+                        no_change_reason=no_change_reason,
+                        repair_parent_id=repair_parent_id,
+                    )
+                    self._append_candidate_history(
+                        candidate_for_record,
+                        status="rejected_no_changes",
+                        metric=None,
+                        applied=0,
+                        failed=True,
+                        extra=extra,
+                    )
+                    self._record_strategy_attempt(
+                        candidate_for_record,
+                        status="rejected_no_changes",
+                        metric=None,
+                        applied=0,
+                        failed=True,
+                    )
+                    continue
+                candidate = candidate_for_record
+            else:
+                candidate_for_record = candidate
+
+            candidate = candidate_for_record
+            if repair_parent_id:
                 self.state.notes.append(
-                    f"Candidate {candidate.candidate_id} rejected: no changes applied"
-                    f" ({no_change_reason})"
+                    f"Candidate {candidate.candidate_id} is repair of {repair_parent_id}"
                 )
-                self._remember_rejected_candidate(candidate)
-                extra = self._candidate_history_extra(
-                    candidate,
-                    status="rejected_no_changes",
-                    metric=None,
-                    applied=0,
-                    failed=True,
-                    patch_text=patch_text,
-                    results=[],
-                    failure_detail=failure_detail,
-                    no_change_reason=no_change_reason,
-                )
-                self._append_candidate_history(
-                    candidate,
-                    status="rejected_no_changes",
-                    metric=None,
-                    applied=0,
-                    failed=True,
-                    extra=extra,
-                )
-                self._record_strategy_attempt(
-                    candidate,
-                    status="rejected_no_changes",
-                    metric=None,
-                    applied=0,
-                    failed=True,
-                )
-                continue
 
             results = await self._run_test_commands()
             failed = any(result.exit_code != 0 for result in results)
@@ -1218,6 +1257,7 @@ class MicroAgent:
                 patch_text=patch_text,
                 results=results,
                 failure_detail=failure_detail,
+                repair_parent_id=repair_parent_id,
             )
             self._append_candidate_history(
                 candidate,
@@ -2648,6 +2688,7 @@ class MicroAgent:
             for key in (
                 "no_change_reason",
                 "failure_detail",
+                "repair_parent_id",
                 "artifact_id",
                 "patch_path",
                 "test_output_path",
@@ -2705,12 +2746,15 @@ class MicroAgent:
         results: list[TestResult],
         failure_detail: str = "",
         no_change_reason: str = "",
+        repair_parent_id: str = "",
     ) -> dict[str, Any]:
         extra: dict[str, Any] = {}
         if failure_detail:
             extra["failure_detail"] = self._truncate_text(failure_detail, 2000)
         if no_change_reason:
             extra["no_change_reason"] = self._truncate_text(no_change_reason, 1000)
+        if repair_parent_id:
+            extra["repair_parent_id"] = repair_parent_id
         extra.update(
             self._write_candidate_artifacts(
                 candidate,
@@ -2722,9 +2766,140 @@ class MicroAgent:
                 results=results,
                 failure_detail=failure_detail,
                 no_change_reason=no_change_reason,
+                repair_parent_id=repair_parent_id,
             )
         )
         return extra
+
+    async def _repair_target_not_found_candidate(
+        self,
+        candidate: CodeCandidate,
+        failure_detail: str,
+        allowed: set[str],
+    ) -> CodeCandidate | None:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("repair_target_not_found"):
+            return None
+        if "Replacement target not found" not in failure_detail:
+            return None
+        messages = await self._target_not_found_repair_prompt(
+            candidate,
+            failure_detail=failure_detail,
+            allowed=allowed,
+        )
+        try:
+            decision = await self._json_call("coder", messages, CodeDecision)
+        except JsonValidationError as exc:
+            self.state.notes.append(
+                f"Candidate {candidate.candidate_id} target-not-found repair rejected: {exc}"
+            )
+            return None
+        if not decision.candidates:
+            self.state.notes.append(
+                f"Candidate {candidate.candidate_id} target-not-found repair returned no candidate"
+            )
+            return None
+        repaired = decision.candidates[0]
+        repaired.candidate_id = f"{candidate.candidate_id}-repair1"
+        if not repaired.reason:
+            repaired.reason = candidate.reason
+        if not repaired.strategy_axis:
+            repaired.strategy_axis = candidate.strategy_axis
+        rejection = (
+            self._active_todo_contract_rejection(repaired)
+            or self._candidate_axis_contract_rejection(repaired)
+            or self._candidate_family_contract_rejection(repaired)
+        )
+        if rejection is not None:
+            _status, note = rejection
+            self.state.notes.append(
+                f"Candidate {candidate.candidate_id} target-not-found repair rejected: {note}"
+            )
+            return None
+        return repaired
+
+    async def _target_not_found_repair_prompt(
+        self,
+        candidate: CodeCandidate,
+        failure_detail: str,
+        allowed: set[str],
+    ) -> list[dict[str, str]]:
+        output_format = str(self.config.get("workflow", {}).get("code_output_format", "json"))
+        source_context = await self._candidate_repair_source_context(candidate, allowed)
+        candidate_record = {
+            "candidate_id": candidate.candidate_id,
+            "reason": candidate.reason,
+            "strategy_axis": candidate.strategy_axis,
+            "strategy_axes": self._candidate_strategy_axes(candidate),
+            "changes": [
+                {
+                    "path": change.path,
+                    "reason": change.reason,
+                    "target": self._truncate_text(change.target or "", 4000),
+                    "replacement": self._truncate_text(change.replacement or "", 4000),
+                    "patch": self._truncate_text(change.patch or "", 4000),
+                    "content": self._truncate_text(change.content or "", 4000),
+                }
+                for change in candidate.changes
+            ],
+            "active_todo_id": self._active_todo_id(),
+        }
+        if output_format == "xml":
+            system = (
+                "Repair one failed CODE candidate. The previous candidate was rejected "
+                "because a <search> block did not match the current source. Output "
+                "exactly one <candidate> in the same XML-like CODE format, with one "
+                "<change>. Do not invent a new tactic. Preserve the strategy_axis and "
+                "todo context. The new <search> block must be copied verbatim from the "
+                "current source below and must match exactly."
+            )
+        else:
+            system = (
+                "Repair one failed CODE candidate. The previous candidate was rejected "
+                "because a target string did not match the current source. Output strict "
+                "JSON with a top-level candidates array containing exactly one candidate "
+                "and one change. Do not invent a new tactic. Preserve the strategy_axis "
+                "and todo context. The new target must be copied verbatim from the "
+                "current source below and must match exactly."
+            )
+        user = (
+            f"Failure detail:\n{failure_detail}\n\n"
+            "Original candidate summary:\n"
+            f"{json.dumps(candidate_record, ensure_ascii=False, indent=2)}\n\n"
+            "Current source context for repair:\n"
+            f"{source_context}\n\n"
+            "Return only the repaired candidate. Change the search/target text to match "
+            "the current source exactly, and keep the replacement focused on the same "
+            "intended edit."
+        )
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if output_format == "xml":
+            messages.append(self._candidate_queue_message("xml"))
+        else:
+            messages.append(self._candidate_queue_message("json"))
+        return messages
+
+    async def _candidate_repair_source_context(
+        self, candidate: CodeCandidate, allowed: set[str]
+    ) -> str:
+        limit = int(
+            self.config.get("workflow", {}).get("repair_source_context_char_limit", 20000)
+        )
+        blocks = []
+        seen = set()
+        for change in candidate.changes:
+            if change.path in seen or change.path not in allowed:
+                continue
+            seen.add(change.path)
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / change.path))
+            except FileNotFoundError:
+                blocks.append(f"### {change.path}\n<missing>")
+                continue
+            blocks.append(
+                f"### {change.path}\n```text\n{self._slice_text(content, limit)}\n```"
+            )
+        return "\n\n".join(blocks) if blocks else "No writable source context available."
 
     def _candidate_failure_detail(
         self,
@@ -2785,6 +2960,7 @@ class MicroAgent:
         results: list[TestResult],
         failure_detail: str = "",
         no_change_reason: str = "",
+        repair_parent_id: str = "",
     ) -> dict[str, Any]:
         artifact_dir = self._candidate_artifact_dir()
         if artifact_dir is None:
@@ -2811,6 +2987,8 @@ class MicroAgent:
             metadata["failure_detail"] = self._truncate_text(failure_detail, 4000)
         if no_change_reason:
             metadata["no_change_reason"] = self._truncate_text(no_change_reason, 2000)
+        if repair_parent_id:
+            metadata["repair_parent_id"] = repair_parent_id
         output_limit = int(
             self.config.get("workflow", {}).get("candidate_artifact_output_limit", 12000)
         )
@@ -2931,6 +3109,7 @@ class MicroAgent:
             "no_change_reason",
             "artifact_id",
             "artifact_path",
+            "repair_parent_id",
             "patch_path",
             "test_output_path",
         ):

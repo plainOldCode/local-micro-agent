@@ -136,6 +136,15 @@ comment-only edits, out-of-plan paths, or patch rejection. Recent candidate
 history includes those details so later CODE calls can repair the actual miss
 instead of only seeing a generic rejection status.
 
+Set `workflow.repair_target_not_found=true` to turn a stale search block into a
+narrow same-candidate repair pass. When a candidate has no applied edits because
+`Replacement target not found` was recorded, the controller rereads the current
+writable source excerpt, asks the CODE model to regenerate exactly one candidate
+with a verbatim current-source search block, and then evaluates that repaired
+candidate inside the same todo attempt. The repair is recorded with
+`repair_parent_id` so later analysis can distinguish normal candidates from
+search-block repairs.
+
 For clean model-evaluation runs, do not inject prior-run winning patches or
 human-discovered transformation ladders into the prompt. Candidate ladders used
 by CODE should come from the current run's own PLAN, BRAINSTORM, READ, or

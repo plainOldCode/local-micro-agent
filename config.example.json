@@ -82,6 +82,8 @@
     "record_candidate_artifacts": false,
     "candidate_artifact_dir": ".local_micro_agent/candidate_artifacts",
     "candidate_artifact_output_limit": 12000,
+    "repair_target_not_found": false,
+    "repair_source_context_char_limit": 20000,
     "feedback_notes_limit": 12
   }
 }

@@ -597,6 +597,165 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(artifact["candidate_id"], "miss")
             self.assertIn("Replacement target not found", agent._format_candidate_history())
 
+    def test_target_not_found_repair_can_fix_search_block_within_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "t=Path('target.py').read_text(); "
+                            "print('cycles: 80' if 'fast' in t else 'cycles: 120')\""
+                        )
+                    ],
+                    "candidate_queue": True,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "record_candidate_artifacts": True,
+                    "repair_target_not_found": True,
+                    "code_output_format": "xml",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(
+                """
+<candidates>
+<candidate id="fixed">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Repair stale search text using the current source.</reason>
+<change>
+<path>target.py</path>
+<search>
+value = 'old'
+</search>
+<replace>
+value = 'fast'
+</replace>
+<reason>Use exact current source text.</reason>
+</change>
+</candidate>
+</candidates>
+"""
+            )
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="make it fast",
+                        target="value = 'missing'\n",
+                        replacement="value = 'fast'\n",
+                    )
+                ],
+                "make it fast",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'fast'\n")
+            self.assertIn("target-not-found repair generated", "\n".join(state.notes))
+            rows = [
+                json.loads(line)
+                for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(rows[0]["candidate_id"], "miss-repair1")
+            self.assertEqual(rows[0]["status"], "improved")
+            self.assertEqual(rows[0]["repair_parent_id"], "miss")
+            self.assertEqual(rows[0]["metric"], 80)
+            self.assertEqual(rows[1]["status"], "accepted")
+
+    def test_target_not_found_repair_failure_records_repair_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "record_candidate_artifacts": True,
+                    "repair_target_not_found": True,
+                    "code_output_format": "xml",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(
+                """
+<candidates>
+<candidate id="still-missing">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Still stale.</reason>
+<change>
+<path>target.py</path>
+<search>
+value = 'also missing'
+</search>
+<replace>
+value = 'fast'
+</replace>
+</change>
+</candidate>
+</candidates>
+"""
+            )
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="make it fast",
+                        target="value = 'missing'\n",
+                        replacement="value = 'fast'\n",
+                    )
+                ],
+                "make it fast",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["candidate_id"], "miss-repair1")
+            self.assertEqual(record["status"], "rejected_no_changes")
+            self.assertEqual(record["repair_parent_id"], "miss")
+            self.assertIn("Replacement target not found", record["failure_detail"])
+
     def test_candidate_artifacts_record_patch_and_test_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
