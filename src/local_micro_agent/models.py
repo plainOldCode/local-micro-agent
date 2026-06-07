@@ -6,11 +6,15 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, ClassVar, Protocol
 
 
 class ChatModel(Protocol):
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> str:
         ...
 
 
@@ -30,8 +34,47 @@ def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: int) -
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
 
+def _post_ollama_stream(
+    url: str,
+    payload: dict,
+    headers: dict[str, str],
+    timeout: int,
+    stream_callback: Callable[[str], None] | None,
+) -> str:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    chunks: list[str] = []
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                message = data.get("message")
+                if isinstance(message, dict):
+                    chunk = message.get("content") or ""
+                    if chunk:
+                        chunks.append(chunk)
+                        if stream_callback is not None:
+                            stream_callback(chunk)
+                if data.get("done"):
+                    break
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+    return "".join(chunks)
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleModel:
+    supports_streaming: ClassVar[bool] = False
+
     base_url: str
     model: str
     api_key_env: str | None = None
@@ -39,7 +82,11 @@ class OpenAICompatibleModel:
     max_tokens: int = 2048
     timeout_seconds: int = 120
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> str:
         headers = {}
         if self.api_key_env:
             headers["Authorization"] = f"Bearer {os.getenv(self.api_key_env, 'local')}"
@@ -61,6 +108,8 @@ class OpenAICompatibleModel:
 
 @dataclass(frozen=True)
 class OllamaNativeModel:
+    supports_streaming: ClassVar[bool] = True
+
     base_url: str
     model: str
     temperature: float = 0.0
@@ -69,11 +118,15 @@ class OllamaNativeModel:
     think: bool = False
     timeout_seconds: int = 120
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> str:
         payload = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": stream_callback is not None,
             "think": self.think,
             "options": {
                 "temperature": self.temperature,
@@ -82,13 +135,17 @@ class OllamaNativeModel:
         }
         if self.num_ctx:
             payload["options"]["num_ctx"] = self.num_ctx
-        data = await asyncio.to_thread(
-            _post_json,
-            f"{self.base_url.rstrip('/')}/api/chat",
-            payload,
-            {},
-            self.timeout_seconds,
-        )
+        url = f"{self.base_url.rstrip('/')}/api/chat"
+        if stream_callback is not None:
+            return await asyncio.to_thread(
+                _post_ollama_stream,
+                url,
+                payload,
+                {},
+                self.timeout_seconds,
+                stream_callback,
+            )
+        data = await asyncio.to_thread(_post_json, url, payload, {}, self.timeout_seconds)
         return data["message"].get("content") or ""
 
 

@@ -166,8 +166,19 @@ class MicroAgent:
             "models", {}
         ).get("default")
         provider = self.config.get("providers", {}).get(str(model_name), {})
+        model = self.models.get(role)
+        stream_callback, stream_stats = self._profile_model_stream_callback(
+            model=model,
+            role=role,
+            call_site=call_site,
+            model_name=str(model_name or ""),
+            provider=provider,
+        )
         try:
-            output = await self.models.get(role).chat(messages)
+            if stream_callback is not None:
+                output = await model.chat(messages, stream_callback=stream_callback)
+            else:
+                output = await model.chat(messages)
         except Exception as exc:
             self._record_profile_span(
                 "model_call",
@@ -182,6 +193,7 @@ class MicroAgent:
                     "prompt_chars": prompt_chars,
                     "success": False,
                     "error": f"{type(exc).__name__}: {exc}",
+                    **stream_stats,
                 },
             )
             raise
@@ -198,9 +210,83 @@ class MicroAgent:
                 "prompt_chars": prompt_chars,
                 "output_chars": len(output),
                 "success": True,
+                **stream_stats,
             },
         )
         return output
+
+    def _profile_model_stream_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return self._profile_enabled() and bool(workflow.get("profile_model_stream", True))
+
+    def _profile_model_stream_callback(
+        self,
+        model: Any,
+        role: str,
+        call_site: str,
+        model_name: str,
+        provider: dict[str, Any],
+    ) -> tuple[Any | None, dict[str, Any]]:
+        if not self._profile_model_stream_enabled():
+            return None, {}
+        if not bool(getattr(model, "supports_streaming", False)):
+            return None, {}
+        workflow = self.config.get("workflow", {})
+        seq = int(self.state.scratch.get("_profile_model_stream_seq", 0) or 0) + 1
+        self.state.scratch["_profile_model_stream_seq"] = seq
+        label_parts = [
+            f"{seq:04d}",
+            f"loop-{self.state.loop_count:03d}",
+            self._safe_stream_label(str(self.state.current)),
+            self._safe_stream_label(role),
+            self._safe_stream_label(call_site or "chat"),
+        ]
+        stream_dir = self._workflow_artifact_path(
+            "model_stream_dir", ".local_micro_agent/model_streams"
+        )
+        stream_path = stream_dir / ("-".join(label_parts) + ".txt")
+        stream_path.parent.mkdir(parents=True, exist_ok=True)
+        stream_path.write_text("")
+        interval = int(workflow.get("profile_model_stream_log_interval_chars", 2000) or 0)
+        stats: dict[str, Any] = {
+            "streaming": True,
+            "stream_path": self._repo_relative_path(stream_path),
+            "stream_chunks": 0,
+            "stream_chars": 0,
+        }
+        next_log_at = {"value": interval}
+        self._log(
+            "STREAM start "
+            f"role={role} call_site={call_site or 'chat'} model={model_name} "
+            f"provider={provider.get('kind', '')} path={stats['stream_path']}"
+        )
+
+        def on_chunk(chunk: str) -> None:
+            if not chunk:
+                return
+            with stream_path.open("a") as handle:
+                handle.write(chunk)
+            stats["stream_chunks"] = int(stats.get("stream_chunks", 0)) + 1
+            stats["stream_chars"] = int(stats.get("stream_chars", 0)) + len(chunk)
+            if interval <= 0:
+                return
+            if int(stats["stream_chars"]) < next_log_at["value"]:
+                return
+            self._log(
+                "STREAM progress "
+                f"role={role} call_site={call_site or 'chat'} "
+                f"chars={stats['stream_chars']} chunks={stats['stream_chunks']} "
+                f"path={stats['stream_path']}"
+            )
+            while next_log_at["value"] <= int(stats["stream_chars"]):
+                next_log_at["value"] += interval
+
+        return on_chunk, stats
+
+    @staticmethod
+    def _safe_stream_label(value: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "_", value.strip().lower())
+        return cleaned.strip("._-") or "item"
 
     async def run(self) -> AgentState:
         await self.mcp.start()

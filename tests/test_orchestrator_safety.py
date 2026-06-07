@@ -47,6 +47,27 @@ class _StaticModelManager:
         return _StaticModel(self.output)
 
 
+class _StreamingModel:
+    supports_streaming = True
+
+    def __init__(self, chunks: list[str]):
+        self.chunks = chunks
+
+    async def chat(self, messages, stream_callback=None):
+        for chunk in self.chunks:
+            if stream_callback is not None:
+                stream_callback(chunk)
+        return "".join(self.chunks)
+
+
+class _StreamingModelManager:
+    def __init__(self, chunks: list[str]):
+        self.chunks = chunks
+
+    def get(self, role):
+        return _StreamingModel(self.chunks)
+
+
 class _SequenceModel:
     def __init__(self, outputs: list[str]):
         self.outputs = outputs
@@ -220,6 +241,46 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(model_events[0]["call_site"], "json_call")
             self.assertGreater(model_events[0]["prompt_chars"], 0)
             self.assertGreater(model_events[0]["output_chars"], 0)
+
+    def test_profile_agent_records_streaming_model_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {"default": "stream"},
+                "providers": {"stream": {"kind": "ollama_native", "model": "fake"}},
+                "mcp_servers": {},
+                "workflow": {
+                    "profile_agent": True,
+                    "profile_model_stream_log_interval_chars": 0,
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _StreamingModelManager(['{"changes":', "[]}"])
+
+            decision = asyncio.run(
+                agent._json_call(
+                    "coder",
+                    [{"role": "user", "content": "make no changes"}],
+                    schema=CodeDecision,
+                )
+            )
+
+            self.assertIsNotNone(decision)
+            stream_files = sorted((repo / ".local_micro_agent" / "model_streams").glob("*.txt"))
+            self.assertEqual(len(stream_files), 1)
+            self.assertEqual(stream_files[0].read_text(), '{"changes":[]}')
+            profile_path = repo / ".local_micro_agent" / "profile_events.jsonl"
+            rows = [
+                json.loads(line)
+                for line in profile_path.read_text().splitlines()
+                if line.strip()
+            ]
+            model_event = next(row for row in rows if row["event_type"] == "model_call")
+            self.assertTrue(model_event["streaming"])
+            self.assertEqual(model_event["stream_chunks"], 2)
+            self.assertEqual(model_event["stream_chars"], len('{"changes":[]}'))
+            self.assertEqual(model_event["stream_path"], ".local_micro_agent/model_streams/" + stream_files[0].name)
 
     def test_metric_rejects_non_improvement_and_restores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

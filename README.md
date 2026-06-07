@@ -179,6 +179,14 @@ or error information, and compact call metadata such as role, prompt/output
 character counts, command exit code, and stdout/stderr sizes. This is intended
 for comparing bottlenecks across local serving backends such as Ollama, LM
 Studio, vLLM, or SGLang; it is diagnostic logging, not prompt/KV caching.
+When profiling is enabled, providers with native streaming support may also
+stream model output into `.local_micro_agent/model_streams/*.txt`; model-call
+profile records include `stream_path`, `stream_chunks`, and `stream_chars`.
+Ollama native supports this path. Providers without a streaming implementation
+fall back to the normal non-streaming call. Set
+`workflow.profile_model_stream=false` to disable streaming artifacts, or tune
+`workflow.profile_model_stream_log_interval_chars` to control the compact
+progress lines written to `agent.log`.
 
 For clean model-evaluation runs, do not inject prior-run winning patches or
 human-discovered transformation ladders into the prompt. Candidate ladders used
