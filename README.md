@@ -51,13 +51,13 @@ on new search directions instead of repeatedly testing the same failed patch.
 
 Set `workflow.adaptive_search_memory=true` when a long run should manage its
 own search budget. The agent tags each candidate with coarse strategy axes
-such as `hash_build`, `phase_interleave`, `vector_unroll_lane`, or
-`memory_store_layout`, records per-axis success/failure statistics, and feeds a
-compact search-memory summary into later `CODE` prompts. Axes that fail
-repeatedly in a recent window enter a temporary cooldown, so the model is
-steered toward under-explored directions without hard-coding task-specific
-blacklists. The same axes are written to `workflow.candidate_history_path`
-records when candidate history is enabled.
+such as `correctness`, `api_contract`, `data_flow`, `state_management`,
+`error_handling`, `parsing`, `performance`, or `runtime_control`, records
+per-axis success/failure statistics, and feeds a compact search-memory summary
+into later `CODE` prompts. Axes that fail repeatedly in a recent window enter a
+temporary cooldown, so the model is steered toward under-explored directions
+without hard-coding task-specific blacklists. The same axes are written to
+`workflow.candidate_history_path` records when candidate history is enabled.
 
 If the model ignores the cooled axes, set
 `workflow.adaptive_search_reject_cooled_axes=true`. That turns cooldowns into a
@@ -68,6 +68,17 @@ and optionally restrict `workflow.adaptive_search_axis_pool`. The controller
 then chooses a required axis for each `CODE` loop, injects it into the prompt,
 and rejects candidates with missing, unknown, cooled, or wrong declared
 `strategy_axis` values before applying edits.
+
+The built-in axis set is intentionally domain-neutral. If a benchmark or
+project needs specialized axes, provide them explicitly through
+`workflow.adaptive_search_axis_pool`. Optional
+`workflow.adaptive_search_axis_keywords`,
+`workflow.adaptive_search_axis_guidance`,
+`workflow.adaptive_search_family_axis_map`, and
+`workflow.adaptive_search_family_rules` let a run define how domain-specific
+candidate reasons and `family_key` labels map back to those axes. Without those
+settings, the orchestrator treats `family_key` as a free-form label and does not
+infer problem-specific families from text.
 
 For v0.2-style adaptive gate control, set
 `workflow.adaptive_gate_controller=true` together with
@@ -117,10 +128,11 @@ only current-run harness evidence: recent validated pattern aliases,
 failed/patch-failure aliases, tactic specificity, novelty lane, hook detail, and
 original order as a tie-breaker. `workflow.brainstorm_reject_axis_family_mismatch=true`
 also skips tactics whose declared `strategy_axis` contradicts the axis implied
-by their `family_key`; if the model writes a tactic family such as
-`store_address_reuse` in the `strategy_axis` field, the selector canonicalizes it
-to the single known axis implied by the explicit `family_key`. This is
-controller-side selection logic, not a problem-specific winning-ladder prompt.
+by their `family_key` when `adaptive_search_family_axis_map` supplies that
+mapping; if the model writes a mapped tactic family in the `strategy_axis` field,
+the selector canonicalizes it to the single configured axis implied by the
+explicit `family_key`. This is controller-side selection logic, not a
+problem-specific winning-ladder prompt.
 
 Set `workflow.validated_pattern_followup=true` with
 `workflow.continue_after_improvement=true` to create a follow-up todo from the
@@ -216,8 +228,8 @@ files, and other out-of-scope surfaces.
     "readme_first": true,
     "project_instruction_files": [],
     "project_context_files": [],
-    "writable_files": ["perf_takehome.py"],
-    "test_commands": ["python tests/submission_tests.py"]
+    "writable_files": ["src/target.py"],
+    "test_commands": ["python3 -m pytest -q"]
   }
 }
 ```
@@ -230,9 +242,9 @@ CODE context with exact function/class excerpts:
 ```json
 {
   "workflow": {
-    "seed_files": ["perf_takehome.py"],
+    "seed_files": ["src/target.py"],
     "context_symbols": {
-      "perf_takehome.py": ["build_kernel", "Builder.emit"]
+      "src/target.py": ["parse_request", "TargetService.apply"]
     }
   }
 }

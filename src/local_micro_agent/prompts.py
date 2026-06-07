@@ -39,9 +39,9 @@ Each tactic must:
 - name exactly one strategy_axis from the supplied Known strategy axes
 - if Open novelty lanes are provided, include one novelty_lane line copied from
   those lanes before choosing the family_key
-- include one family_key line for the tactic family, such as valu_vectorization,
-  hash_constant_fold, store_address_reuse, list_scheduler_rewrite, branch_mask,
-  phase_pipeline, memory_cache_layout, hash_reorder, or unroll_factor_change
+- include one family_key line with a concise lowercase_snake_case tactic-family
+  label, such as input_validation, data_flow_cleanup, api_contract_alignment,
+  error_recovery, performance_hot_path, parser_variant, or state_lifecycle
 - if New family required is true, every tactic must use a family_key that is not
   listed in Forbidden family aliases and must avoid the same idea under a new name
 - put any new invented category name after "new_axis_suggestion:" instead of using it as strategy_axis

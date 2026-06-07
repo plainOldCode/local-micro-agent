@@ -634,14 +634,43 @@ class MicroAgent:
         return "", ""
 
     def _family_key_strategy_axes(self, family_key: str) -> list[str]:
-        normalized = self._normalize_fingerprint_text(family_key)
-        if not normalized:
-            return []
-        axes = self._strategy_axes_for_text(normalized, self._strategy_axis_keywords())
-        if axes:
-            return axes
         normalized_axis = self._normalize_strategy_axis(family_key)
-        return [normalized_axis] if normalized_axis in self._strategy_axis_pool() else []
+        if not normalized_axis:
+            return []
+        mapped = self._configured_family_axis_map().get(normalized_axis)
+        if mapped:
+            return [axis for axis in mapped if axis in self._strategy_axis_pool()]
+        if normalized_axis in self._strategy_axis_pool():
+            return [normalized_axis]
+        if self.config.get("workflow", {}).get("adaptive_search_infer_family_axis_from_keywords"):
+            normalized = self._normalize_fingerprint_text(family_key)
+            return self._strategy_axes_for_text(normalized, self._strategy_axis_keywords())
+        return []
+
+    def _configured_family_axis_map(self) -> dict[str, list[str]]:
+        workflow = self.config.get("workflow", {})
+        raw_map = workflow.get("adaptive_search_family_axis_map", {})
+        if not isinstance(raw_map, dict):
+            return {}
+        mapped: dict[str, list[str]] = {}
+        for raw_family, raw_axes in raw_map.items():
+            family = self._normalize_strategy_axis(str(raw_family))
+            if not family:
+                continue
+            if isinstance(raw_axes, str):
+                axes = [raw_axes]
+            elif isinstance(raw_axes, list):
+                axes = [str(axis) for axis in raw_axes if str(axis)]
+            else:
+                axes = []
+            normalized_axes = [
+                self._normalize_strategy_axis(axis)
+                for axis in axes
+                if self._normalize_strategy_axis(axis)
+            ]
+            if normalized_axes:
+                mapped[family] = normalized_axes
+        return mapped
 
     def _canonical_axis_from_family_key(
         self, family_key: str, known_axes: set[str] | None = None
@@ -1002,11 +1031,27 @@ class MicroAgent:
             return 0.0
         return len(left & right) / len(left | right)
 
-    @staticmethod
-    def _tactic_family_key(text: str) -> str:
+    def _tactic_family_key(self, text: str) -> str:
         explicit = re.search(r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?", text, re.IGNORECASE)
         if explicit:
             return explicit.group(1).strip().lower()
+        for rule in self._configured_family_rules():
+            family_key = self._family_key_from_rule(text, rule)
+            if family_key:
+                return family_key
+        return ""
+
+    def _configured_family_rules(self) -> list[dict[str, Any]]:
+        workflow = self.config.get("workflow", {})
+        raw_rules = workflow.get("adaptive_search_family_rules", [])
+        if not isinstance(raw_rules, list):
+            return []
+        return [rule for rule in raw_rules if isinstance(rule, dict)]
+
+    def _family_key_from_rule(self, text: str, rule: dict[str, Any]) -> str:
+        family_key = self._normalize_strategy_axis(str(rule.get("family_key", "")))
+        if not family_key:
+            return ""
         normalized = re.sub(r"[^a-zA-Z0-9]+", " ", text.lower())
         tokens = set(normalized.split())
 
@@ -1015,30 +1060,19 @@ class MicroAgent:
                 tokens, keyword, allow_variants=allow_variants
             )
 
-        def has_any(keywords: tuple[str, ...], allow_variants: bool = True) -> bool:
+        def has_any(keywords: list[str], allow_variants: bool = True) -> bool:
             return any(has(keyword, allow_variants=allow_variants) for keyword in keywords)
 
-        if has_any(("list scheduling", "topological", "dependency depth", "scheduler")):
-            return "list_scheduler_rewrite"
-        if has("store") and has("address") and has_any(
-            ("reuse", "precompute", "computed", "hoist", "cache", "tmp_addrs", "phase 4")
-        ):
-            return "store_address_reuse"
-        if has("hash") and has_any(("constant", "precompute", "lookup", "fold")):
-            return "hash_constant_fold"
-        if has_any(("valu", "vload", "vstore", "simd", "vectorized"), allow_variants=False):
-            return "valu_vectorization"
-        if has("unroll_factor") or has("unroll factor"):
-            return "unroll_factor_change"
-        if has_any(("bitwise", "mask")) and has_any(("bounds", "multiply", "conditional")):
-            return "branch_mask"
-        if has_any(("scratch cache", "circular buffer", "random access", "cache")):
-            return "memory_cache_layout"
-        if has("hash") and has_any(("reorder", "tmp1", "tmp2")):
-            return "hash_reorder"
-        if has_any(("interleave", "pipeline", "overlap", "ping pong")):
-            return "phase_pipeline"
-        return ""
+        all_keywords = [str(item) for item in rule.get("all", []) if str(item)]
+        any_keywords = [str(item) for item in rule.get("any", []) if str(item)]
+        allow_variants = bool(rule.get("allow_variants", True))
+        if all_keywords and not all(has(keyword, allow_variants) for keyword in all_keywords):
+            return ""
+        if any_keywords and not has_any(any_keywords, allow_variants):
+            return ""
+        if not all_keywords and not any_keywords:
+            return ""
+        return family_key
 
     @staticmethod
     def _tactic_novelty_lane(text: str) -> str:
@@ -1133,12 +1167,14 @@ class MicroAgent:
             if lanes:
                 return lanes
         return [
-            "resource_pressure_reduction: reduce scratch/register/temp lifetime pressure without changing the high-level algorithm",
-            "control_or_guard_lowering: change branch, mask, select, or bounds handling with one local feasibility probe",
-            "dependency_or_latency_hiding: move independent work across a narrow dependency boundary to hide load or producer latency",
-            "layout_or_tiling_change: alter data, scratch, lane, or store layout in a small reversible way",
-            "encoding_or_issue_pressure: reduce instruction count, slot conflicts, or bundle pressure without a broad rewrite",
-            "specialization_or_case_split: exploit a stable invariant, constant, phase, lane, or boundary case with a narrow edit",
+            "behavior_boundary_probe: test one edge-case boundary or invariant with a narrow local edit",
+            "data_flow_simplification: remove redundant transformation, copy, lookup, or conversion work",
+            "state_lifecycle_adjustment: change cache/state initialization, reuse, invalidation, or persistence locally",
+            "error_recovery_path: improve one concrete failure, timeout, retry, or exception path",
+            "api_contract_alignment: make one interface, schema, signature, or caller/callee expectation consistent",
+            "performance_hot_path_reduction: reduce repeated work in a measured hot path without a broad rewrite",
+            "test_signal_expansion: add or adjust a focused validation signal when tests are allowed",
+            "resource_or_concurrency_control: narrow one file, process, async, memory, or lifecycle control issue",
         ]
 
     def _brainstorm_all_skipped_streak(self) -> int:
@@ -1206,18 +1242,18 @@ class MicroAgent:
                 "tactic. Do not attempt the full architecture migration in one patch."
             ),
             "implementation_hint": (
-                "Prefer one narrow edit that proves operand shape, dependency behavior, "
-                "or scheduling feasibility before expanding the tactic."
+                "Prefer one narrow edit that proves the tactic changes real behavior "
+                "before expanding it."
             ),
             "allowed_files": sorted(self._writable_files()),
             "forbidden_patterns": [
-                "full build_kernel rewrite",
-                "changing tests or problem.py",
+                "broad rewrite unrelated to the selected tactic",
+                "changing tests or fixtures unless explicitly allowed",
                 "mixing multiple independent tactics",
             ],
             "expected_signal": (
-                "Tests still pass and the cycle metric is present. A metric improvement is "
-                "welcome but not required for the first feasibility probe."
+                "Tests still pass, and any configured metric remains parseable. A metric "
+                "improvement is welcome but not required for the first feasibility probe."
             ),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "created_loop": self.state.loop_count,
@@ -1850,40 +1886,106 @@ class MicroAgent:
         axes = self._strategy_axes_for_text(reason_text, self._strategy_axis_keywords())
         return axes or ["general_edit"]
 
-    @staticmethod
-    def _strategy_axis_keywords() -> dict[str, tuple[str, ...]]:
-        keyword_axes = {
-            "hash_build": ("hash", "checksum", "digest", "build_hash"),
-            "phase_interleave": ("phase", "stage", "interleave", "pipeline", "round"),
-            "vector_unroll_lane": ("unroll", "vector", "simd", "lane", "parallel"),
-            "memory_store_layout": (
-                "address",
-                "register",
-                "spill",
-                "store",
-                "write",
-                "buffer",
-                "cache",
-                "layout",
-                "memory",
+    def _strategy_axis_keywords(self) -> dict[str, tuple[str, ...]]:
+        workflow = self.config.get("workflow", {})
+        configured = workflow.get("adaptive_search_axis_keywords", {})
+        keyword_axes: dict[str, tuple[str, ...]] = {}
+        if isinstance(configured, dict):
+            for raw_axis, raw_keywords in configured.items():
+                axis = self._normalize_strategy_axis(str(raw_axis))
+                if not axis:
+                    continue
+                if isinstance(raw_keywords, str):
+                    keywords = [raw_keywords]
+                elif isinstance(raw_keywords, list):
+                    keywords = [str(keyword) for keyword in raw_keywords if str(keyword)]
+                else:
+                    keywords = []
+                if keywords:
+                    keyword_axes[axis] = tuple(keywords)
+        configured_pool = workflow.get("adaptive_search_axis_pool")
+        if isinstance(configured_pool, list) and configured_pool:
+            for raw_axis in configured_pool:
+                axis = self._normalize_strategy_axis(str(raw_axis))
+                if not axis or axis in keyword_axes:
+                    continue
+                axis_tokens = [token for token in axis.split("_") if len(token) >= 4]
+                label = axis.replace("_", " ")
+                keyword_axes[axis] = tuple([label, *axis_tokens])
+        if keyword_axes:
+            return keyword_axes
+        return {
+            "correctness": (
+                "bug",
+                "correctness",
+                "behavior",
+                "regression",
+                "invariant",
+                "validation",
             ),
-            "precompute_constants": ("precompute", "lookup", "table", "constant", "fold"),
-            "branch_control": ("branch", "condition", "guard", "switch", "flow", "select", "bounds"),
-            "instruction_scheduling": (
-                "bundle",
-                "slot",
-                "hazard",
+            "api_contract": (
+                "api",
+                "interface",
+                "signature",
+                "schema",
+                "contract",
+                "parameter",
+                "compatibility",
+            ),
+            "data_flow": (
+                "data",
+                "flow",
+                "transform",
+                "mapping",
+                "pipeline",
                 "dependency",
-                "dependent",
-                "raw",
+                "input",
+                "output",
+            ),
+            "state_management": (
+                "state",
+                "cache",
+                "memo",
+                "persistence",
+                "lifecycle",
+                "mutation",
+            ),
+            "error_handling": (
+                "error",
+                "exception",
+                "failure",
+                "recover",
+                "fallback",
+                "retry",
+            ),
+            "parsing": ("parse", "parser", "regex", "xml", "json", "yaml", "csv"),
+            "performance": (
+                "performance",
+                "speed",
+                "latency",
+                "throughput",
+                "optimize",
+                "hot path",
+            ),
+            "resource_management": (
+                "memory",
+                "resource",
+                "file",
+                "handle",
+                "buffer",
+                "process",
+                "leak",
+            ),
+            "test_contract": ("test", "assert", "fixture", "coverage", "mock", "threshold"),
+            "runtime_control": (
+                "timeout",
+                "async",
+                "process",
+                "subprocess",
+                "concurrency",
                 "scheduler",
             ),
-            "parsing": ("parse", "parser", "regex", "xml", "json"),
-            "api_contract": ("api", "interface", "signature", "schema", "contract"),
-            "test_contract": ("test", "assert", "fixture", "threshold"),
-            "runtime_control": ("timeout", "async", "process", "subprocess", "retry"),
         }
-        return keyword_axes
 
     @staticmethod
     def _strategy_axes_for_text(
@@ -1959,99 +2061,110 @@ class MicroAgent:
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    @staticmethod
-    def _strategy_axis_guidance(axis: str) -> dict[str, Any]:
+    def _strategy_axis_guidance(self, axis: str) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        configured = workflow.get("adaptive_search_axis_guidance", {})
+        normalized_axis = self._normalize_strategy_axis(axis)
+        if isinstance(configured, dict):
+            raw_guidance = configured.get(normalized_axis) or configured.get(axis)
+            if isinstance(raw_guidance, dict):
+                return raw_guidance
+            if isinstance(raw_guidance, str) and raw_guidance.strip():
+                return {
+                    "focus": raw_guidance.strip(),
+                    "try": ["choose one small concrete tactic for this axis"],
+                    "avoid_drift": ["renaming another strategy as this axis"],
+                }
         guidance = {
-            "hash_build": {
-                "focus": "Change how hash-stage instructions are generated or packed.",
+            "correctness": {
+                "focus": "Fix a behavior, invariant, or regression with a narrow edit.",
                 "try": [
-                    "separate independent hash operands from dependent combine ops",
-                    "reorder hash-stage temporaries to reduce RAW dependency stalls",
-                    "change hash emission shape without changing surrounding phase structure",
+                    "target the smallest failing behavior boundary",
+                    "preserve public behavior outside the failing case",
+                    "keep the change easy to validate with existing tests",
                 ],
-                "avoid_drift": [
-                    "store address reuse",
-                    "loop unroll changes",
-                    "branch/select rewrites",
-                ],
+                "avoid_drift": ["unrelated refactor", "test-only change"],
             },
-            "precompute_constants": {
-                "focus": "Move repeated constant/scratch lookup work into reusable locals or tables.",
+            "api_contract": {
+                "focus": "Align one caller/callee, schema, signature, or interface contract.",
                 "try": [
-                    "cache repeated scratch_const results used in tight emission loops",
-                    "prebuild per-round or per-stage constants before the hot loop",
-                    "replace repeated literal lookup calls with indexed local arrays",
+                    "make parameter handling explicit",
+                    "normalize one input/output shape",
+                    "preserve backward-compatible public behavior when possible",
                 ],
-                "avoid_drift": [
-                    "hash operation reorder",
-                    "phase interleaving",
-                    "store layout rewrites",
-                ],
+                "avoid_drift": ["broad architecture rewrite", "hidden behavior change"],
             },
-            "branch_control": {
-                "focus": "Reduce flow/select/control instructions or make control cheaper.",
+            "data_flow": {
+                "focus": "Change how data moves, is transformed, or is reused locally.",
                 "try": [
-                    "replace flow select with ALU mask/arithmetic when correctness is identical",
-                    "combine guard computation with existing ALU work",
-                    "remove redundant bounds or condition checks",
+                    "remove one redundant conversion or copy",
+                    "make one dependency or transformation boundary explicit",
+                    "keep the edit close to the observed data-flow issue",
                 ],
-                "avoid_drift": [
-                    "hash-stage scheduling",
-                    "store address movement",
-                    "unroll factor changes",
-                ],
+                "avoid_drift": ["global rewrite", "unrelated API cleanup"],
             },
-            "phase_interleave": {
-                "focus": "Change ordering between existing phases without changing the algorithm.",
+            "state_management": {
+                "focus": "Adjust state, cache, lifecycle, or persistence behavior.",
                 "try": [
-                    "move independent work from adjacent phases together",
-                    "split a phase into smaller chunks to improve engine-slot mixing",
-                    "interleave only one narrow phase boundary at a time",
+                    "fix one initialization, invalidation, or update path",
+                    "reduce stale or duplicated state",
+                    "keep state ownership boundaries intact",
                 ],
-                "avoid_drift": [
-                    "new hash algorithm",
-                    "constant precompute only",
-                    "branch/select-only edits",
-                ],
+                "avoid_drift": ["unrelated data model rewrite", "changing persistence format broadly"],
             },
-            "vector_unroll_lane": {
-                "focus": "Change per-lane or unroll-lane structure.",
+            "error_handling": {
+                "focus": "Improve one concrete error, retry, fallback, or recovery path.",
                 "try": [
-                    "change lane-local temporary reuse",
-                    "alter lane order or grouping inside the current unroll factor",
-                    "specialize first or last lane handling if it removes work",
+                    "handle one known exception or failed result shape",
+                    "preserve useful diagnostic output",
+                    "avoid hiding failures that should stay visible",
                 ],
-                "avoid_drift": [
-                    "global phase rewrite",
-                    "hash-stage-only scheduling",
-                    "branch/select-only edits",
-                ],
+                "avoid_drift": ["catch-all masking", "silent failure"],
             },
-            "memory_store_layout": {
-                "focus": "Change address, store, scratch, or memory layout work.",
+            "parsing": {
+                "focus": "Improve one parser, serializer, or text/data format boundary.",
                 "try": [
-                    "reuse already-computed store addresses when lifetime is valid",
-                    "move address computation away from store bottlenecks",
-                    "reduce scratch/register pressure around memory writes",
+                    "accept one real input variant",
+                    "tighten one ambiguous parse branch",
+                    "keep invalid input rejection explicit",
                 ],
-                "avoid_drift": [
-                    "hash operation reorder",
-                    "branch/select-only rewrites",
-                    "generic loop restructuring",
-                ],
+                "avoid_drift": ["format rewrite outside the failing boundary"],
             },
-            "instruction_scheduling": {
-                "focus": "Change instruction order to reduce bundle, slot, or dependency stalls.",
+            "performance": {
+                "focus": "Reduce repeated work or latency in a measured hot path.",
                 "try": [
-                    "separate producer and consumer instructions with independent work",
-                    "mix engine types while preserving data dependencies",
-                    "schedule one dependency chain locally instead of rewriting the whole loop",
+                    "remove one redundant calculation, lookup, allocation, or I/O",
+                    "cache or reuse a value only where lifetime is clear",
+                    "keep correctness and observability unchanged",
                 ],
-                "avoid_drift": [
-                    "new algorithm",
-                    "constant caching only",
-                    "memory layout only",
+                "avoid_drift": ["unsafe caching", "large speculative rewrite"],
+            },
+            "resource_management": {
+                "focus": "Adjust memory, file, process, or other resource lifetime.",
+                "try": [
+                    "close or bound one resource lifecycle",
+                    "reduce one unnecessary allocation or buffer copy",
+                    "make cleanup behavior explicit",
                 ],
+                "avoid_drift": ["changing ownership broadly", "hiding resource failures"],
+            },
+            "test_contract": {
+                "focus": "Align implementation with tests or add a focused test when allowed.",
+                "try": [
+                    "target one assertion boundary",
+                    "use the smallest fixture or expectation update",
+                    "keep production changes separate from test-only changes",
+                ],
+                "avoid_drift": ["weakening tests to pass", "broad fixture churn"],
+            },
+            "runtime_control": {
+                "focus": "Adjust timeout, async, subprocess, retry, or concurrency control.",
+                "try": [
+                    "bound one wait/retry path",
+                    "make process or task lifecycle explicit",
+                    "preserve deterministic cleanup",
+                ],
+                "avoid_drift": ["unbounded retries", "global scheduling rewrite"],
             },
             "general_edit": {
                 "focus": "Make a small novel edit that does not fit a cooled specialist axis.",
@@ -2061,15 +2174,15 @@ class MicroAgent:
                     "make one correctness-preserving local cleanup with measurable effect",
                 ],
                 "avoid_drift": [
-                    "hidden hash/phase/vector/memory rewrite",
                     "repeating any cooled axis under a generic label",
+                    "mixing multiple independent tactics",
                 ],
             },
         }
         return guidance.get(
-            axis,
+            normalized_axis,
             {
-                "focus": f"Make a candidate centered on {axis}.",
+                "focus": f"Make a candidate centered on {normalized_axis or axis}.",
                 "try": ["choose one small concrete tactic for this axis"],
                 "avoid_drift": ["renaming another strategy as this axis"],
             },
@@ -2086,20 +2199,10 @@ class MicroAgent:
         configured = workflow.get("adaptive_search_axis_pool")
         if isinstance(configured, list) and configured:
             return [self._normalize_strategy_axis(str(axis)) for axis in configured if str(axis)]
-        return [
-            "hash_build",
-            "phase_interleave",
-            "vector_unroll_lane",
-            "memory_store_layout",
-            "precompute_constants",
-            "branch_control",
-            "instruction_scheduling",
-            "parsing",
-            "api_contract",
-            "test_contract",
-            "runtime_control",
-            "general_edit",
-        ]
+        axes = list(self._strategy_axis_keywords().keys())
+        if "general_edit" not in axes:
+            axes.append("general_edit")
+        return axes
 
     def _allowed_strategy_axes(self) -> list[str]:
         cooled = set(self._current_cooled_axes())

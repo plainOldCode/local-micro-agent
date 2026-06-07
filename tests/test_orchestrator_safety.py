@@ -128,6 +128,83 @@ def run_agent(repo: Path, workflow: dict) -> AgentState:
     return asyncio.run(MicroAgent(config, state).run())
 
 
+TAKEHOME_AXIS_POOL = [
+    "hash_build",
+    "phase_interleave",
+    "vector_unroll_lane",
+    "memory_store_layout",
+    "precompute_constants",
+    "branch_control",
+    "instruction_scheduling",
+    "general_edit",
+]
+
+TAKEHOME_FAMILY_AXIS_MAP = {
+    "hash_constant_fold": "precompute_constants",
+    "hash_reorder": "hash_build",
+    "store_address_reuse": "memory_store_layout",
+    "list_scheduler_rewrite": "instruction_scheduling",
+    "branch_mask": "branch_control",
+    "phase_pipeline": "phase_interleave",
+    "memory_cache_layout": "memory_store_layout",
+    "unroll_factor_change": "vector_unroll_lane",
+    "valu_vectorization": "vector_unroll_lane",
+}
+
+TAKEHOME_FAMILY_RULES = [
+    {
+        "family_key": "list_scheduler_rewrite",
+        "any": ["list scheduling", "topological", "dependency depth", "scheduler"],
+    },
+    {
+        "family_key": "store_address_reuse",
+        "all": ["store", "address"],
+        "any": ["reuse", "precompute", "computed", "hoist", "cache", "tmp_addrs", "phase 4"],
+    },
+    {
+        "family_key": "hash_constant_fold",
+        "all": ["hash"],
+        "any": ["constant", "precompute", "lookup", "fold"],
+    },
+    {
+        "family_key": "valu_vectorization",
+        "any": ["valu", "vload", "vstore", "simd", "vectorized"],
+        "allow_variants": False,
+    },
+    {"family_key": "unroll_factor_change", "any": ["unroll_factor", "unroll factor"]},
+    {
+        "family_key": "branch_mask",
+        "all": ["mask"],
+        "any": ["bounds", "multiply", "conditional", "bitwise"],
+    },
+    {
+        "family_key": "memory_cache_layout",
+        "any": ["scratch cache", "circular buffer", "random access", "cache"],
+    },
+    {"family_key": "hash_reorder", "all": ["hash"], "any": ["reorder", "tmp1", "tmp2"]},
+    {"family_key": "phase_pipeline", "any": ["interleave", "pipeline", "overlap", "ping pong"]},
+]
+
+TAKEHOME_AXIS_GUIDANCE = {
+    "vector_unroll_lane": {
+        "focus": "Change per-lane or unroll-lane structure.",
+        "try": ["change lane-local temporary reuse"],
+        "avoid_drift": ["global phase rewrite"],
+    }
+}
+
+
+def takehome_workflow(**overrides: object) -> dict:
+    workflow = {
+        "adaptive_search_axis_pool": TAKEHOME_AXIS_POOL,
+        "adaptive_search_family_axis_map": TAKEHOME_FAMILY_AXIS_MAP,
+        "adaptive_search_family_rules": TAKEHOME_FAMILY_RULES,
+        "adaptive_search_axis_guidance": TAKEHOME_AXIS_GUIDANCE,
+    }
+    workflow.update(overrides)
+    return workflow
+
+
 class OrchestratorSafetyTests(unittest.TestCase):
     def test_log_prefix_includes_timestamp(self) -> None:
         output = io.StringIO()
@@ -140,6 +217,31 @@ class OrchestratorSafetyTests(unittest.TestCase):
             r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{4}\] "
             r"\[local-micro-agent\] CODE loop=1$",
         )
+
+    def test_default_adaptive_axes_are_domain_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            axes = agent._strategy_axis_pool()
+
+            self.assertIn("performance", axes)
+            self.assertIn("api_contract", axes)
+            for takehome_axis in (
+                "hash_build",
+                "phase_interleave",
+                "vector_unroll_lane",
+                "memory_store_layout",
+                "instruction_scheduling",
+            ):
+                self.assertNotIn(takehome_axis, axes)
+            self.assertEqual(agent._family_key_strategy_axes("store_address_reuse"), [])
+            self.assertEqual(
+                agent._tactic_family_key("Precompute store addresses in phase 4."),
+                "",
+            )
 
     def test_failed_candidate_restores_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -480,7 +582,12 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 user_request="test",
                 current=AgentStateName.REFLECT,
             )
-            config = {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}}
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(),
+            }
             agent = MicroAgent(config, state)
             agent.models = _StaticModelManager("- Failed because JSON was invalid.")
 
@@ -1070,18 +1177,18 @@ value = 'fast'
                 "models": {"default": "static"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "writable_files": ["target.py"],
-                    "test_commands": ["python3 -c \"print('cycles: 120')\""],
-                    "candidate_queue": True,
-                    "adaptive_search_memory": True,
-                    "adaptive_search_axis_failure_threshold": 3,
-                    "adaptive_search_axis_cooldown_loops": 4,
-                    "metric_regex": r"cycles: (\d+)",
-                    "baseline_metric": 100,
-                    "accept_if_improved": True,
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                },
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    test_commands=["python3 -c \"print('cycles: 120')\""],
+                    candidate_queue=True,
+                    adaptive_search_memory=True,
+                    adaptive_search_axis_failure_threshold=3,
+                    adaptive_search_axis_cooldown_loops=4,
+                    metric_regex=r"cycles: (\d+)",
+                    baseline_metric=100,
+                    accept_if_improved=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test")
             agent = MicroAgent(config, state)
@@ -1096,7 +1203,7 @@ value = 'fast'
                         replacement="value = 'slow'\n",
                     )
                 ],
-                "try phase interleave scheduling",
+                "try phase interleave overlap",
             )
 
             async def evaluate_three_times() -> None:
@@ -1226,10 +1333,10 @@ value = 'fast'
                 "models": {"default": "roles"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "brainstorm_after_rejections": 2,
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                },
+                "workflow": takehome_workflow(
+                    brainstorm_after_rejections=2,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
             state.plan_markdown = "seeded"
@@ -1318,15 +1425,15 @@ value = 'fast'
                 "models": {"default": "roles"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "brainstorm_after_rejections": 2,
-                    "brainstorm_new_family_after_all_skipped": 2,
-                    "brainstorm_open_novelty_lanes": [
+                "workflow": takehome_workflow(
+                    brainstorm_after_rejections=2,
+                    brainstorm_new_family_after_all_skipped=2,
+                    brainstorm_open_novelty_lanes=[
                         "layout_or_tiling_change: try a small layout probe",
                         "control_or_guard_lowering: try a guard lowering probe",
                     ],
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                },
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
             state.plan_markdown = "seeded"
@@ -1370,15 +1477,15 @@ value = 'fast'
                 "models": {"default": "roles"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "brainstorm_after_rejections": 2,
-                    "brainstorm_new_family_after_all_skipped": 0,
-                    "brainstorm_open_novelty_lanes": [
+                "workflow": takehome_workflow(
+                    brainstorm_after_rejections=2,
+                    brainstorm_new_family_after_all_skipped=0,
+                    brainstorm_open_novelty_lanes=[
                         "coarse_unroll_lane_restructure: try a small unroll probe",
                         "load_latency_scheduling: move one load-use boundary",
                     ],
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                },
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
             state.plan_markdown = "seeded"
@@ -1480,7 +1587,7 @@ value = 'fast'
                     "models": {},
                     "providers": {},
                     "mcp_servers": {},
-                    "workflow": {"failed_tactic_similarity_threshold": 0.35},
+                    "workflow": takehome_workflow(failed_tactic_similarity_threshold=0.35),
                 },
                 AgentState(repo_root=repo, user_request="test"),
             )
@@ -1515,7 +1622,7 @@ value = 'fast'
                 + "\n"
             )
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1550,7 +1657,7 @@ value = 'fast'
                 + "\n"
             )
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1584,7 +1691,7 @@ value = 'fast'
                 + "\n"
             )
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1610,7 +1717,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1632,7 +1739,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1653,7 +1760,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1672,7 +1779,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1689,7 +1796,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -1705,7 +1812,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
             text = (
@@ -1713,14 +1820,14 @@ value = 'fast'
                 "to reduce ALU pressure."
             )
 
-            self.assertNotEqual(MicroAgent._tactic_family_key(text), "valu_vectorization")
+            self.assertNotEqual(agent._tactic_family_key(text), "valu_vectorization")
             self.assertNotIn("valu_vectorization", agent._tactic_family_aliases(text))
 
     def test_store_address_precompute_stays_store_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
             text = (
@@ -1728,7 +1835,7 @@ value = 'fast'
                 "to eliminate redundant ALU operations."
             )
 
-            self.assertEqual(MicroAgent._tactic_family_key(text), "store_address_reuse")
+            self.assertEqual(agent._tactic_family_key(text), "store_address_reuse")
             self.assertIn("store_address_reuse", agent._tactic_family_aliases(text))
             self.assertNotIn("hash_constant_fold", agent._tactic_family_aliases(text))
 
@@ -1754,11 +1861,11 @@ value = 'fast'
                     "models": {},
                     "providers": {},
                     "mcp_servers": {},
-                    "workflow": {
-                        "adaptive_search_memory": True,
-                        "adaptive_gate_controller": True,
-                        "adaptive_gate_min_family_attempts_for_hard": 2,
-                    },
+                    "workflow": takehome_workflow(
+                        adaptive_search_memory=True,
+                        adaptive_gate_controller=True,
+                        adaptive_gate_min_family_attempts_for_hard=2,
+                    ),
                 },
                 AgentState(repo_root=repo, user_request="test"),
             )
@@ -1805,12 +1912,12 @@ value = 'fast'
                     "models": {},
                     "providers": {},
                     "mcp_servers": {},
-                    "workflow": {
-                        "adaptive_search_memory": True,
-                        "adaptive_gate_controller": True,
-                        "adaptive_gate_min_family_attempts_for_hard": 1,
-                        "adaptive_gate_all_skipped_relax_streak": 2,
-                    },
+                    "workflow": takehome_workflow(
+                        adaptive_search_memory=True,
+                        adaptive_gate_controller=True,
+                        adaptive_gate_min_family_attempts_for_hard=1,
+                        adaptive_gate_all_skipped_relax_streak=2,
+                    ),
                 },
                 AgentState(repo_root=repo, user_request="test"),
             )
@@ -2009,14 +2116,14 @@ value = 'fast'
                 "models": {"default": "static"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "writable_files": ["target.py"],
-                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
-                    "candidate_queue": True,
-                    "adaptive_search_memory": True,
-                    "adaptive_search_reject_cooled_axes": True,
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                },
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    test_commands=["python3 -c \"print('cycles: 80')\""],
+                    candidate_queue=True,
+                    adaptive_search_memory=True,
+                    adaptive_search_reject_cooled_axes=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test")
             state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
@@ -2066,7 +2173,7 @@ value = 'fast'
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 state,
             )
             candidate = CodeCandidate(
@@ -2207,16 +2314,16 @@ value = 'fast'
                 "models": {"default": "static"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "writable_files": ["target.py"],
-                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
-                    "candidate_queue": True,
-                    "adaptive_search_memory": True,
-                    "adaptive_search_force_strategy_axis": True,
-                    "adaptive_search_axis_pool": ["memory_store_layout"],
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                    "failed_tactics_path": ".local_micro_agent/failed_tactics.jsonl",
-                },
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    test_commands=["python3 -c \"print('cycles: 80')\""],
+                    candidate_queue=True,
+                    adaptive_search_memory=True,
+                    adaptive_search_force_strategy_axis=True,
+                    adaptive_search_axis_pool=["memory_store_layout"],
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                    failed_tactics_path=".local_micro_agent/failed_tactics.jsonl",
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test")
             state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
@@ -2316,11 +2423,11 @@ value = 'fast'
                 "models": {},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "adaptive_search_memory": True,
-                    "adaptive_search_force_strategy_axis": True,
-                    "adaptive_search_axis_pool": ["vector_unroll_lane", "hash_build"],
-                },
+                "workflow": takehome_workflow(
+                    adaptive_search_memory=True,
+                    adaptive_search_force_strategy_axis=True,
+                    adaptive_search_axis_pool=["vector_unroll_lane", "hash_build"],
+                ),
             }
             agent = MicroAgent(config, state)
 
@@ -2470,7 +2577,7 @@ value = 'fast'
             (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
             (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -2511,7 +2618,7 @@ value = 'fast'
             }
             (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -2546,7 +2653,7 @@ value = 'fast'
                 + "\n"
             )
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -2571,7 +2678,7 @@ value = 'fast'
             (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
             (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
             agent = MicroAgent(
-                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": takehome_workflow()},
                 AgentState(repo_root=repo, user_request="test"),
             )
 
@@ -2773,10 +2880,10 @@ value = 'fast'
                     "models": {},
                     "providers": {},
                     "mcp_servers": {},
-                    "workflow": {
-                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                        "validated_pattern_followup": True,
-                    },
+                    "workflow": takehome_workflow(
+                        candidate_history_path=".local_micro_agent/candidates.jsonl",
+                        validated_pattern_followup=True,
+                    ),
                 },
                 state,
             )
@@ -2947,14 +3054,14 @@ value = 'fast'
                 "models": {"default": "static"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "writable_files": ["target.py"],
-                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
-                    "candidate_queue": True,
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                    "todo_attempt_budget": 3,
-                    "todo_soft_until_first_improvement": False,
-                },
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    test_commands=["python3 -c \"print('cycles: 80')\""],
+                    candidate_queue=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                    todo_attempt_budget=3,
+                    todo_soft_until_first_improvement=False,
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test")
             state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
@@ -3056,14 +3163,14 @@ value = 'fast'
                 "models": {"default": "static"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "writable_files": ["target.py"],
-                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
-                    "candidate_queue": True,
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                    "todo_attempt_budget": 3,
-                    "todo_soft_until_first_improvement": False,
-                },
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    test_commands=["python3 -c \"print('cycles: 80')\""],
+                    candidate_queue=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                    todo_attempt_budget=3,
+                    todo_soft_until_first_improvement=False,
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test")
             state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
@@ -3137,14 +3244,14 @@ value = 'fast'
                 "models": {"default": "static"},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {
-                    "writable_files": ["target.py"],
-                    "test_commands": ["python3 -c \"print('cycles: 80')\""],
-                    "candidate_queue": True,
-                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-                    "todo_attempt_budget": 3,
-                    "todo_soft_until_first_improvement": False,
-                },
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    test_commands=["python3 -c \"print('cycles: 80')\""],
+                    candidate_queue=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                    todo_attempt_budget=3,
+                    todo_soft_until_first_improvement=False,
+                ),
             }
             state = AgentState(repo_root=repo, user_request="test")
             state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
