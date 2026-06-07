@@ -1573,6 +1573,42 @@ value = 'fast'
             self.assertEqual(records[0]["axis"], "memory_store_layout")
             self.assertEqual(records[0]["axis_normalized_from"], "family_key")
 
+    def test_brainstorm_selection_parses_axis_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. **Tactic**: Use `hash_reorder` under the `hash_build` axis "
+                "to flatten independent hash stages.\n"
+                "family_key: hash_reorder\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "hash_build")
+            records = agent.state.scratch["brainstorm_selection"]
+            self.assertEqual(records[0]["axis_source"], "axis_phrase")
+
+    def test_family_axis_matching_is_token_based(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            self.assertEqual(
+                agent._family_key_strategy_axes("list_scheduler_rewrite"),
+                ["instruction_scheduling"],
+            )
+            self.assertNotIn(
+                "memory_store_layout",
+                agent._family_key_strategy_axes("list_scheduler_rewrite"),
+            )
+
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

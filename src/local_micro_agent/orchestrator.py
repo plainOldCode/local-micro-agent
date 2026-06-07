@@ -344,14 +344,9 @@ class MicroAgent:
         self.state.scratch.pop("brainstorm_all_tactics_failed_loop", None)
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
         for order, block in enumerate(blocks):
-            match = re.search(
-                r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
-                block,
-                flags=re.IGNORECASE,
-            )
-            if not match:
+            declared_axis, axis_source = self._extract_tactic_axis(block, known_axes)
+            if not declared_axis:
                 continue
-            declared_axis = self._normalize_strategy_axis(match.group(1))
             axis = declared_axis
             explicit_family_key = self._explicit_tactic_family_key(block)
             family_key = self._tactic_family_key(block)
@@ -375,6 +370,8 @@ class MicroAgent:
                         "reason": "unknown_axis",
                     }
                 )
+                if axis_source:
+                    selection_records[-1]["axis_source"] = axis_source
                 continue
             if explicit_family_key and self._brainstorm_axis_family_mismatch_reject_enabled():
                 if family_axes and axis not in family_axes:
@@ -390,6 +387,8 @@ class MicroAgent:
                             "reason": "axis_family_mismatch",
                         }
                     )
+                    if axis_source:
+                        selection_records[-1]["axis_source"] = axis_source
                     self.state.notes.append(
                         "Skipped brainstorm tactic "
                         f"axis={axis} family_key={family_key} reason=axis_family_mismatch"
@@ -431,6 +430,8 @@ class MicroAgent:
                     }
                     if axis_normalized_from:
                         record["axis_normalized_from"] = axis_normalized_from
+                    if axis_source:
+                        record["axis_source"] = axis_source
                     score, reasons = self._score_brainstorm_tactic(
                         block,
                         axis,
@@ -457,6 +458,8 @@ class MicroAgent:
                         "gate_reason": gate_decision["reason"],
                     }
                 )
+                if axis_source:
+                    selection_records[-1]["axis_source"] = axis_source
                 self._persist_gate_decision(gate_decision)
                 self.state.notes.append(
                     "Skipped brainstorm tactic "
@@ -490,6 +493,8 @@ class MicroAgent:
             }
             if axis_normalized_from:
                 record["axis_normalized_from"] = axis_normalized_from
+            if axis_source:
+                record["axis_source"] = axis_source
             selection_records.append(record)
             selectable.append((score, order, selected, record))
         if selectable:
@@ -508,6 +513,39 @@ class MicroAgent:
     def _brainstorm_axis_family_mismatch_reject_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("brainstorm_reject_axis_family_mismatch", True))
+
+    def _extract_tactic_axis(self, text: str, known_axes: set[str]) -> tuple[str, str]:
+        patterns = (
+            (
+                r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
+                "strategy_axis",
+            ),
+            (
+                r"\bunder\s+(?:the\s+)?`?([a-zA-Z0-9_-]+)`?\s+axis\b",
+                "axis_phrase",
+            ),
+            (
+                r"\b`?([a-zA-Z0-9_-]+)`?\s+axis\b",
+                "axis_phrase",
+            ),
+        )
+        for pattern, source in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return self._normalize_strategy_axis(match.group(1)), source
+        mentioned = [
+            axis
+            for axis in sorted(known_axes)
+            if re.search(rf"\b{re.escape(axis)}\b", text, flags=re.IGNORECASE)
+        ]
+        if len(mentioned) == 1:
+            return mentioned[0], "known_axis_mention"
+        family_axis = self._canonical_axis_from_family_key(
+            self._tactic_family_key(text), known_axes
+        )
+        if family_axis:
+            return family_axis, "family_key"
+        return "", ""
 
     def _family_key_strategy_axes(self, family_key: str) -> list[str]:
         normalized = self._normalize_fingerprint_text(family_key)
@@ -1747,7 +1785,15 @@ class MicroAgent:
             ),
             "precompute_constants": ("precompute", "lookup", "table", "constant", "fold"),
             "branch_control": ("branch", "condition", "guard", "switch", "flow", "select", "bounds"),
-            "instruction_scheduling": ("bundle", "slot", "hazard", "dependency", "dependent", "raw"),
+            "instruction_scheduling": (
+                "bundle",
+                "slot",
+                "hazard",
+                "dependency",
+                "dependent",
+                "raw",
+                "scheduler",
+            ),
             "parsing": ("parse", "parser", "regex", "xml", "json"),
             "api_contract": ("api", "interface", "signature", "schema", "contract"),
             "test_contract": ("test", "assert", "fixture", "threshold"),
@@ -1759,11 +1805,24 @@ class MicroAgent:
     def _strategy_axes_for_text(
         text: str, keyword_axes: dict[str, tuple[str, ...]]
     ) -> list[str]:
-        return [
-            axis
-            for axis, keywords in keyword_axes.items()
-            if any(keyword in text for keyword in keywords)
-        ]
+        normalized = re.sub(r"[^a-zA-Z0-9]+", " ", text.lower())
+        tokens = set(normalized.split())
+        axes: list[str] = []
+        for axis, keywords in keyword_axes.items():
+            for keyword in keywords:
+                key = re.sub(r"[^a-zA-Z0-9]+", " ", keyword.lower()).strip()
+                if not key:
+                    continue
+                key_tokens = key.split()
+                if len(key_tokens) == 1:
+                    if key_tokens[0] in tokens:
+                        axes.append(axis)
+                        break
+                    continue
+                if all(token in tokens for token in key_tokens):
+                    axes.append(axis)
+                    break
+        return axes
 
     def _format_axis_contract(self) -> str:
         if not self._axis_contract_enabled():
