@@ -1625,6 +1625,21 @@ value = 'fast'
             self.assertIn("vector_unroll_lane", axes)
             self.assertNotIn("memory_store_layout", axes)
 
+    def test_family_key_matching_does_not_substring_match_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            text = (
+                "Precompute store addresses for indices and values outside the inner loop "
+                "to reduce ALU pressure."
+            )
+
+            self.assertNotEqual(MicroAgent._tactic_family_key(text), "valu_vectorization")
+            self.assertNotIn("valu_vectorization", agent._tactic_family_aliases(text))
+
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

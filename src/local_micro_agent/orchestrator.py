@@ -921,38 +921,34 @@ class MicroAgent:
         explicit = re.search(r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?", text, re.IGNORECASE)
         if explicit:
             return explicit.group(1).strip().lower()
-        normalized = re.sub(r"[^a-zA-Z0-9_]+", " ", text.lower())
-        if any(
-            keyword in normalized
-            for keyword in ("list scheduling", "topological", "dependency depth", "scheduler")
-        ):
+        normalized = re.sub(r"[^a-zA-Z0-9]+", " ", text.lower())
+        tokens = set(normalized.split())
+
+        def has(keyword: str, allow_variants: bool = True) -> bool:
+            return MicroAgent._keyword_phrase_matches(
+                tokens, keyword, allow_variants=allow_variants
+            )
+
+        def has_any(keywords: tuple[str, ...], allow_variants: bool = True) -> bool:
+            return any(has(keyword, allow_variants=allow_variants) for keyword in keywords)
+
+        if has_any(("list scheduling", "topological", "dependency depth", "scheduler")):
             return "list_scheduler_rewrite"
-        if "hash" in normalized and any(
-            keyword in normalized for keyword in ("constant", "precompute", "lookup", "fold")
-        ):
+        if has("hash") and has_any(("constant", "precompute", "lookup", "fold")):
             return "hash_constant_fold"
-        if "store" in normalized and "address" in normalized and any(
-            keyword in normalized for keyword in ("reuse", "tmp_addrs", "phase 4")
-        ):
+        if has("store") and has("address") and has_any(("reuse", "tmp_addrs", "phase 4")):
             return "store_address_reuse"
-        if any(keyword in normalized for keyword in ("valu", "vload", "vstore", "simd", "vectorized")):
+        if has_any(("valu", "vload", "vstore", "simd", "vectorized"), allow_variants=False):
             return "valu_vectorization"
-        if "unroll_factor" in normalized or "unroll factor" in normalized:
+        if has("unroll_factor") or has("unroll factor"):
             return "unroll_factor_change"
-        if any(keyword in normalized for keyword in ("bitwise", "mask")) and any(
-            keyword in normalized for keyword in ("bounds", "multiply", "conditional")
-        ):
+        if has_any(("bitwise", "mask")) and has_any(("bounds", "multiply", "conditional")):
             return "branch_mask"
-        if any(
-            keyword in normalized
-            for keyword in ("scratch cache", "circular buffer", "random access", "cache")
-        ):
+        if has_any(("scratch cache", "circular buffer", "random access", "cache")):
             return "memory_cache_layout"
-        if "hash" in normalized and any(
-            keyword in normalized for keyword in ("reorder", "tmp1", "tmp2")
-        ):
+        if has("hash") and has_any(("reorder", "tmp1", "tmp2")):
             return "hash_reorder"
-        if any(keyword in normalized for keyword in ("interleave", "pipeline", "overlap", "ping pong")):
+        if has_any(("interleave", "pipeline", "overlap", "ping pong")):
             return "phase_pipeline"
         return ""
 
@@ -1810,28 +1806,32 @@ class MicroAgent:
         axes: list[str] = []
         for axis, keywords in keyword_axes.items():
             for keyword in keywords:
-                key = re.sub(r"[^a-zA-Z0-9]+", " ", keyword.lower()).strip()
-                if not key:
-                    continue
-                key_tokens = key.split()
-                if len(key_tokens) == 1:
-                    if MicroAgent._keyword_token_matches(tokens, key_tokens[0]):
-                        axes.append(axis)
-                        break
-                    continue
-                if all(
-                    MicroAgent._keyword_token_matches(tokens, token)
-                    for token in key_tokens
-                ):
+                if MicroAgent._keyword_phrase_matches(tokens, keyword):
                     axes.append(axis)
                     break
         return axes
 
     @staticmethod
-    def _keyword_token_matches(tokens: set[str], keyword_token: str) -> bool:
+    def _keyword_phrase_matches(
+        tokens: set[str], keyword: str, allow_variants: bool = True
+    ) -> bool:
+        key = re.sub(r"[^a-zA-Z0-9]+", " ", keyword.lower()).strip()
+        if not key:
+            return False
+        return all(
+            MicroAgent._keyword_token_matches(
+                tokens, token, allow_variants=allow_variants
+            )
+            for token in key.split()
+        )
+
+    @staticmethod
+    def _keyword_token_matches(
+        tokens: set[str], keyword_token: str, allow_variants: bool = True
+    ) -> bool:
         if keyword_token in tokens:
             return True
-        if len(keyword_token) < 4:
+        if not allow_variants or len(keyword_token) < 4:
             return False
         variants = {keyword_token + "s", keyword_token + "es"}
         if keyword_token.endswith("e"):
