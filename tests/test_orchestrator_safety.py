@@ -1933,6 +1933,90 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(active["status"], "attempted")
             self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
 
+    def test_failed_todo_attempt_stays_active_until_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-hash_build",
+                "status": "active",
+                "strategy_axis": "hash_build",
+                "context": "hash reorder tactic",
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"todo_attempt_budget": 3},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            agent._update_todo_status_from_attempt(
+                {
+                    "todo_id": "todo-001-hash_build",
+                    "status": "rejected_no_changes",
+                    "metric": None,
+                    "failed": True,
+                    "reason": "search block missed the current source",
+                }
+            )
+
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            active = json.loads((artifact_dir / "active_todo.json").read_text())
+            self.assertEqual(updated["active_todo_id"], "todo-001-hash_build")
+            self.assertEqual(updated["todos"][0]["status"], "attempted")
+            self.assertEqual(updated["todos"][0]["attempts"], 1)
+            self.assertEqual(active["status"], "attempted")
+            self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
+
+    def test_active_todo_blocks_brainstorm_until_budget_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "candidates.jsonl").write_text(
+                '{"status":"rejected","metric":147734,"failed":false}\n'
+                '{"status":"rejected","metric":147734,"failed":false}\n'
+            )
+            todo = {
+                "todo_id": "todo-001-instruction_scheduling",
+                "status": "attempted",
+                "strategy_axis": "instruction_scheduling",
+                "context": "vliw packing tactic",
+                "attempts": 1,
+            }
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "brainstorm_after_rejections": 2,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempt_budget": 3,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=2),
+            )
+
+            self.assertFalse(agent._should_brainstorm())
+
+            todo["attempts"] = 3
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent.state.scratch.pop("active_todo", None)
+            self.assertTrue(agent._should_brainstorm())
+
     def test_non_improving_todo_fails_when_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

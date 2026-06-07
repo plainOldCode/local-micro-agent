@@ -93,6 +93,12 @@ fires, so clean-start searches can see coarse structural routes early. Set
 `workflow.brainstorm_include_open_novelty_lanes=false` to suppress that prompt
 section.
 
+Durable todos honor `workflow.todo_attempt_budget` before moving on. A rejected
+candidate, failed test, or no-change patch keeps the same active todo in the
+next `CODE` prompt until the budget is exhausted, so the model can use the
+error signal to repair or narrow the probe instead of treating every tactic as a
+one-shot attempt.
+
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
 and `.local_micro_agent/best.patch`, updates the in-memory best metric, and

@@ -802,7 +802,7 @@ class MicroAgent:
                 if (
                     isinstance(existing, dict)
                     and existing.get("todo_id") == previous_active_id
-                    and existing.get("status") == "active"
+                    and existing.get("status") in {"active", "attempted"}
                 ):
                     existing["status"] = "superseded"
                     existing["superseded_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -2153,10 +2153,24 @@ class MicroAgent:
             return False
         if self.state.scratch.get("last_brainstorm_loop") == self.state.loop_count:
             return False
+        if self._has_active_todo_budget():
+            return False
         records = self._candidate_history_records(limit=max(threshold, 1))
         if len(records) < threshold:
             return False
         return all(str(record.get("status", "")).startswith("rejected") for record in records)
+
+    def _has_active_todo_budget(self) -> bool:
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return False
+        if active_todo.get("status") not in {"active", "attempted"}:
+            return False
+        return not self._todo_attempt_budget_exhausted(active_todo)
 
     def _format_tactic_library(self) -> str:
         tactic_library = self.state.scratch.get("tactic_library")
@@ -2620,8 +2634,6 @@ class MicroAgent:
             return "validated"
         if not status.startswith("rejected"):
             return "attempted"
-        if attempt.get("failed") is True:
-            return "failed"
         if previous_status == "validated":
             return "validated"
         budget = int(self.config.get("workflow", {}).get("todo_attempt_budget", 1) or 1)
