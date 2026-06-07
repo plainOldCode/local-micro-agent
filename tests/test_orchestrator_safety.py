@@ -10,7 +10,7 @@ from pathlib import Path
 
 from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent
 from local_micro_agent.prompts import code_prompt, reflect_prompt
-from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot
+from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
 
 
 class _BadJsonModel:
@@ -894,11 +894,137 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(record["status"], "rejected_no_changes")
             self.assertIn("Replacement target not found", record["failure_detail"])
             self.assertIn("Replacement target not found", record["no_change_reason"])
+            self.assertEqual(record["failure_class"], "patch_miss")
+            self.assertIn("Retarget", " ".join(record["next_actions"]))
+            self.assertIn("refreshing file context", record["recovery_hint"])
             artifact_path = repo / record["artifact_path"]
             self.assertTrue(artifact_path.exists())
             artifact = json.loads(artifact_path.read_text())
             self.assertEqual(artifact["candidate_id"], "miss")
+            self.assertEqual(artifact["failure_class"], "patch_miss")
             self.assertIn("Replacement target not found", agent._format_candidate_history())
+
+    def test_candidate_history_records_structured_failure_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "record_candidate_artifacts": True,
+                },
+            }
+            agent = MicroAgent(config, AgentState(repo_root=repo, user_request="test"))
+            candidate = CodeCandidate(
+                "broken",
+                [CodeChange("target.py", "semantic edit", content="bad = True\n")],
+                "try a semantic edit",
+                "correctness",
+            )
+            result = TestResult(
+                command="python3 -m pytest",
+                exit_code=1,
+                stdout="FAILED test_target.py::test_contract",
+                stderr="AssertionError: contract changed",
+            )
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected",
+                metric=None,
+                applied=1,
+                failed=True,
+                patch_text="diff --git a/target.py b/target.py\n",
+                results=[result],
+                failure_detail=agent._candidate_failure_detail([], [result], failed=True),
+            )
+
+            agent._append_candidate_history(
+                candidate,
+                status="rejected",
+                metric=None,
+                applied=1,
+                failed=True,
+                extra=extra,
+            )
+
+            record = json.loads((artifact_dir / "candidates.jsonl").read_text())
+            self.assertEqual(record["failure_class"], "correctness_failure")
+            self.assertIn("failing command", " ".join(record["next_actions"]))
+            self.assertIn("failing assertion", record["recovery_hint"])
+            self.assertIn("correctness_failure", agent._format_recent_reject_summary())
+            artifact = json.loads((repo / record["artifact_path"]).read_text())
+            self.assertEqual(artifact["failure_class"], "correctness_failure")
+            self.assertTrue((repo / record["test_output_path"]).exists())
+
+    def test_todo_attempt_copies_structured_candidate_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-performance",
+                "status": "active",
+                "strategy_axis": "performance",
+                "context": "try one performance tactic",
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempt_budget": 3,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "slow",
+                [CodeChange("target.py", "performance edit", content="value = 1\n")],
+                "same performance tactic",
+                "performance",
+            )
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected",
+                metric=120,
+                applied=1,
+                failed=False,
+                patch_text="",
+                results=[TestResult("python3 bench.py", 0, "cycles: 120\n", "")],
+            )
+
+            agent._append_candidate_history(
+                candidate,
+                status="rejected",
+                metric=120,
+                applied=1,
+                failed=False,
+                extra=extra,
+            )
+
+            attempts = [
+                json.loads(line)
+                for line in (artifact_dir / "todo_attempts.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(attempts[0]["failure_class"], "no_improvement")
+            self.assertIn("vary the tactic", attempts[0]["recovery_hint"])
+            todo_summary = agent._format_todo_ledger_summary()
+            self.assertIn("last_failure_class", todo_summary)
+            self.assertIn("no_improvement", todo_summary)
 
     def test_target_not_found_repair_can_fix_search_block_within_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

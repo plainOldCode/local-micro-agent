@@ -2996,6 +2996,12 @@ class MicroAgent:
                 if isinstance(last_attempt, dict)
                 else ""
             )
+            last_summary = (
+                last_attempt.get("summary") if isinstance(last_attempt, dict) else ""
+            )
+            last_recovery_hint = (
+                last_attempt.get("recovery_hint") if isinstance(last_attempt, dict) else ""
+            )
             summary.append(
                 {
                     "todo_id": todo.get("todo_id"),
@@ -3009,15 +3015,28 @@ class MicroAgent:
                     "last_metric": (
                         last_attempt.get("metric") if isinstance(last_attempt, dict) else None
                     ),
+                    "last_failure_class": (
+                        last_attempt.get("failure_class")
+                        if isinstance(last_attempt, dict)
+                        else None
+                    ),
                     "last_reason": self._truncate_text(
                         str(last_attempt.get("reason", "")), 220
                     )
                     if isinstance(last_attempt, dict)
                     else "",
+                    "last_summary": self._truncate_text(str(last_summary), 260)
+                    if last_summary
+                    else "",
                     "last_failure_detail": self._truncate_text(
                         str(last_failure_detail), 260
                     )
                     if last_failure_detail
+                    else "",
+                    "last_recovery_hint": self._truncate_text(
+                        str(last_recovery_hint), 260
+                    )
+                    if last_recovery_hint
                     else "",
                 }
             )
@@ -3043,6 +3062,17 @@ class MicroAgent:
                 "reason": reason,
             }
             failure_detail = record.get("failure_detail") or record.get("no_change_reason")
+            for key in ("failure_class", "summary", "recovery_hint"):
+                value = record.get(key)
+                if value:
+                    item[key] = self._truncate_text(str(value), 260)
+            next_actions = record.get("next_actions")
+            if isinstance(next_actions, list) and next_actions:
+                item["next_actions"] = [
+                    self._truncate_text(str(action), 180)
+                    for action in next_actions[:3]
+                    if action
+                ]
             if failure_detail:
                 item["failure_detail"] = self._truncate_text(str(failure_detail), 260)
             summary.append(item)
@@ -3339,6 +3369,17 @@ class MicroAgent:
             extra["no_change_reason"] = self._truncate_text(no_change_reason, 1000)
         if repair_parent_id:
             extra["repair_parent_id"] = repair_parent_id
+        observation = self._candidate_observation(
+            candidate,
+            status=status,
+            metric=metric,
+            applied=applied,
+            failed=failed,
+            results=results,
+            failure_detail=failure_detail,
+            no_change_reason=no_change_reason,
+        )
+        extra.update(observation)
         extra.update(
             self._write_candidate_artifacts(
                 candidate,
@@ -3351,9 +3392,204 @@ class MicroAgent:
                 failure_detail=failure_detail,
                 no_change_reason=no_change_reason,
                 repair_parent_id=repair_parent_id,
+                observation=observation,
             )
         )
         return extra
+
+    def _candidate_observation(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+        results: list[TestResult],
+        failure_detail: str = "",
+        no_change_reason: str = "",
+    ) -> dict[str, Any]:
+        failure_class = self._candidate_failure_class(
+            status=status,
+            metric=metric,
+            applied=applied,
+            failed=failed,
+            results=results,
+            failure_detail=failure_detail,
+            no_change_reason=no_change_reason,
+        )
+        summary = self._candidate_observation_summary(
+            candidate,
+            status=status,
+            metric=metric,
+            applied=applied,
+            failure_class=failure_class,
+            failure_detail=failure_detail,
+            no_change_reason=no_change_reason,
+        )
+        next_actions = self._candidate_next_actions(failure_class)
+        recovery_hint = self._candidate_recovery_hint(failure_class)
+        observation: dict[str, Any] = {
+            "failure_class": failure_class,
+            "summary": self._truncate_text(summary, 700),
+            "next_actions": [
+                self._truncate_text(action, 220)
+                for action in next_actions
+                if action
+            ],
+            "recovery_hint": self._truncate_text(recovery_hint, 700),
+        }
+        return observation
+
+    def _candidate_failure_class(
+        self,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+        results: list[TestResult],
+        failure_detail: str = "",
+        no_change_reason: str = "",
+    ) -> str:
+        status_text = str(status)
+        detail_text = self._normalize_fingerprint_text(
+            " ".join([status_text, failure_detail, no_change_reason])
+        )
+        if status_text in {"improved", "accepted"}:
+            return status_text
+        if "duplicate" in status_text or "repeated_pattern" in status_text:
+            return "duplicate_variant"
+        if "axis_drift" in status_text or "cooled_axis" in status_text:
+            return "axis_mismatch"
+        if "family_drift" in status_text:
+            return "family_mismatch"
+        if status_text.startswith("rejected_todo"):
+            return "contract_mismatch"
+        patch_indicators = (
+            "target not found",
+            "patch rejected",
+            "patch apply failed",
+            "replacement target is ambiguous",
+            "no writable file content changed",
+            "no changes applied",
+            "no-op",
+            "only changes comments",
+        )
+        if status_text == "rejected_no_changes" or any(
+            indicator in detail_text for indicator in patch_indicators
+        ):
+            return "patch_miss"
+        if any(result.exit_code != 0 for result in results):
+            return "correctness_failure"
+        if metric is None and (failed or results):
+            return "metric_missing"
+        if metric is not None and not failed and status_text.startswith("rejected"):
+            return "no_improvement"
+        if failed:
+            return "correctness_failure"
+        return "rejected"
+
+    def _candidate_observation_summary(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failure_class: str,
+        failure_detail: str = "",
+        no_change_reason: str = "",
+    ) -> str:
+        axis = candidate.strategy_axis or ",".join(self._candidate_strategy_axes(candidate))
+        parts = [
+            f"{failure_class}: status={status}",
+            f"applied={applied}",
+            f"metric={metric}",
+        ]
+        if axis:
+            parts.append(f"axis={axis}")
+        detail = no_change_reason or failure_detail
+        if detail:
+            parts.append(self._truncate_text(detail, 280))
+        return "; ".join(parts)
+
+    @staticmethod
+    def _candidate_next_actions(failure_class: str) -> list[str]:
+        actions_by_class = {
+            "patch_miss": [
+                "Re-read the current file region before editing.",
+                "Retarget the smallest replacement or patch hunk that still exists.",
+            ],
+            "correctness_failure": [
+                "Use the failing command output as the next hypothesis.",
+                "Make a smaller semantic change that preserves observed invariants.",
+            ],
+            "metric_missing": [
+                "Preserve the configured metric output path and format.",
+                "Run the benchmark command locally before changing tactic.",
+            ],
+            "no_improvement": [
+                "Do not repeat the same tactic shape.",
+                "Keep correctness, but change the bottleneck hypothesis or edit location.",
+            ],
+            "duplicate_variant": [
+                "Change the implementation family or touched code region.",
+                "Avoid cosmetic rewrites of the same candidate fingerprint.",
+            ],
+            "axis_mismatch": [
+                "Align the declared strategy_axis with the active contract.",
+                "If the contract is stale, request or produce evidence before switching axis.",
+            ],
+            "family_mismatch": [
+                "Stay within the active family_key or explicitly create a new todo.",
+                "Avoid mixing unrelated tactic families in a follow-up attempt.",
+            ],
+            "contract_mismatch": [
+                "Read the active todo contract and produce a candidate that satisfies it.",
+                "If the contract blocks valid work, surface that as evidence for relaxation.",
+            ],
+        }
+        return actions_by_class.get(
+            failure_class,
+            ["Use the structured failure fields before choosing the next edit."],
+        )
+
+    @staticmethod
+    def _candidate_recovery_hint(failure_class: str) -> str:
+        hints = {
+            "patch_miss": (
+                "Recover by refreshing file context and editing an exact current target; "
+                "do not count this as evidence that the tactic is bad."
+            ),
+            "correctness_failure": (
+                "Recover from the concrete failing assertion/command before optimizing further."
+            ),
+            "metric_missing": (
+                "Recover by restoring benchmark/metric observability before judging speed."
+            ),
+            "no_improvement": (
+                "Treat this as valid negative performance evidence; vary the tactic, axis, "
+                "or edit site rather than retrying the same shape."
+            ),
+            "duplicate_variant": (
+                "Recover by making a substantively different candidate, not a renamed variant."
+            ),
+            "axis_mismatch": (
+                "Recover by satisfying the active axis contract or creating evidence that it "
+                "should be relaxed."
+            ),
+            "family_mismatch": (
+                "Recover by keeping the active family coherent until the todo is exhausted."
+            ),
+            "contract_mismatch": (
+                "Recover by following the visible active contract, or produce structured "
+                "evidence for a controller-level relaxation."
+            ),
+            "improved": "Persist the validated pattern and explore follow-ups from the measured gain.",
+            "accepted": "Persist the accepted result and stop unless the workflow asks to continue.",
+        }
+        return hints.get(
+            failure_class,
+            "Recover by using the status, metric, and artifacts as the next observation.",
+        )
 
     async def _repair_target_not_found_candidate(
         self,
@@ -3671,6 +3907,7 @@ class MicroAgent:
         failure_detail: str = "",
         no_change_reason: str = "",
         repair_parent_id: str = "",
+        observation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         artifact_dir = self._candidate_artifact_dir()
         if artifact_dir is None:
@@ -3699,6 +3936,14 @@ class MicroAgent:
             metadata["no_change_reason"] = self._truncate_text(no_change_reason, 2000)
         if repair_parent_id:
             metadata["repair_parent_id"] = repair_parent_id
+        if observation:
+            metadata.update(
+                {
+                    key: value
+                    for key, value in observation.items()
+                    if value not in (None, "", [], {})
+                }
+            )
         output_limit = int(
             self.config.get("workflow", {}).get("candidate_artifact_output_limit", 12000)
         )
@@ -3822,6 +4067,10 @@ class MicroAgent:
             attempt["budget_counted"] = False
         for key in (
             "failure_detail",
+            "failure_class",
+            "summary",
+            "next_actions",
+            "recovery_hint",
             "no_change_reason",
             "artifact_id",
             "artifact_path",
