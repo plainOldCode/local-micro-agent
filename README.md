@@ -127,6 +127,15 @@ caching, Anthropic cache breakpoints, Gemini cached content, or vLLM/SGLang
 automatic prefix caching. Avoid placing volatile timestamps, request IDs, or
 tool-output snippets before stable repo context if cache hit rate matters.
 
+Set `workflow.record_candidate_artifacts=true` to persist candidate-level
+provenance under `.local_micro_agent/candidate_artifacts`. Each candidate gets a
+metadata JSON file, and candidates that apply edits also get a unified diff; test
+runs get a compact stdout/stderr transcript. `rejected_no_changes` records now
+store the concrete no-change reason, such as target-not-found, no-op replacement,
+comment-only edits, out-of-plan paths, or patch rejection. Recent candidate
+history includes those details so later CODE calls can repair the actual miss
+instead of only seeing a generic rejection status.
+
 For clean model-evaluation runs, do not inject prior-run winning patches or
 human-discovered transformation ladders into the prompt. Candidate ladders used
 by CODE should come from the current run's own PLAN, BRAINSTORM, READ, or

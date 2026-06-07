@@ -79,6 +79,9 @@
     "failed_tactic_similarity_threshold": 0.45,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
+    "record_candidate_artifacts": false,
+    "candidate_artifact_dir": ".local_micro_agent/candidate_artifacts",
+    "candidate_artifact_output_limit": 12000,
     "feedback_notes_limit": 12
   }
 }

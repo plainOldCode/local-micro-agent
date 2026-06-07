@@ -1025,12 +1025,14 @@ class MicroAgent:
             if todo_rejection is not None:
                 status, note = todo_rejection
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                extra = self._candidate_rejection_extra(candidate, status, note)
                 self._append_candidate_history(
                     candidate,
                     status=status,
                     metric=None,
                     applied=0,
                     failed=True,
+                    extra=extra,
                 )
                 self._record_strategy_attempt(
                     candidate,
@@ -1045,12 +1047,14 @@ class MicroAgent:
             if axis_rejection is not None:
                 status, note = axis_rejection
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                extra = self._candidate_rejection_extra(candidate, status, note)
                 self._append_candidate_history(
                     candidate,
                     status=status,
                     metric=None,
                     applied=0,
                     failed=True,
+                    extra=extra,
                 )
                 self._record_strategy_attempt(
                     candidate,
@@ -1065,12 +1069,14 @@ class MicroAgent:
             if family_rejection is not None:
                 status, note = family_rejection
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                extra = self._candidate_rejection_extra(candidate, status, note)
                 self._append_candidate_history(
                     candidate,
                     status=status,
                     metric=None,
                     applied=0,
                     failed=True,
+                    extra=extra,
                 )
                 self._record_strategy_attempt(
                     candidate,
@@ -1088,12 +1094,18 @@ class MicroAgent:
                     f"{candidate.candidate_id} rejected: forbidden repeated pattern "
                     f"{duplicate_fingerprint}"
                 )
+                extra = self._candidate_rejection_extra(
+                    candidate,
+                    "rejected_repeated_pattern",
+                    f"forbidden repeated pattern {duplicate_fingerprint}",
+                )
                 self._append_candidate_history(
                     candidate,
                     status="rejected_repeated_pattern",
                     metric=None,
                     applied=0,
                     failed=True,
+                    extra=extra,
                 )
                 self._record_strategy_attempt(
                     candidate,
@@ -1111,12 +1123,18 @@ class MicroAgent:
                     f"{candidate.candidate_id} rejected: cooled strategy axes "
                     f"{', '.join(cooled_axes)}"
                 )
+                extra = self._candidate_rejection_extra(
+                    candidate,
+                    "rejected_cooled_axis",
+                    f"cooled strategy axes {', '.join(cooled_axes)}",
+                )
                 self._append_candidate_history(
                     candidate,
                     status="rejected_cooled_axis",
                     metric=None,
                     applied=0,
                     failed=True,
+                    extra=extra,
                 )
                 self._record_strategy_attempt(
                     candidate,
@@ -1128,16 +1146,40 @@ class MicroAgent:
                 continue
 
             await self._restore_snapshot(baseline_snapshot)
+            note_start = len(self.state.notes)
             applied = await self._apply_changes(candidate.changes, allowed)
+            current_snapshot = await self._snapshot_files(sorted(allowed))
+            patch_text = self._snapshot_patch(baseline_snapshot, current_snapshot)
             if applied == 0:
-                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: no changes applied")
+                failure_detail = self._candidate_failure_detail(
+                    self.state.notes[note_start:],
+                    [],
+                    failed=True,
+                )
+                no_change_reason = failure_detail or "No writable file content changed"
+                self.state.notes.append(
+                    f"Candidate {candidate.candidate_id} rejected: no changes applied"
+                    f" ({no_change_reason})"
+                )
                 self._remember_rejected_candidate(candidate)
+                extra = self._candidate_history_extra(
+                    candidate,
+                    status="rejected_no_changes",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    patch_text=patch_text,
+                    results=[],
+                    failure_detail=failure_detail,
+                    no_change_reason=no_change_reason,
+                )
                 self._append_candidate_history(
                     candidate,
                     status="rejected_no_changes",
                     metric=None,
                     applied=0,
                     failed=True,
+                    extra=extra,
                 )
                 self._record_strategy_attempt(
                     candidate,
@@ -1157,20 +1199,37 @@ class MicroAgent:
                     f"Candidate {candidate.candidate_id} metric not found"
                 )
             improved = metric is not None and self._metric_improved(metric, iteration_best_metric)
+            failure_detail = self._candidate_failure_detail(
+                self.state.notes[note_start:],
+                results,
+                failed=failed,
+            )
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} applied={applied} "
                 f"metric={metric} failed={failed} improved={improved}"
             )
-            self._append_candidate_history(
+            status = "improved" if improved and not failed else "rejected"
+            extra = self._candidate_history_extra(
                 candidate,
-                status="improved" if improved and not failed else "rejected",
+                status=status,
                 metric=metric,
                 applied=applied,
                 failed=failed,
+                patch_text=patch_text,
+                results=results,
+                failure_detail=failure_detail,
+            )
+            self._append_candidate_history(
+                candidate,
+                status=status,
+                metric=metric,
+                applied=applied,
+                failed=failed,
+                extra=extra,
             )
             self._record_strategy_attempt(
                 candidate,
-                status="improved" if improved and not failed else "rejected",
+                status=status,
                 metric=metric,
                 applied=applied,
                 failed=failed,
@@ -2308,6 +2367,11 @@ class MicroAgent:
             if not isinstance(todo, dict):
                 continue
             last_attempt = todo.get("last_attempt")
+            last_failure_detail = (
+                last_attempt.get("failure_detail") or last_attempt.get("no_change_reason")
+                if isinstance(last_attempt, dict)
+                else ""
+            )
             summary.append(
                 {
                     "todo_id": todo.get("todo_id"),
@@ -2326,6 +2390,11 @@ class MicroAgent:
                     )
                     if isinstance(last_attempt, dict)
                     else "",
+                    "last_failure_detail": self._truncate_text(
+                        str(last_failure_detail), 260
+                    )
+                    if last_failure_detail
+                    else "",
                 }
             )
         return json.dumps(summary, ensure_ascii=False, indent=2)
@@ -2342,15 +2411,17 @@ class MicroAgent:
             axes = record.get("strategy_axes") or []
             reason = str(record.get("reason") or "")[:240]
             metric = record.get("metric")
-            summary.append(
-                {
-                    "status": status,
-                    "metric": metric,
-                    "strategy_axis": axis,
-                    "strategy_axes": axes,
-                    "reason": reason,
-                }
-            )
+            item = {
+                "status": status,
+                "metric": metric,
+                "strategy_axis": axis,
+                "strategy_axes": axes,
+                "reason": reason,
+            }
+            failure_detail = record.get("failure_detail") or record.get("no_change_reason")
+            if failure_detail:
+                item["failure_detail"] = self._truncate_text(str(failure_detail), 260)
+            summary.append(item)
         return json.dumps(summary, ensure_ascii=False, indent=2)
 
     async def _persist_current_best_state(self) -> None:
@@ -2564,18 +2635,33 @@ class MicroAgent:
         records = self._candidate_history_records(limit=limit)
         if not records:
             return ""
+        formatted = []
+        for record in records:
+            item = {
+                "status": record.get("status"),
+                "metric": record.get("metric"),
+                "failed": record.get("failed"),
+                "strategy_axis": record.get("strategy_axis", ""),
+                "strategy_axes": record.get("strategy_axes", []),
+                "changes": record.get("changes", []),
+            }
+            for key in (
+                "no_change_reason",
+                "failure_detail",
+                "artifact_id",
+                "patch_path",
+                "test_output_path",
+            ):
+                value = record.get(key)
+                if value:
+                    item[key] = (
+                        self._truncate_text(str(value), 500)
+                        if key in {"no_change_reason", "failure_detail"}
+                        else value
+                    )
+            formatted.append(item)
         return json.dumps(
-            [
-                {
-                    "status": record.get("status"),
-                    "metric": record.get("metric"),
-                    "failed": record.get("failed"),
-                    "strategy_axis": record.get("strategy_axis", ""),
-                    "strategy_axes": record.get("strategy_axes", []),
-                    "changes": record.get("changes", []),
-                }
-                for record in records
-            ],
+            formatted,
             ensure_ascii=False,
             indent=2,
         )
@@ -2594,6 +2680,183 @@ class MicroAgent:
             records.append(record)
         return records
 
+    def _candidate_rejection_extra(
+        self, candidate: CodeCandidate, status: str, failure_detail: str
+    ) -> dict[str, Any]:
+        return self._candidate_history_extra(
+            candidate,
+            status=status,
+            metric=None,
+            applied=0,
+            failed=True,
+            patch_text="",
+            results=[],
+            failure_detail=failure_detail,
+        )
+
+    def _candidate_history_extra(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+        patch_text: str,
+        results: list[TestResult],
+        failure_detail: str = "",
+        no_change_reason: str = "",
+    ) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        if failure_detail:
+            extra["failure_detail"] = self._truncate_text(failure_detail, 2000)
+        if no_change_reason:
+            extra["no_change_reason"] = self._truncate_text(no_change_reason, 1000)
+        extra.update(
+            self._write_candidate_artifacts(
+                candidate,
+                status=status,
+                metric=metric,
+                applied=applied,
+                failed=failed,
+                patch_text=patch_text,
+                results=results,
+                failure_detail=failure_detail,
+                no_change_reason=no_change_reason,
+            )
+        )
+        return extra
+
+    def _candidate_failure_detail(
+        self,
+        notes: list[str],
+        results: list[TestResult],
+        failed: bool,
+    ) -> str:
+        details: list[str] = []
+        note_text = "; ".join(
+            self._truncate_text(note, 400)
+            for note in notes
+            if note.strip()
+        )
+        if note_text:
+            details.append(note_text)
+        if failed:
+            for result in results:
+                if result.exit_code == 0:
+                    continue
+                output = "\n".join(
+                    part
+                    for part in (
+                        result.stdout[-1200:],
+                        result.stderr[-1200:],
+                    )
+                    if part
+                )
+                command_detail = (
+                    f"command={result.command!r} exit_code={result.exit_code}"
+                )
+                if output:
+                    command_detail += f" output_tail={self._truncate_text(output, 1600)}"
+                details.append(command_detail)
+        return self._truncate_text(" | ".join(details), 2500)
+
+    def _candidate_artifact_dir(self) -> Path | None:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("record_candidate_artifacts"):
+            return None
+        return self._workflow_artifact_path(
+            "candidate_artifact_dir", ".local_micro_agent/candidate_artifacts"
+        )
+
+    def _candidate_artifact_id(self, candidate: CodeCandidate) -> str:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", candidate.candidate_id).strip("-")
+        if not safe_id:
+            safe_id = "candidate"
+        return f"loop-{self.state.loop_count:03d}-{safe_id[:80]}"
+
+    def _write_candidate_artifacts(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+        patch_text: str,
+        results: list[TestResult],
+        failure_detail: str = "",
+        no_change_reason: str = "",
+    ) -> dict[str, Any]:
+        artifact_dir = self._candidate_artifact_dir()
+        if artifact_dir is None:
+            return {}
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_id = self._candidate_artifact_id(candidate)
+        metadata_path = artifact_dir / f"{artifact_id}.json"
+        patch_path = artifact_dir / f"{artifact_id}.patch"
+        test_output_path = artifact_dir / f"{artifact_id}.test.txt"
+        metadata: dict[str, Any] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "candidate_id": candidate.candidate_id,
+            "status": status,
+            "metric": metric,
+            "applied": applied,
+            "failed": failed,
+            "reason": candidate.reason,
+            "strategy_axis": candidate.strategy_axis,
+            "strategy_axes": self._candidate_strategy_axes(candidate),
+            "changes": self._summarize_changes(candidate.changes),
+        }
+        if failure_detail:
+            metadata["failure_detail"] = self._truncate_text(failure_detail, 4000)
+        if no_change_reason:
+            metadata["no_change_reason"] = self._truncate_text(no_change_reason, 2000)
+        output_limit = int(
+            self.config.get("workflow", {}).get("candidate_artifact_output_limit", 12000)
+        )
+        if patch_text:
+            patch_path.write_text(patch_text)
+            metadata["patch_path"] = self._repo_relative_path(patch_path)
+        if results:
+            test_text = self._format_test_results_for_artifact(results, output_limit)
+            if test_text.strip():
+                test_output_path.write_text(test_text)
+                metadata["test_output_path"] = self._repo_relative_path(test_output_path)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+        extra = {
+            "artifact_id": artifact_id,
+            "artifact_path": self._repo_relative_path(metadata_path),
+        }
+        for key in ("patch_path", "test_output_path"):
+            if key in metadata:
+                extra[key] = metadata[key]
+        return extra
+
+    def _format_test_results_for_artifact(
+        self, results: list[TestResult], limit: int
+    ) -> str:
+        blocks = []
+        for result in results:
+            blocks.append(
+                "\n".join(
+                    [
+                        f"$ {result.command}",
+                        f"exit_code={result.exit_code}",
+                        "stdout:",
+                        result.stdout,
+                        "stderr:",
+                        result.stderr,
+                    ]
+                )
+            )
+        return self._slice_text("\n\n".join(blocks), limit)
+
+    def _repo_relative_path(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.state.repo_root))
+        except ValueError:
+            return str(path)
+
     def _append_candidate_history(
         self,
         candidate: CodeCandidate,
@@ -2601,6 +2864,7 @@ class MicroAgent:
         metric: int | None,
         applied: int,
         failed: bool,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         path = self._candidate_history_path()
         if path is None:
@@ -2622,6 +2886,14 @@ class MicroAgent:
             "changes": self._summarize_changes(candidate.changes),
             "todo_id": self._active_todo_id(),
         }
+        if extra:
+            record.update(
+                {
+                    key: value
+                    for key, value in extra.items()
+                    if value not in (None, "", [], {})
+                }
+            )
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         self._append_todo_attempt(record)
@@ -2654,6 +2926,17 @@ class MicroAgent:
             "strategy_axes": candidate_record.get("strategy_axes"),
             "reason": candidate_record.get("reason"),
         }
+        for key in (
+            "failure_detail",
+            "no_change_reason",
+            "artifact_id",
+            "artifact_path",
+            "patch_path",
+            "test_output_path",
+        ):
+            value = candidate_record.get(key)
+            if value:
+                attempt[key] = value
         with path.open("a") as handle:
             handle.write(json.dumps(attempt, ensure_ascii=False, sort_keys=True) + "\n")
         self._update_todo_status_from_attempt(attempt)
