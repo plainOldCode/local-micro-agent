@@ -1609,6 +1609,22 @@ value = 'fast'
                 agent._family_key_strategy_axes("list_scheduler_rewrite"),
             )
 
+    def test_axis_matching_accepts_safe_word_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            axes = agent._strategy_axes_for_text(
+                "Process two lanes with loop unrolling to expose parallelism.",
+                agent._strategy_axis_keywords(),
+            )
+
+            self.assertIn("vector_unroll_lane", axes)
+            self.assertNotIn("memory_store_layout", axes)
+
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2773,6 +2789,38 @@ value = 'fast'
             self.assertEqual(updated["todos"][0]["status"], "attempted")
             self.assertEqual(updated["todos"][0]["attempts"], 2)
             self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
+
+    def test_active_todo_contract_allows_axis_word_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            todo = {
+                "todo_id": "todo-001-vector_unroll_lane",
+                "status": "attempted",
+                "strategy_axis": "vector_unroll_lane",
+                "family_key": "unroll_factor_change",
+                "context": "lane-level loop unrolling tactic",
+                "attempts": 1,
+            }
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "variant",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="process two lanes with loop unrolling",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Implement loop unrolling by factor of 2 to process two lanes.",
+                strategy_axis="vector_unroll_lane",
+            )
+
+            self.assertIsNone(agent._active_todo_contract_rejection(candidate))
 
     def test_active_todo_contract_rejects_family_drift_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

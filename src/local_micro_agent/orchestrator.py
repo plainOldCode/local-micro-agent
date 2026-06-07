@@ -1815,14 +1815,34 @@ class MicroAgent:
                     continue
                 key_tokens = key.split()
                 if len(key_tokens) == 1:
-                    if key_tokens[0] in tokens:
+                    if MicroAgent._keyword_token_matches(tokens, key_tokens[0]):
                         axes.append(axis)
                         break
                     continue
-                if all(token in tokens for token in key_tokens):
+                if all(
+                    MicroAgent._keyword_token_matches(tokens, token)
+                    for token in key_tokens
+                ):
                     axes.append(axis)
                     break
         return axes
+
+    @staticmethod
+    def _keyword_token_matches(tokens: set[str], keyword_token: str) -> bool:
+        if keyword_token in tokens:
+            return True
+        if len(keyword_token) < 4:
+            return False
+        variants = {keyword_token + "s", keyword_token + "es"}
+        if keyword_token.endswith("e"):
+            variants.add(keyword_token + "d")
+            variants.add(keyword_token[:-1] + "ing")
+        else:
+            variants.add(keyword_token + "ed")
+            variants.add(keyword_token + "ing")
+        if keyword_token.endswith("y") and len(keyword_token) > 4:
+            variants.add(keyword_token[:-1] + "ies")
+        return bool(tokens & variants)
 
     def _format_axis_contract(self) -> str:
         if not self._axis_contract_enabled():
