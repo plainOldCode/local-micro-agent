@@ -2580,21 +2580,19 @@ class MicroAgent:
         if not isinstance(todos, list):
             return
         status = str(attempt.get("status", ""))
-        if status in {"improved", "accepted"}:
-            next_status = "validated"
-        elif status.startswith("rejected"):
-            next_status = "failed"
-        else:
-            next_status = "attempted"
         for todo in todos:
             if isinstance(todo, dict) and todo.get("todo_id") == attempt.get("todo_id"):
                 previous_status = todo.get("status")
+                previous_attempts = int(todo.get("attempts", 0) or 0)
+                next_attempts = previous_attempts + 1
+                next_status = self._todo_status_after_attempt(
+                    attempt, previous_status, next_attempts
+                )
                 if todo.get("status") == "validated" and next_status != "validated":
                     next_status = "validated"
                 todo["status"] = next_status
                 todo["last_attempt"] = attempt
-                todo.setdefault("attempts", 0)
-                todo["attempts"] = int(todo["attempts"]) + 1
+                todo["attempts"] = next_attempts
                 if active_path.exists():
                     active_path.write_text(
                         json.dumps(todo, ensure_ascii=False, indent=2) + "\n"
@@ -2609,6 +2607,23 @@ class MicroAgent:
                     self._append_todo_outcome_artifact(todo, next_status)
         plan["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+
+    def _todo_status_after_attempt(
+        self, attempt: dict[str, Any], previous_status: Any, next_attempts: int
+    ) -> str:
+        status = str(attempt.get("status", ""))
+        if status in {"improved", "accepted"}:
+            return "validated"
+        if not status.startswith("rejected"):
+            return "attempted"
+        if attempt.get("failed") is True:
+            return "failed"
+        if previous_status == "validated":
+            return "validated"
+        budget = int(self.config.get("workflow", {}).get("todo_attempt_budget", 1) or 1)
+        if next_attempts >= budget:
+            return "failed"
+        return "attempted"
 
     def _append_todo_outcome_artifact(self, todo: dict[str, Any], status: str) -> None:
         if status == "validated":

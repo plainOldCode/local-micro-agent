@@ -1835,6 +1835,98 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("got slower", failed)
             self.assertIsNone(updated["active_todo_id"])
 
+    def test_non_improving_todo_attempt_stays_active_until_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-instruction_scheduling",
+                "status": "active",
+                "strategy_axis": "instruction_scheduling",
+                "context": "vliw packing tactic",
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"todo_attempt_budget": 3},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            agent._update_todo_status_from_attempt(
+                {
+                    "todo_id": "todo-001-instruction_scheduling",
+                    "status": "rejected",
+                    "metric": 147734,
+                    "failed": False,
+                    "reason": "valid probe but no metric improvement",
+                }
+            )
+
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            active = json.loads((artifact_dir / "active_todo.json").read_text())
+            self.assertEqual(updated["active_todo_id"], "todo-001-instruction_scheduling")
+            self.assertEqual(updated["todos"][0]["status"], "attempted")
+            self.assertEqual(updated["todos"][0]["attempts"], 1)
+            self.assertEqual(active["status"], "attempted")
+            self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
+
+    def test_non_improving_todo_fails_when_budget_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-instruction_scheduling",
+                "status": "attempted",
+                "strategy_axis": "instruction_scheduling",
+                "context": "vliw packing tactic",
+                "attempts": 2,
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"todo_attempt_budget": 3},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            agent._update_todo_status_from_attempt(
+                {
+                    "todo_id": "todo-001-instruction_scheduling",
+                    "status": "rejected",
+                    "metric": 147734,
+                    "failed": False,
+                    "reason": "third valid probe still did not improve",
+                }
+            )
+
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            failed = (artifact_dir / "failed_tactics.jsonl").read_text()
+            self.assertEqual(updated["todos"][0]["status"], "failed")
+            self.assertEqual(updated["todos"][0]["attempts"], 3)
+            self.assertIsNone(updated["active_todo_id"])
+            self.assertIn("third valid probe still did not improve", failed)
+
 
 if __name__ == "__main__":
     unittest.main()
