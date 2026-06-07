@@ -69,6 +69,23 @@ then chooses a required axis for each `CODE` loop, injects it into the prompt,
 and rejects candidates with missing, unknown, cooled, or wrong declared
 `strategy_axis` values before applying edits.
 
+For v0.2-style adaptive gate control, set
+`workflow.adaptive_gate_controller=true` together with
+`workflow.adaptive_search_memory=true`. Failed tactic family gates then become
+evidence-aware instead of permanently static:
+
+- weakly evidenced failed families run in `shadow` mode and are allowed through
+  while the gate decision is recorded;
+- repeated all-skipped brainstorm pressure reopens families in `soft` mode so
+  the search can recover from overblocking;
+- sufficiently evidenced gates remain `hard` and still protect test budget.
+
+Gate decisions are written to `.local_micro_agent/gate_decisions.jsonl` by
+default and summarized back into later `CODE` prompts. Useful knobs include
+`adaptive_gate_min_family_attempts_for_hard`,
+`adaptive_gate_all_skipped_relax_streak`, `adaptive_gate_recent_limit`, and
+`adaptive_gate_decisions_path`.
+
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
 and `.local_micro_agent/best.patch`, updates the in-memory best metric, and

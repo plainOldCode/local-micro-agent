@@ -235,6 +235,38 @@ class MicroAgent:
                 block, failed_signatures, failed_family_keys
             )
             if failed_match:
+                gate_decision = self._adaptive_gate_decision(
+                    gate="brainstorm_failed_tactic",
+                    match_reason=failed_match,
+                    family_aliases=family_aliases,
+                    tactic_text=block,
+                )
+                if gate_decision["mode"] != "hard":
+                    self.state.notes.append(
+                        "Adaptive gate allowed brainstorm tactic "
+                        f"axis={axis} mode={gate_decision['mode']} "
+                        f"reason={gate_decision['reason']}"
+                    )
+                    self._persist_gate_decision(gate_decision)
+                    selected = {
+                        "strategy_axis": axis,
+                        "family_key": self._tactic_family_key(block),
+                        "novelty_lane": self._tactic_novelty_lane(block),
+                        "text": block.strip(),
+                    }
+                    selection_records.append(
+                        {
+                            "axis": axis,
+                            "family_aliases": family_aliases,
+                            "selected": True,
+                            "skipped": False,
+                            "reason": failed_match,
+                            "gate_mode": gate_decision["mode"],
+                            "gate_reason": gate_decision["reason"],
+                        }
+                    )
+                    self.state.scratch["brainstorm_selection"] = selection_records
+                    return selected
                 selection_records.append(
                     {
                         "axis": axis,
@@ -242,8 +274,11 @@ class MicroAgent:
                         "selected": False,
                         "skipped": True,
                         "reason": failed_match,
+                        "gate_mode": gate_decision["mode"],
+                        "gate_reason": gate_decision["reason"],
                     }
                 )
+                self._persist_gate_decision(gate_decision)
                 self.state.notes.append(
                     "Skipped brainstorm tactic "
                     f"axis={axis} reason={failed_match}"
@@ -367,6 +402,126 @@ class MicroAgent:
             if similarity >= threshold:
                 return f"signature_similarity={similarity:.2f}"
         return ""
+
+    def _adaptive_gate_controller_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("adaptive_gate_controller")) and (
+            self._adaptive_search_memory_enabled()
+        )
+
+    def _adaptive_gate_decision(
+        self,
+        gate: str,
+        match_reason: str,
+        family_aliases: list[str] | set[str],
+        tactic_text: str = "",
+    ) -> dict[str, Any]:
+        aliases = sorted(
+            {
+                self._normalize_strategy_axis(str(alias))
+                for alias in family_aliases
+                if self._normalize_strategy_axis(str(alias))
+            }
+        )
+        decision = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "gate": gate,
+            "mode": "hard",
+            "reason": "legacy_hard_gate",
+            "match_reason": match_reason,
+            "family_aliases": aliases,
+            "all_skipped_streak": self._brainstorm_all_skipped_streak(),
+            "family_evidence": self._failed_family_evidence(aliases),
+        }
+        if tactic_text:
+            decision["tactic_signature"] = sorted(self._tactic_signature(tactic_text))[:12]
+        if not self._adaptive_gate_controller_enabled():
+            return decision
+
+        workflow = self.config.get("workflow", {})
+        relax_streak = int(workflow.get("adaptive_gate_all_skipped_relax_streak", 2) or 0)
+        if relax_streak > 0 and decision["all_skipped_streak"] >= relax_streak:
+            decision["mode"] = "soft"
+            decision["reason"] = "opportunity_pressure_all_skipped"
+            return decision
+
+        min_attempts = int(workflow.get("adaptive_gate_min_family_attempts_for_hard", 2) or 0)
+        family_evidence = decision["family_evidence"]
+        max_attempts = max(
+            (int(item.get("attempts", 0) or 0) for item in family_evidence.values()),
+            default=0,
+        )
+        if min_attempts > 0 and max_attempts < min_attempts:
+            decision["mode"] = "shadow"
+            decision["reason"] = "insufficient_failed_family_evidence"
+            return decision
+
+        decision["reason"] = "evidence_supported_hard_gate"
+        return decision
+
+    def _failed_family_evidence(self, aliases: list[str]) -> dict[str, dict[str, Any]]:
+        wanted = {
+            self._normalize_strategy_axis(alias)
+            for alias in aliases
+            if self._normalize_strategy_axis(alias)
+        }
+        if not wanted:
+            return {}
+        path = self._workflow_artifact_path(
+            "failed_tactics_path", ".local_micro_agent/failed_tactics.jsonl"
+        )
+        evidence = {
+            alias: {"attempts": 0, "last_status": None, "last_metric": None}
+            for alias in sorted(wanted)
+        }
+        if not path.exists():
+            return evidence
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            record_aliases = {
+                self._normalize_strategy_axis(str(record.get("family_key", ""))),
+                self._normalize_strategy_axis(str(record.get("strategy_axis", ""))),
+            }
+            record_aliases.update(
+                self._tactic_family_aliases(
+                    "\n".join(
+                        str(part)
+                        for part in (
+                            record.get("context", ""),
+                            (record.get("last_attempt") or {}).get("reason", "")
+                            if isinstance(record.get("last_attempt"), dict)
+                            else "",
+                        )
+                    )
+                )
+            )
+            attempts = int(record.get("attempts", 0) or 0)
+            if attempts <= 0:
+                attempts = 1
+            for alias in wanted & {item for item in record_aliases if item}:
+                item = evidence.setdefault(
+                    alias, {"attempts": 0, "last_status": None, "last_metric": None}
+                )
+                item["attempts"] = int(item.get("attempts", 0) or 0) + attempts
+                item["last_status"] = record.get("status")
+                last_attempt = record.get("last_attempt")
+                if isinstance(last_attempt, dict):
+                    item["last_metric"] = last_attempt.get("metric")
+        return evidence
+
+    def _persist_gate_decision(self, decision: dict[str, Any]) -> None:
+        if not self._adaptive_gate_controller_enabled():
+            return
+        path = self._workflow_artifact_path(
+            "adaptive_gate_decisions_path", ".local_micro_agent/gate_decisions.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps(decision, ensure_ascii=False, sort_keys=True) + "\n")
 
     @staticmethod
     def _tactic_signature(text: str) -> set[str]:
@@ -746,6 +901,22 @@ class MicroAgent:
                                 "explicitly requires them; prefer under-explored axes and explain "
                                 "the chosen axis in the candidate reason.\n"
                                 f"{search_memory}"
+                            ),
+                        },
+                    ]
+                gate_memory = self._format_adaptive_gate_memory()
+                if gate_memory:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Adaptive gate controller telemetry follows. Use it to "
+                                "notice when controller gates may be overblocking useful "
+                                "search. If gates are in shadow or soft mode, choose a "
+                                "small evidence-producing probe instead of renaming old "
+                                "ideas.\n"
+                                f"{gate_memory}"
                             ),
                         },
                     ]
@@ -1405,6 +1576,21 @@ class MicroAgent:
         drift_matches = sorted(candidate_families & failed_families)
         if not drift_matches:
             return None
+        gate_decision = self._adaptive_gate_decision(
+            gate="candidate_family_drift",
+            match_reason="failed_family=" + ",".join(drift_matches),
+            family_aliases=drift_matches,
+            tactic_text="\n".join(
+                [candidate.reason, *(change.reason for change in candidate.changes)]
+            ),
+        )
+        self._persist_gate_decision(gate_decision)
+        if gate_decision["mode"] != "hard":
+            self.state.notes.append(
+                "Adaptive gate allowed candidate family drift "
+                f"mode={gate_decision['mode']} reason={gate_decision['reason']}"
+            )
+            return None
         return (
             "rejected_family_drift",
             "candidate reason targets failed family "
@@ -1621,10 +1807,66 @@ class MicroAgent:
         payload = {
             "current_loop": current_loop,
             "cooled_down_axes": cooled_down,
+            "gate_controller": self._adaptive_gate_controller_summary(),
             "axes": axes,
             "recent": recent[-5:],
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _adaptive_gate_controller_summary(self) -> dict[str, Any]:
+        return {
+            "enabled": self._adaptive_gate_controller_enabled(),
+            "all_skipped_streak": self._brainstorm_all_skipped_streak(),
+            "relax_streak": int(
+                self.config.get("workflow", {}).get(
+                    "adaptive_gate_all_skipped_relax_streak", 2
+                )
+                or 0
+            ),
+            "min_family_attempts_for_hard": int(
+                self.config.get("workflow", {}).get(
+                    "adaptive_gate_min_family_attempts_for_hard", 2
+                )
+                or 0
+            ),
+        }
+
+    def _format_adaptive_gate_memory(self) -> str:
+        if not self._adaptive_gate_controller_enabled():
+            return ""
+        path = self._workflow_artifact_path(
+            "adaptive_gate_decisions_path", ".local_micro_agent/gate_decisions.jsonl"
+        )
+        summary = self._adaptive_gate_controller_summary()
+        if not path.exists():
+            return json.dumps(
+                {"summary": summary, "recent_gate_decisions": []},
+                ensure_ascii=False,
+                indent=2,
+            )
+        limit = int(self.config.get("workflow", {}).get("adaptive_gate_recent_limit", 8) or 8)
+        records = []
+        for line in path.read_text(errors="replace").splitlines()[-limit:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            records.append(
+                {
+                    "loop": record.get("loop"),
+                    "gate": record.get("gate"),
+                    "mode": record.get("mode"),
+                    "reason": record.get("reason"),
+                    "match_reason": record.get("match_reason"),
+                    "family_aliases": record.get("family_aliases", []),
+                    "all_skipped_streak": record.get("all_skipped_streak"),
+                }
+            )
+        return json.dumps(
+            {"summary": summary, "recent_gate_decisions": records},
+            ensure_ascii=False,
+            indent=2,
+        )
 
     def _adaptive_search_memory_from_history(self) -> dict[str, Any] | None:
         path = self._candidate_history_path()

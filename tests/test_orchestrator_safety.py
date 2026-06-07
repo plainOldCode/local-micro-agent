@@ -996,6 +996,101 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(selected["strategy_axis"], "branch_control")
             self.assertEqual(selected["family_key"], "tree_depth_specialization")
 
+    def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "context": "One failed branch mask tactic.",
+                        "strategy_axis": "branch_control",
+                        "family_key": "branch_mask",
+                        "status": "failed",
+                        "attempts": 1,
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "adaptive_search_memory": True,
+                        "adaptive_gate_controller": True,
+                        "adaptive_gate_min_family_attempts_for_hard": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: branch_control\n"
+                "Use another branch mask variant with a narrower local guard.\n"
+                "family_key: branch_mask\n"
+                "2. strategy_axis: hash_build\n"
+                "Try hash reorder.\n"
+                "family_key: hash_reorder\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "branch_control")
+            self.assertIn("Adaptive gate allowed brainstorm tactic", "\n".join(agent.state.notes))
+            decisions = (artifact_dir / "gate_decisions.jsonl").read_text()
+            self.assertIn('"mode": "shadow"', decisions)
+            self.assertIn("insufficient_failed_family_evidence", decisions)
+
+    def test_adaptive_gate_reopens_families_under_all_skipped_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "brainstorm_selection.jsonl").write_text(
+                json.dumps({"all_skipped": True, "records": []}) + "\n"
+                + json.dumps({"all_skipped": True, "records": []}) + "\n"
+            )
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "context": "Repeated failed store address reuse.",
+                        "strategy_axis": "memory_store_layout",
+                        "family_key": "store_address_reuse",
+                        "status": "failed",
+                        "attempts": 4,
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "adaptive_search_memory": True,
+                        "adaptive_gate_controller": True,
+                        "adaptive_gate_min_family_attempts_for_hard": 1,
+                        "adaptive_gate_all_skipped_relax_streak": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: memory_store_layout\n"
+                "Try a store address reuse variant after search dried up.\n"
+                "family_key: store_address_reuse\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "memory_store_layout")
+            decisions = (artifact_dir / "gate_decisions.jsonl").read_text()
+            self.assertIn('"mode": "soft"', decisions)
+            self.assertIn("opportunity_pressure_all_skipped", decisions)
+
     def test_all_failed_brainstorm_tactics_are_persisted_and_skip_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
