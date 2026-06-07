@@ -98,6 +98,10 @@ candidate, failed test, or no-change patch keeps the same active todo in the
 next `CODE` prompt until the budget is exhausted, so the model can use the
 error signal to repair or narrow the probe instead of treating every tactic as a
 one-shot attempt.
+By default, `workflow.todo_enforce_active_contract=true` also makes active todo
+contracts controller-enforced: a queued candidate whose declared
+`strategy_axis`, reason, or detected family drifts away from the active todo is
+rejected before edits or tests and counted against that todo's retry budget.
 
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`

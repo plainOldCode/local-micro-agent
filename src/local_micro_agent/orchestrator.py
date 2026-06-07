@@ -932,8 +932,11 @@ class MicroAgent:
                             "role": "system",
                             "content": (
                                 "Active durable todo follows. Implement only this todo. "
-                                "Candidate reason must preserve the todo context and should "
-                                "mention the todo_id.\n"
+                                "Candidate strategy_axis must exactly match the todo "
+                                "strategy_axis. Candidate reason and change reasons must "
+                                "preserve the todo context, stay on its family_key when one "
+                                "is present, and should mention the todo_id. Todo drift is "
+                                "rejected before edits or tests.\n"
                                 f"{active_todo}"
                             ),
                         },
@@ -1019,6 +1022,26 @@ class MicroAgent:
         best_applied = 0
 
         for candidate in candidates:
+            todo_rejection = self._active_todo_contract_rejection(candidate)
+            if todo_rejection is not None:
+                status, note = todo_rejection
+                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             axis_rejection = self._candidate_axis_contract_rejection(candidate)
             if axis_rejection is not None:
                 status, note = axis_rejection
@@ -1565,6 +1588,59 @@ class MicroAgent:
             return ("rejected_cooled_axis", f"cooled strategy_axis {declared}")
         return None
 
+    def _active_todo_contract_rejection(
+        self, candidate: CodeCandidate
+    ) -> tuple[str, str] | None:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("todo_enforce_active_contract", True) is False:
+            return None
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return None
+        if active_todo.get("status") not in {"active", "attempted"}:
+            return None
+        if self._todo_attempt_budget_exhausted(active_todo):
+            return None
+
+        todo_id = str(active_todo.get("todo_id", ""))
+        required_axis = self._normalize_strategy_axis(
+            str(active_todo.get("strategy_axis", ""))
+        )
+        declared_axis = self._normalize_strategy_axis(candidate.strategy_axis)
+        if required_axis and declared_axis != required_axis:
+            return (
+                "rejected_todo_axis_drift",
+                f"strategy_axis {declared_axis or '<missing>'} does not match "
+                f"active todo {todo_id} axis {required_axis}",
+            )
+
+        if required_axis:
+            reason_axes = self._candidate_reason_strategy_axes(candidate)
+            if required_axis not in reason_axes:
+                return (
+                    "rejected_todo_axis_drift",
+                    "candidate reason does not substantively target active todo "
+                    f"{todo_id} axis {required_axis}",
+                )
+
+        required_family = self._normalize_strategy_axis(
+            str(active_todo.get("family_key", ""))
+        )
+        if required_family:
+            candidate_families = self._candidate_reason_family_aliases(candidate)
+            if candidate_families and required_family not in candidate_families:
+                return (
+                    "rejected_todo_family_drift",
+                    "candidate reason targets family "
+                    f"{', '.join(sorted(candidate_families))} instead of active todo "
+                    f"{todo_id} family_key {required_family}",
+                )
+        return None
+
     def _candidate_family_contract_rejection(
         self, candidate: CodeCandidate
     ) -> tuple[str, str] | None:
@@ -1759,6 +1835,8 @@ class MicroAgent:
             "rejected_family_drift",
             "rejected_no_changes",
             "rejected_repeated_pattern",
+            "rejected_todo_axis_drift",
+            "rejected_todo_family_drift",
             "rejected_unknown_axis",
             "rejected_wrong_axis",
             "rejected_no_metric",
