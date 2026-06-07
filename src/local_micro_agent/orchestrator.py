@@ -1807,7 +1807,7 @@ class MicroAgent:
             "cooled_strategy_axes": cooled_axes,
             "known_strategy_axes": self._brainstorm_known_axes(),
             "required_axis_guidance": self._strategy_axis_guidance(required_axis),
-            "selected_tactic": self._selected_tactic_for_axis_contract(),
+            "selected_tactic": self._selected_tactic_for_current_loop(),
             "output_requirement": (
                 "Set candidate strategy_axis exactly to required_strategy_axis. "
                 "In XML mode include <strategy_axis>axis</strategy_axis> inside each "
@@ -1843,9 +1843,11 @@ class MicroAgent:
             },
         )
 
-    def _selected_tactic_for_axis_contract(self) -> dict[str, Any]:
+    def _selected_tactic_for_current_loop(self) -> dict[str, Any]:
         selected_tactic = self.state.scratch.get("selected_tactic")
         if not isinstance(selected_tactic, dict):
+            return {}
+        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
             return {}
         axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
         if (
@@ -1924,16 +1926,11 @@ class MicroAgent:
 
     def _select_required_strategy_axis(self) -> str:
         allowed = self._allowed_strategy_axes()
-        selected_tactic = self.state.scratch.get("selected_tactic")
-        selected_loop = self.state.scratch.get("selected_tactic_loop")
+        selected_tactic = self._selected_tactic_for_current_loop()
         known_axes = self._brainstorm_known_axes()
         if (
-            isinstance(selected_tactic, dict)
-            and selected_loop == self.state.loop_count
-            and (
-                not self._strict_strategy_axis_pool_enabled()
-                or selected_tactic.get("strategy_axis") in known_axes
-            )
+            selected_tactic
+            and selected_tactic.get("strategy_axis") in known_axes
         ):
             return str(selected_tactic["strategy_axis"])
         if not allowed:
@@ -2259,24 +2256,15 @@ class MicroAgent:
         return selected_axis in self._candidate_reason_strategy_axes(candidate)
 
     def _selected_tactic_axis_for_current_loop(self) -> str | None:
-        selected_tactic = self.state.scratch.get("selected_tactic")
-        if not isinstance(selected_tactic, dict):
-            return None
-        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+        selected_tactic = self._selected_tactic_for_current_loop()
+        if not selected_tactic:
             return None
         axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
-        if axis and (
-            not self._strict_strategy_axis_pool_enabled()
-            or axis in self._strategy_axis_pool()
-        ):
-            return axis
-        return None
+        return axis or None
 
     def _selected_tactic_family_for_current_loop(self) -> str | None:
-        selected_tactic = self.state.scratch.get("selected_tactic")
-        if not isinstance(selected_tactic, dict):
-            return None
-        if self.state.scratch.get("selected_tactic_loop") != self.state.loop_count:
+        selected_tactic = self._selected_tactic_for_current_loop()
+        if not selected_tactic:
             return None
         family_key = self._normalize_strategy_axis(str(selected_tactic.get("family_key", "")))
         return family_key or None

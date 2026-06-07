@@ -1567,6 +1567,7 @@ value = 'fast'
             }
             state.scratch["selected_tactic"] = {
                 "strategy_axis": "outside_axis",
+                "family_key": "outside_family",
                 "text": "1. strategy_axis: outside_axis",
             }
             state.scratch["selected_tactic_loop"] = 0
@@ -1583,10 +1584,64 @@ value = 'fast'
             agent = MicroAgent(config, state)
 
             contract = agent._format_axis_contract()
+            payload = json.loads(contract)
 
             self.assertIn('"required_strategy_axis": "allowed_axis"', contract)
             self.assertIn('"known_strategy_axes": [\n    "allowed_axis"', contract)
             self.assertNotIn('"outside_axis"', contract)
+            self.assertNotIn('"outside_family"', contract)
+            self.assertIsNone(payload["required_family_key"])
+            self.assertEqual(payload["selected_tactic"], {})
+
+    def test_strict_axis_pool_ignores_non_pool_selected_family_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failed_tactics.jsonl").write_text(
+                json.dumps(
+                    {
+                        "strategy_axis": "allowed_axis",
+                        "family_key": "failed_family",
+                        "status": "failed",
+                        "attempts": 2,
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "adaptive_search_axis_pool": ["allowed_axis"],
+                    "adaptive_search_strict_axis_pool": True,
+                    "failed_tactics_path": ".local_micro_agent/failed_tactics.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["selected_tactic"] = {
+                "strategy_axis": "outside_axis",
+                "family_key": "outside_family",
+                "text": "1. strategy_axis: outside_axis",
+            }
+            state.scratch["selected_tactic_loop"] = 0
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "candidate",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="family_key: failed_family\ntry failed family",
+                        target="old",
+                        replacement="new",
+                    )
+                ],
+                "family_key: failed_family\ntry failed family",
+                strategy_axis="allowed_axis",
+            )
+
+            self.assertIsNone(agent._candidate_family_contract_rejection(candidate))
 
     def test_strict_axis_pool_rejects_unknown_candidate_without_force_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
