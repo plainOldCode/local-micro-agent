@@ -4282,7 +4282,10 @@ class MicroAgent:
 
     @staticmethod
     def _log(message: str) -> None:
-        print(f"[local-micro-agent] {message}", flush=True)
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S%z')}] [local-micro-agent] {message}",
+            flush=True,
+        )
 
 
 def load_config(path: Path) -> dict[str, Any]:

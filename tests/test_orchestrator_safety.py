@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -127,6 +129,18 @@ def run_agent(repo: Path, workflow: dict) -> AgentState:
 
 
 class OrchestratorSafetyTests(unittest.TestCase):
+    def test_log_prefix_includes_timestamp(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            MicroAgent._log("CODE loop=1")
+
+        self.assertRegex(
+            output.getvalue().strip(),
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{4}\] "
+            r"\[local-micro-agent\] CODE loop=1$",
+        )
+
     def test_failed_candidate_restores_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
