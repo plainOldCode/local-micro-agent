@@ -340,9 +340,10 @@ class MicroAgent:
         failed_signatures = self._failed_tactic_signatures()
         failed_family_keys = self._failed_tactic_family_keys()
         selection_records: list[dict[str, Any]] = []
+        selectable: list[tuple[float, int, dict[str, str], dict[str, Any]]] = []
         self.state.scratch.pop("brainstorm_all_tactics_failed_loop", None)
         blocks = re.split(r"\n(?=\s*\d+\.)", brainstorm.strip())
-        for block in blocks:
+        for order, block in enumerate(blocks):
             match = re.search(
                 r"strategy[\s_*.-]*axis[\s*]*:\s*[*\s]*`?([a-zA-Z0-9_-]+)`?",
                 block,
@@ -351,11 +352,15 @@ class MicroAgent:
             if not match:
                 continue
             axis = self._normalize_strategy_axis(match.group(1))
+            explicit_family_key = self._explicit_tactic_family_key(block)
+            family_key = self._tactic_family_key(block)
             family_aliases = sorted(self._tactic_family_aliases(block))
+            family_axes = self._family_key_strategy_axes(family_key)
             if axis not in known_axes:
                 selection_records.append(
                     {
                         "axis": axis,
+                        "family_key": family_key,
                         "family_aliases": family_aliases,
                         "selected": False,
                         "skipped": True,
@@ -363,6 +368,24 @@ class MicroAgent:
                     }
                 )
                 continue
+            if explicit_family_key and self._brainstorm_axis_family_mismatch_reject_enabled():
+                if family_axes and axis not in family_axes:
+                    selection_records.append(
+                        {
+                            "axis": axis,
+                            "family_key": family_key,
+                            "family_aliases": family_aliases,
+                            "family_axes": family_axes,
+                            "selected": False,
+                            "skipped": True,
+                            "reason": "axis_family_mismatch",
+                        }
+                    )
+                    self.state.notes.append(
+                        "Skipped brainstorm tactic "
+                        f"axis={axis} family_key={family_key} reason=axis_family_mismatch"
+                    )
+                    continue
             failed_match = self._failed_tactic_match_reason(
                 block, failed_signatures, failed_family_keys
             )
@@ -382,26 +405,37 @@ class MicroAgent:
                     self._persist_gate_decision(gate_decision)
                     selected = {
                         "strategy_axis": axis,
-                        "family_key": self._tactic_family_key(block),
+                        "family_key": family_key,
                         "novelty_lane": self._tactic_novelty_lane(block),
                         "text": block.strip(),
                     }
-                    selection_records.append(
-                        {
-                            "axis": axis,
-                            "family_aliases": family_aliases,
-                            "selected": True,
-                            "skipped": False,
-                            "reason": failed_match,
-                            "gate_mode": gate_decision["mode"],
-                            "gate_reason": gate_decision["reason"],
-                        }
+                    record = {
+                        "axis": axis,
+                        "family_key": family_key,
+                        "family_aliases": family_aliases,
+                        "selected": False,
+                        "skipped": False,
+                        "reason": failed_match,
+                        "gate_mode": gate_decision["mode"],
+                        "gate_reason": gate_decision["reason"],
+                    }
+                    score, reasons = self._score_brainstorm_tactic(
+                        block,
+                        axis,
+                        family_key,
+                        family_aliases,
+                        order,
+                        explicit_family_key=bool(explicit_family_key),
                     )
-                    self.state.scratch["brainstorm_selection"] = selection_records
-                    return selected
+                    record["score"] = score
+                    record["score_reasons"] = reasons
+                    selection_records.append(record)
+                    selectable.append((score, order, selected, record))
+                    continue
                 selection_records.append(
                     {
                         "axis": axis,
+                        "family_key": family_key,
                         "family_aliases": family_aliases,
                         "selected": False,
                         "skipped": True,
@@ -418,19 +452,35 @@ class MicroAgent:
                 continue
             selected = {
                 "strategy_axis": axis,
-                "family_key": self._tactic_family_key(block),
+                "family_key": family_key,
                 "novelty_lane": self._tactic_novelty_lane(block),
                 "text": block.strip(),
             }
-            selection_records.append(
-                {
-                    "axis": axis,
-                    "family_aliases": family_aliases,
-                    "selected": True,
-                    "skipped": False,
-                    "reason": "",
-                }
+            score, reasons = self._score_brainstorm_tactic(
+                block,
+                axis,
+                family_key,
+                family_aliases,
+                order,
+                explicit_family_key=bool(explicit_family_key),
             )
+            record = {
+                "axis": axis,
+                "family_key": family_key,
+                "family_aliases": family_aliases,
+                "selected": False,
+                "skipped": False,
+                "reason": "",
+                "score": score,
+                "score_reasons": reasons,
+            }
+            selection_records.append(record)
+            selectable.append((score, order, selected, record))
+        if selectable:
+            _score, _order, selected, selected_record = max(
+                selectable, key=lambda item: (item[0], -item[1])
+            )
+            selected_record["selected"] = True
             self.state.scratch["brainstorm_selection"] = selection_records
             return selected
         self.state.scratch["brainstorm_selection"] = selection_records
@@ -438,6 +488,121 @@ class MicroAgent:
             self.state.scratch["brainstorm_all_tactics_failed_loop"] = self.state.loop_count
             self.state.notes.append("All brainstorm tactics matched failed families")
         return None
+
+    def _brainstorm_axis_family_mismatch_reject_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("brainstorm_reject_axis_family_mismatch", True))
+
+    def _family_key_strategy_axes(self, family_key: str) -> list[str]:
+        normalized = self._normalize_fingerprint_text(family_key)
+        if not normalized:
+            return []
+        axes = self._strategy_axes_for_text(normalized, self._strategy_axis_keywords())
+        if axes:
+            return axes
+        normalized_axis = self._normalize_strategy_axis(family_key)
+        return [normalized_axis] if normalized_axis in self._strategy_axis_pool() else []
+
+    @staticmethod
+    def _explicit_tactic_family_key(text: str) -> str:
+        match = re.search(
+            r"family[_ ]key\s*:\s*`?([a-zA-Z0-9_-]+)`?",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1).strip().lower() if match else ""
+
+    def _score_brainstorm_tactic(
+        self,
+        tactic_text: str,
+        axis: str,
+        family_key: str,
+        family_aliases: list[str],
+        order: int,
+        explicit_family_key: bool = False,
+    ) -> tuple[float, list[str]]:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("brainstorm_score_tactics", True):
+            return float(-order), ["original_order"]
+        score = float(-order) * 0.01
+        reasons = ["original_order"]
+        validated = self._recent_validated_pattern_aliases()
+        alias_set = {
+            self._normalize_strategy_axis(str(alias))
+            for alias in family_aliases
+            if self._normalize_strategy_axis(str(alias))
+        }
+        if axis:
+            alias_set.add(axis)
+        normalized_family = self._normalize_strategy_axis(family_key)
+        if normalized_family:
+            alias_set.add(normalized_family)
+        if alias_set & validated:
+            score += 80.0
+            reasons.append("extends_recent_validated_pattern")
+        if explicit_family_key:
+            score += 5.0
+            reasons.append("has_family_key")
+        if self._tactic_novelty_lane(tactic_text):
+            score += 3.0
+            reasons.append("has_novelty_lane")
+        if re.search(r"\bhook\s*:", tactic_text, re.IGNORECASE):
+            score += 4.0
+            reasons.append("has_hook")
+        if "`" in tactic_text:
+            score += 2.0
+            reasons.append("references_concrete_symbol")
+        recent_patch_failures = self._recent_patch_failure_aliases()
+        if alias_set & recent_patch_failures:
+            score -= 10.0
+            reasons.append("recent_patch_application_failures")
+        return score, reasons
+
+    def _recent_validated_pattern_aliases(self) -> set[str]:
+        path = self._workflow_artifact_path(
+            "validated_patterns_path", ".local_micro_agent/validated_patterns.jsonl"
+        )
+        if not path.exists():
+            return set()
+        limit = int(self.config.get("workflow", {}).get("validated_pattern_score_limit", 6) or 6)
+        aliases: set[str] = set()
+        for line in path.read_text(errors="replace").splitlines()[-limit:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for value in (
+                record.get("strategy_axis"),
+                record.get("family_key"),
+            ):
+                normalized = self._normalize_strategy_axis(str(value or ""))
+                if normalized:
+                    aliases.add(normalized)
+            last_attempt = record.get("last_attempt")
+            if isinstance(last_attempt, dict):
+                for raw_axis in last_attempt.get("strategy_axes", []) or []:
+                    normalized = self._normalize_strategy_axis(str(raw_axis))
+                    if normalized:
+                        aliases.add(normalized)
+        return aliases
+
+    def _recent_patch_failure_aliases(self) -> set[str]:
+        records = self._candidate_history_records(
+            limit=int(self.config.get("workflow", {}).get("patch_failure_score_window", 8) or 8)
+        )
+        aliases: set[str] = set()
+        for record in records:
+            if not self._is_patch_application_failure_record(record):
+                continue
+            for value in (
+                record.get("strategy_axis"),
+                *(record.get("strategy_axes") or []),
+                *(record.get("family_aliases") or []),
+            ):
+                normalized = self._normalize_strategy_axis(str(value or ""))
+                if normalized:
+                    aliases.add(normalized)
+        return aliases
 
     def _failed_tactic_signatures(self) -> list[set[str]]:
         path = self._workflow_artifact_path(
@@ -2362,6 +2527,7 @@ class MicroAgent:
                 )
                 return
             if not failed and self._should_continue_after_improvement():
+                self._create_validated_pattern_followup_todo()
                 self.state.loop_count += 1
                 self.state.current = AgentStateName.CODE
                 self.state.notes.append(
@@ -2374,6 +2540,7 @@ class MicroAgent:
         decision = await self._json_call("tester", test_prompt(self.state), TestDecision)
         if not failed and decision.status == "pass":
             if self._should_continue_after_improvement():
+                self._create_validated_pattern_followup_todo()
                 self.state.loop_count += 1
                 self.state.current = AgentStateName.CODE
                 self.state.notes.append(
@@ -2476,6 +2643,103 @@ class MicroAgent:
             self.state.scratch.get("metric_improved") is True
             and self.state.loop_count + 1 < self.state.max_loops
         )
+
+    def _validated_pattern_followup_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("validated_pattern_followup"))
+
+    def _create_validated_pattern_followup_todo(self) -> None:
+        if not self._validated_pattern_followup_enabled():
+            return
+        if self._has_active_todo_budget():
+            return
+        record = self._latest_candidate_record_with_status("improved")
+        if not record:
+            return
+        axis = self._normalize_strategy_axis(str(record.get("strategy_axis", "")))
+        if axis not in self._strategy_axis_pool():
+            axes = record.get("strategy_axes")
+            if isinstance(axes, list):
+                axis = next(
+                    (
+                        normalized
+                        for raw_axis in axes
+                        if (normalized := self._normalize_strategy_axis(str(raw_axis)))
+                        in self._strategy_axis_pool()
+                    ),
+                    "general_edit",
+                )
+            else:
+                axis = "general_edit"
+        family_aliases = [
+            self._normalize_strategy_axis(str(alias))
+            for alias in record.get("family_aliases", []) or []
+            if self._normalize_strategy_axis(str(alias))
+        ]
+        family_key = family_aliases[0] if family_aliases else axis
+        todo_id = f"todo-{self.state.loop_count:03d}-{axis}-followup"
+        metric = record.get("metric")
+        changes = record.get("changes", [])
+        todo = {
+            "todo_id": todo_id,
+            "parent_tactic_id": f"validated-candidate-{record.get('loop')}-{record.get('candidate_id')}",
+            "status": "active",
+            "strategy_axis": axis,
+            "family_key": family_key,
+            "title": f"Follow up validated {axis} pattern",
+            "context": (
+                "A current-run candidate improved the metric. Explore one narrow "
+                "follow-up on the same axis/family and nearby edited code. Do not "
+                "import outside solution knowledge; extend only the validated local "
+                "pattern from this run.\n\n"
+                f"validated_metric: {metric}\n"
+                f"validated_reason: {record.get('reason', '')}\n"
+                f"validated_changes: {json.dumps(changes, ensure_ascii=False)}"
+            ),
+            "micro_goal": (
+                "Find the smallest nearby extension of the validated pattern that is "
+                "likely to improve the same measured metric."
+            ),
+            "implementation_hint": (
+                "Inspect the edited region and look for the same local redundancy, "
+                "missed symmetric case, or nearby repeated pattern. Keep the edit narrow."
+            ),
+            "allowed_files": sorted(self._writable_files()),
+            "forbidden_patterns": [
+                "unrelated rewrite",
+                "changing tests or fixtures",
+                "mixing a new tactic family before the follow-up is tried",
+            ],
+            "expected_signal": (
+                "Tests pass and the metric improves, or the attempt yields a concrete "
+                "failure reason that can guide one repair."
+            ),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "created_loop": self.state.loop_count,
+            "source": "validated_pattern_followup",
+            "parent_candidate": {
+                "loop": record.get("loop"),
+                "candidate_id": record.get("candidate_id"),
+                "metric": metric,
+                "artifact_id": record.get("artifact_id"),
+            },
+        }
+        self.state.scratch["active_todo"] = todo
+        self._persist_todo_plan(todo)
+        self.state.notes.append(f"Created validated-pattern follow-up todo: {todo_id}")
+
+    def _latest_candidate_record_with_status(self, status: str) -> dict[str, Any] | None:
+        path = self._candidate_history_path()
+        if path is None or not path.exists():
+            return None
+        for line in reversed(path.read_text(errors="replace").splitlines()):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("status") == status:
+                return record
+        return None
 
     def _brainstorm_all_tactics_failed_for_current_loop(self) -> bool:
         return self.state.scratch.get("brainstorm_all_tactics_failed_loop") == self.state.loop_count
@@ -3356,6 +3620,8 @@ class MicroAgent:
                     if value not in (None, "", [], {})
                 }
             )
+        if self._is_patch_application_failure_record(record):
+            record["budget_counted"] = False
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         self._append_todo_attempt(record)
@@ -3388,6 +3654,8 @@ class MicroAgent:
             "strategy_axes": candidate_record.get("strategy_axes"),
             "reason": candidate_record.get("reason"),
         }
+        if candidate_record.get("budget_counted") is False:
+            attempt["budget_counted"] = False
         for key in (
             "failure_detail",
             "no_change_reason",
@@ -3402,7 +3670,39 @@ class MicroAgent:
                 attempt[key] = value
         with path.open("a") as handle:
             handle.write(json.dumps(attempt, ensure_ascii=False, sort_keys=True) + "\n")
+        if attempt.get("budget_counted") is False:
+            self._record_non_budget_todo_attempt(attempt)
+            return
         self._update_todo_status_from_attempt(attempt)
+
+    def _record_non_budget_todo_attempt(self, attempt: dict[str, Any]) -> None:
+        plan_path = self._workflow_artifact_path(
+            "todo_plan_path", ".local_micro_agent/todo_plan.json"
+        )
+        active_path = self._workflow_artifact_path(
+            "active_todo_path", ".local_micro_agent/active_todo.json"
+        )
+        if not plan_path.exists():
+            return
+        try:
+            plan = json.loads(plan_path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            return
+        todos = plan.get("todos")
+        if not isinstance(todos, list):
+            return
+        for todo in todos:
+            if isinstance(todo, dict) and todo.get("todo_id") == attempt.get("todo_id"):
+                todo["last_patch_failure"] = attempt
+                todo["patch_failures"] = int(todo.get("patch_failures", 0) or 0) + 1
+                self.state.scratch["active_todo"] = todo
+                if active_path.exists() and plan.get("active_todo_id") == todo.get("todo_id"):
+                    active_path.write_text(
+                        json.dumps(todo, ensure_ascii=False, indent=2) + "\n"
+                    )
+                break
+        plan["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
 
     def _update_todo_status_from_attempt(self, attempt: dict[str, Any]) -> None:
         plan_path = self._workflow_artifact_path(
@@ -3463,6 +3763,28 @@ class MicroAgent:
         if next_attempts >= budget:
             return "failed"
         return "attempted"
+
+    def _is_patch_application_failure_record(self, record: dict[str, Any]) -> bool:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("todo_ignore_patch_failures_for_budget", True):
+            return False
+        if str(record.get("status", "")) != "rejected_no_changes":
+            return False
+        reason = self._normalize_fingerprint_text(
+            " ".join(
+                str(record.get(key, ""))
+                for key in ("no_change_reason", "failure_detail")
+            )
+        )
+        indicators = workflow.get("todo_patch_failure_indicators")
+        if not isinstance(indicators, list) or not indicators:
+            indicators = [
+                "target not found",
+                "patch rejected",
+                "patch apply failed",
+                "replacement target is ambiguous",
+            ]
+        return any(str(indicator).lower() in reason for indicator in indicators)
 
     def _append_todo_outcome_artifact(self, todo: dict[str, Any], status: str) -> None:
         if status == "validated":

@@ -1488,6 +1488,70 @@ value = 'fast'
             self.assertEqual(selected["strategy_axis"], "branch_control")
             self.assertEqual(selected["family_key"], "tree_depth_specialization")
 
+    def test_brainstorm_selection_scores_recent_validated_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "validated_patterns.jsonl").write_text(
+                json.dumps(
+                    {
+                        "strategy_axis": "memory_store_layout",
+                        "family_key": "store_address_reuse",
+                        "status": "validated",
+                        "last_attempt": {
+                            "strategy_axes": ["memory_store_layout"],
+                            "metric": 100,
+                        },
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: branch_control\n"
+                "family_key: branch_mask\n"
+                "Hook: try a small branch-control variant.\n"
+                "2. strategy_axis: memory_store_layout\n"
+                "family_key: store_address_reuse\n"
+                "Hook: extend the current validated local store layout pattern.\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "memory_store_layout")
+            records = agent.state.scratch["brainstorm_selection"]
+            selected_record = next(record for record in records if record.get("selected"))
+            self.assertIn(
+                "extends_recent_validated_pattern",
+                selected_record["score_reasons"],
+            )
+
+    def test_brainstorm_selection_skips_axis_family_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            selected = agent._select_brainstorm_tactic(
+                "1. strategy_axis: instruction_scheduling\n"
+                "family_key: unroll_factor_change\n"
+                "Hook: unroll a loop.\n"
+                "2. strategy_axis: memory_store_layout\n"
+                "family_key: store_address_reuse\n"
+                "Hook: reuse one stored address.\n"
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["strategy_axis"], "memory_store_layout")
+            records = agent.state.scratch["brainstorm_selection"]
+            self.assertEqual(records[0]["reason"], "axis_family_mismatch")
+
     def test_adaptive_gate_shadows_under_evidenced_failed_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2436,6 +2500,113 @@ value = 'fast'
             self.assertEqual(updated["todos"][0]["attempts"], 1)
             self.assertEqual(active["status"], "attempted")
             self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
+
+    def test_patch_application_failure_does_not_consume_todo_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "todo-001-instruction_scheduling",
+                "status": "active",
+                "strategy_axis": "instruction_scheduling",
+                "context": "narrow edit tactic",
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempt_budget": 3,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+
+            agent._append_candidate_history(
+                CodeCandidate(
+                    "1",
+                    [CodeChange("target.py", "stale search", target="old", replacement="new")],
+                    "same idea with stale search",
+                    "instruction_scheduling",
+                ),
+                status="rejected_no_changes",
+                metric=None,
+                applied=0,
+                failed=True,
+                extra={
+                    "no_change_reason": "Replacement target not found: target.py",
+                    "failure_detail": "Replacement target not found: target.py",
+                },
+            )
+
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            active = json.loads((artifact_dir / "active_todo.json").read_text())
+            attempts = [
+                json.loads(line)
+                for line in (artifact_dir / "todo_attempts.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(updated["active_todo_id"], "todo-001-instruction_scheduling")
+            self.assertEqual(updated["todos"][0].get("attempts", 0), 0)
+            self.assertEqual(updated["todos"][0].get("patch_failures"), 1)
+            self.assertEqual(active.get("patch_failures"), 1)
+            self.assertFalse(attempts[0]["budget_counted"])
+
+    def test_validated_pattern_followup_creates_active_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop": 4,
+                        "candidate_id": "1",
+                        "status": "improved",
+                        "metric": 90,
+                        "strategy_axis": "memory_store_layout",
+                        "strategy_axes": ["memory_store_layout"],
+                        "family_aliases": ["store_address_reuse"],
+                        "reason": "validated local redundancy removal",
+                        "changes": [{"path": "target.py", "mode": "replacement"}],
+                    }
+                )
+                + "\n"
+            )
+            state = AgentState(repo_root=repo, user_request="test")
+            state.planned_files = ["target.py"]
+            state.loop_count = 4
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "validated_pattern_followup": True,
+                    },
+                },
+                state,
+            )
+
+            agent._create_validated_pattern_followup_todo()
+
+            plan = json.loads((artifact_dir / "todo_plan.json").read_text())
+            active = json.loads((artifact_dir / "active_todo.json").read_text())
+            self.assertEqual(plan["active_todo_id"], "todo-004-memory_store_layout-followup")
+            self.assertEqual(active["strategy_axis"], "memory_store_layout")
+            self.assertEqual(active["source"], "validated_pattern_followup")
+            self.assertIn("validated local redundancy removal", active["context"])
 
     def test_active_todo_blocks_brainstorm_until_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

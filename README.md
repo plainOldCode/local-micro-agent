@@ -97,11 +97,31 @@ Durable todos honor `workflow.todo_attempt_budget` before moving on. A rejected
 candidate, failed test, or no-change patch keeps the same active todo in the
 next `CODE` prompt until the budget is exhausted, so the model can use the
 error signal to repair or narrow the probe instead of treating every tactic as a
-one-shot attempt.
+one-shot attempt. Patch-application misses such as stale search blocks are
+separated from idea failures by default
+(`workflow.todo_ignore_patch_failures_for_budget=true`), so a tactic is not
+discarded just because generated patch/search text did not match the current
+source.
 By default, `workflow.todo_enforce_active_contract=true` also makes active todo
 contracts controller-enforced: a queued candidate whose declared
 `strategy_axis`, reason, or detected family drifts away from the active todo is
 rejected before edits or tests and counted against that todo's retry budget.
+
+By default, `workflow.brainstorm_score_tactics=true` scores selectable
+BRAINSTORM tactics instead of accepting the first valid block. The score uses
+only current-run harness evidence: recent validated pattern aliases,
+failed/patch-failure aliases, tactic specificity, novelty lane, hook detail, and
+original order as a tie-breaker. `workflow.brainstorm_reject_axis_family_mismatch=true`
+also skips tactics whose declared `strategy_axis` contradicts the axis implied
+by their `family_key`. This is controller-side selection logic, not a
+problem-specific winning-ladder prompt.
+
+Set `workflow.validated_pattern_followup=true` with
+`workflow.continue_after_improvement=true` to create a follow-up todo from the
+latest current-run improvement before exploring unrelated families. The follow-up
+todo keeps the same axis/family and asks for a narrow nearby extension of the
+validated local pattern. It is derived only from current-run candidate history
+and artifacts, so clean evaluation does not receive prior-run answer hints.
 
 Set `workflow.continue_after_improvement=true` for long-running search. When a
 candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
