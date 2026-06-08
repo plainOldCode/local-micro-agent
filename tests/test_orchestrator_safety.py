@@ -837,6 +837,96 @@ Background / non-constraints
             self.assertEqual(active_todo.get("non_budget_attempts"), 1)
             self.assertNotIn("patch_failures", active_todo)
 
+    def test_structural_probe_checkpoint_persists_without_metric_gain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "parser.py"
+            target.write_text("def parse(value):\n    return value.strip()\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["parser.py"],
+                    "test_commands": ["python3 -c \"print('cycles: 100')\""],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "candidate_queue": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "record_candidate_artifacts": True,
+                    "todo_plan_path": ".local_micro_agent/todo_plan.json",
+                    "active_todo_path": ".local_micro_agent/active_todo.json",
+                    "todo_attempts_path": ".local_micro_agent/todo_attempts.jsonl",
+                    "todo_soft_until_first_improvement": True,
+                    "structural_tactic_lifecycle": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"parser.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            todo = {
+                "todo_id": "todo-000-parser_refactor",
+                "status": "active",
+                "strategy_axis": "parser_refactor",
+                "family_key": "parser_adapter",
+                "tactic_stage": "structural_probe",
+                "context": "Refactor parser through a behavior-preserving adapter.",
+                "attempts": 0,
+            }
+            state.scratch["active_todo"] = todo
+            agent._persist_todo_plan(todo)
+            candidate = CodeCandidate(
+                "adapter",
+                [
+                    CodeChange(
+                        path="parser.py",
+                        reason="todo-000-parser_refactor adapter scaffold",
+                        target="def parse(value):\n    return value.strip()\n",
+                        replacement=(
+                            "def _parse_adapter(value):\n"
+                            "    return value.strip()\n\n"
+                            "def parse(value):\n"
+                            "    return _parse_adapter(value)\n"
+                        ),
+                    )
+                ],
+                "todo-000-parser_refactor adapter scaffold",
+                strategy_axis="parser_refactor",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"parser.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "def parse(value):\n    return value.strip()\n")
+            history_record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            )
+            self.assertEqual(history_record["todo_id"], "todo-000-parser_refactor")
+            self.assertEqual(history_record["failure_class"], "probe_no_signal")
+            self.assertEqual(
+                history_record["stage_result"], "probe_validated_no_metric_gain"
+            )
+            state_record = json.loads(
+                (repo / ".local_micro_agent" / "structural_state.json").read_text()
+            )
+            checkpoint = state_record["checkpoints"][0]
+            self.assertEqual(checkpoint["strategy_axis"], "parser_refactor")
+            self.assertEqual(checkpoint["todo_id"], "todo-000-parser_refactor")
+            self.assertEqual(checkpoint["stage_result"], "probe_validated_no_metric_gain")
+            checkpoint_patch = repo / checkpoint["patch_path"]
+            self.assertIn("_parse_adapter", checkpoint_patch.read_text())
+            self.assertIn("_parse_adapter", agent._format_structural_state_context())
+            active_todo = json.loads(
+                (repo / ".local_micro_agent" / "active_todo.json").read_text()
+            )
+            self.assertEqual(active_todo["status"], "validated")
+
     def test_reflect_state_stores_summary_for_next_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(

@@ -1354,6 +1354,17 @@ class MicroAgent:
                         "rejected before edits or tests.\n"
                         f"{active_todo}"
                     )
+                structural_state = self._format_structural_state_context()
+                if structural_state:
+                    add_runtime_context(
+                        "Validated structural checkpoints follow. These are "
+                        "correctness-preserving intermediate patches from this run, "
+                        "kept separate from metric best state. If the current tactic "
+                        "continues one checkpoint, rebuild the candidate from that "
+                        "checkpoint and add only one guarded next step; do not copy "
+                        "unrelated checkpoints.\n"
+                        f"{structural_state}"
+                    )
                 tactic_library = self._format_tactic_library()
                 if tactic_library:
                     add_runtime_context(
@@ -1697,6 +1708,15 @@ class MicroAgent:
                 metric=metric,
                 applied=applied,
                 failed=failed,
+                extra=extra,
+            )
+            self._record_structural_checkpoint(
+                candidate,
+                status=status,
+                metric=metric,
+                applied=applied,
+                failed=failed,
+                patch_text=patch_text,
                 extra=extra,
             )
             self._record_strategy_attempt(
@@ -3041,6 +3061,53 @@ class MicroAgent:
             return ""
         return json.dumps(active_todo, ensure_ascii=False, indent=2)
 
+    def _format_structural_state_context(self) -> str:
+        if not self._structural_state_enabled():
+            return ""
+        state = self._load_structural_state()
+        checkpoints = state.get("checkpoints")
+        if not isinstance(checkpoints, list) or not checkpoints:
+            return ""
+        limit = int(
+            self.config.get("workflow", {}).get("structural_state_context_limit", 3)
+            or 3
+        )
+        patch_limit = int(
+            self.config.get("workflow", {}).get("structural_state_patch_context_limit", 1800)
+            or 1800
+        )
+        items: list[dict[str, Any]] = []
+        for checkpoint in checkpoints[-limit:]:
+            if not isinstance(checkpoint, dict):
+                continue
+            item = {
+                key: checkpoint.get(key)
+                for key in (
+                    "checkpoint_id",
+                    "loop",
+                    "candidate_id",
+                    "strategy_axis",
+                    "family_aliases",
+                    "tactic_stage",
+                    "stage_result",
+                    "metric",
+                    "todo_id",
+                    "reason",
+                    "changes",
+                )
+                if checkpoint.get(key) not in (None, "", [], {})
+            }
+            patch_path = checkpoint.get("patch_path")
+            if patch_path:
+                item["patch_path"] = patch_path
+                path = self.state.repo_root / str(patch_path)
+                if path.exists():
+                    item["patch_excerpt"] = self._truncate_text(
+                        path.read_text(errors="replace"), patch_limit
+                    )
+            items.append(item)
+        return json.dumps(items, ensure_ascii=False, indent=2)
+
     def _load_active_todo(self) -> dict[str, Any] | None:
         path = self._workflow_artifact_path(
             "active_todo_path", ".local_micro_agent/active_todo.json"
@@ -3052,6 +3119,118 @@ class MicroAgent:
         except json.JSONDecodeError:
             return None
         return data if isinstance(data, dict) else None
+
+    def _structural_state_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(
+            workflow.get("structural_tactic_lifecycle", True)
+            and workflow.get("structural_state_checkpoint", True)
+        )
+
+    def _structural_state_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "structural_state_path", ".local_micro_agent/structural_state.json"
+        )
+
+    def _structural_checkpoint_dir(self) -> Path:
+        return self._workflow_artifact_path(
+            "structural_checkpoint_dir", ".local_micro_agent/structural_checkpoints"
+        )
+
+    def _load_structural_state(self) -> dict[str, Any]:
+        path = self._structural_state_path()
+        if not path.exists():
+            return {"version": 1, "checkpoints": []}
+        try:
+            data = json.loads(path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            return {"version": 1, "checkpoints": []}
+        if not isinstance(data, dict):
+            return {"version": 1, "checkpoints": []}
+        checkpoints = data.get("checkpoints")
+        if not isinstance(checkpoints, list):
+            data["checkpoints"] = []
+        data.setdefault("version", 1)
+        return data
+
+    def _record_structural_checkpoint(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+        patch_text: str,
+        extra: dict[str, Any],
+    ) -> None:
+        if not self._structural_state_enabled():
+            return
+        if failed or applied <= 0 or metric is None or not patch_text.strip():
+            return
+        stage = str(extra.get("tactic_stage", ""))
+        if not stage.startswith("structural_"):
+            return
+        stage_result = str(extra.get("stage_result", ""))
+        if stage_result not in {
+            "scaffold_validated",
+            "probe_validated",
+            "probe_validated_no_metric_gain",
+        }:
+            return
+
+        checkpoint_id = f"loop-{self.state.loop_count:03d}-{candidate.candidate_id}"
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", checkpoint_id).strip("-")
+        checkpoint_dir = self._structural_checkpoint_dir()
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        patch_path = checkpoint_dir / f"{safe_id}.patch"
+        patch_path.write_text(patch_text)
+
+        todo_id = self._active_todo_id_for_record(
+            {
+                "strategy_axis": candidate.strategy_axis,
+                "tactic_stage": stage,
+            }
+        )
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "checkpoint_id": checkpoint_id,
+            "loop": self.state.loop_count,
+            "candidate_id": candidate.candidate_id,
+            "status": status,
+            "metric": metric,
+            "strategy_axis": candidate.strategy_axis,
+            "strategy_axes": self._candidate_strategy_axes(candidate),
+            "family_aliases": sorted(self._candidate_reason_family_aliases(candidate)),
+            "tactic_stage": stage,
+            "stage_result": stage_result,
+            "failure_class": extra.get("failure_class"),
+            "reason": self._truncate_text(candidate.reason, 700),
+            "changes": self._summarize_changes(candidate.changes),
+            "todo_id": todo_id,
+            "artifact_id": extra.get("artifact_id"),
+            "artifact_path": extra.get("artifact_path"),
+            "patch_path": self._repo_relative_path(patch_path),
+        }
+        state = self._load_structural_state()
+        checkpoints = state.setdefault("checkpoints", [])
+        if not isinstance(checkpoints, list):
+            checkpoints = []
+            state["checkpoints"] = checkpoints
+        checkpoints.append(
+            {key: value for key, value in record.items() if value not in (None, "", [], {})}
+        )
+        limit = int(
+            self.config.get("workflow", {}).get("structural_state_checkpoint_limit", 8)
+            or 8
+        )
+        if limit > 0 and len(checkpoints) > limit:
+            del checkpoints[:-limit]
+        state["latest_checkpoint_id"] = checkpoint_id
+        state["updated_at"] = record["ts"]
+        path = self._structural_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+        self.state.notes.append(f"Recorded structural checkpoint: {checkpoint_id}")
 
     def _todo_attempt_budget_exhausted(self, todo: dict[str, Any]) -> bool:
         budget = int(self.config.get("workflow", {}).get("todo_attempt_budget", 1) or 1)
@@ -4292,6 +4471,10 @@ class MicroAgent:
                     if value not in (None, "", [], {})
                 }
             )
+        if not record.get("todo_id"):
+            structural_todo_id = self._active_todo_id_for_record(record)
+            if structural_todo_id:
+                record["todo_id"] = structural_todo_id
         if self._is_patch_application_failure_record(record):
             record["budget_counted"] = False
         if self._is_structural_learning_record(record):
@@ -4339,6 +4522,37 @@ class MicroAgent:
                 return ""
             return str(active_todo.get("todo_id", ""))
         return ""
+
+    def _active_todo_id_for_record(self, record: dict[str, Any]) -> str:
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict):
+            return ""
+        if active_todo.get("status") not in {"active", "attempted", "validated"}:
+            return ""
+        if (
+            active_todo.get("status") != "validated"
+            and self._todo_attempt_budget_exhausted(active_todo)
+        ):
+            return ""
+        stage = str(record.get("tactic_stage", ""))
+        if not stage.startswith("structural_"):
+            return ""
+        todo_stage = str(active_todo.get("tactic_stage", ""))
+        if not todo_stage.startswith("structural_"):
+            return ""
+        record_axis = self._normalize_strategy_axis(str(record.get("strategy_axis", "")))
+        todo_axis = self._normalize_strategy_axis(str(active_todo.get("strategy_axis", "")))
+        if record_axis and todo_axis and record_axis != todo_axis:
+            axes = record.get("strategy_axes")
+            if not isinstance(axes, list) or todo_axis not in {
+                self._normalize_strategy_axis(str(axis)) for axis in axes
+            }:
+                return ""
+        return str(active_todo.get("todo_id", ""))
 
     def _append_todo_attempt(self, candidate_record: dict[str, Any]) -> None:
         todo_id = str(candidate_record.get("todo_id", ""))

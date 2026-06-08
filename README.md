@@ -120,6 +120,15 @@ are recorded as structural learning classes like `scope_too_broad` or
 allows up to `workflow.structural_tactic_soft_failures` non-budgeted structural
 learning failures before normal todo budgeting resumes.
 
+Correctness-preserving structural scaffold/probe patches can also be retained
+separately from metric-winning best state. With
+`workflow.structural_state_checkpoint=true`, tests-passing structural candidates
+that do not improve the metric are written to `workflow.structural_state_path`
+and `workflow.structural_checkpoint_dir`. Later CODE prompts receive a compact
+checkpoint summary plus patch excerpt, so long refactors, parser rewrites, cache
+layers, migrations, and scheduler changes can continue from validated
+intermediate structure without treating that checkpoint as the final best patch.
+
 Use `workflow.brainstorm_open_novelty_lanes` to give `BRAINSTORM` a compact
 menu of still-open exploration lanes. These lanes are included whenever
 brainstorming runs by default, even before the all-skipped/new-family gate
