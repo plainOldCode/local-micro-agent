@@ -164,6 +164,12 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
 def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
     external_context = external_context_block(state)
     external_block = f"\n\n{external_context}" if external_context else ""
+    todo_chain = state.scratch.get("todo_observation_chain")
+    todo_chain_block = (
+        f"\n\nObservation-backed todo continuation:\n{todo_chain}"
+        if isinstance(todo_chain, str) and todo_chain.strip()
+        else ""
+    )
     return [
         {"role": "system", "content": REFLECT_SYSTEM},
         {
@@ -172,6 +178,7 @@ def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[di
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"{external_block}"
+                f"{todo_chain_block}\n\n"
                 f"Latest test summary:\n{state.latest_test_summary()}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
             ),

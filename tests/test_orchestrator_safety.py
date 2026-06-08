@@ -1587,6 +1587,97 @@ Background / non-constraints
             self.assertIn("last_failure_class", todo_summary)
             self.assertIn("no_improvement", todo_summary)
 
+    def test_diagnostic_commands_are_recorded_as_candidate_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "record_candidate_artifacts": True,
+                    "test_commands": ["python3 -c \"print('tests ok')\""],
+                    "diagnostic_commands": [
+                        {
+                            "name": "shape",
+                            "command": "python3 -c \"print('OBS instructions=7 bundles=7')\"",
+                        }
+                    ],
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            agent = MicroAgent(config, state)
+            state.scratch["pre_code_snapshot"] = {"target.py": "value = 1\n"}
+            candidate = CodeCandidate(
+                "diag",
+                [CodeChange("target.py", "change value", content="value = 2\n")],
+                "make an observable edit",
+                "performance",
+            )
+
+            async def run_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(run_once())
+
+            record = json.loads((repo / ".local_micro_agent/candidates.jsonl").read_text())
+            self.assertIn("diagnostic_summary", record)
+            self.assertIn("instructions=7", record["diagnostic_summary"])
+            self.assertIn("diagnostics", record)
+            self.assertIn("Candidate diag diagnostics", "\n".join(state.notes))
+            artifact = json.loads((repo / record["artifact_path"]).read_text())
+            self.assertIn("diagnostics", artifact)
+            self.assertIn("OBS instructions=7", artifact["diagnostics"][0]["output"])
+
+    def test_soft_todo_still_formats_observation_chain_for_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "todo_soft_until_first_improvement": True,
+                    "pre_improvement_todo_blocks_brainstorm": True,
+                    "observation_backed_todo_continuation": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            agent = MicroAgent(config, state)
+            state.scratch["active_todo"] = {
+                "todo_id": "todo-001-performance",
+                "status": "active",
+                "strategy_axis": "performance",
+                "tactic_stage": "local_edit",
+                "context": "reduce generated work",
+                "last_attempt": {
+                    "loop": 0,
+                    "todo_id": "todo-001-performance",
+                    "candidate_id": "1",
+                    "status": "rejected",
+                    "metric": 100,
+                    "strategy_axis": "performance",
+                    "failure_class": "no_improvement",
+                    "summary": "metric stayed flat",
+                    "diagnostic_summary": "shape exit=0: instructions unchanged",
+                    "recovery_hint": "move the edit site",
+                },
+            }
+
+            self.assertEqual(agent._format_active_todo(), "")
+            chain = agent._format_todo_observation_chain()
+
+            self.assertIn("todo-001-performance", chain)
+            self.assertIn("instructions unchanged", chain)
+            self.assertIn("move the edit", chain)
+
     def test_target_not_found_repair_can_fix_search_block_within_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

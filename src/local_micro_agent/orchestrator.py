@@ -492,6 +492,9 @@ class MicroAgent:
             self.config.get("workflow", {}).get("feedback_notes_limit", 12)
         )
         try:
+            self.state.scratch["todo_observation_chain"] = (
+                self._format_todo_observation_chain()
+            )
             output = await self._model_chat(
                 "reflector",
                 reflect_prompt(self.state, feedback_notes_limit),
@@ -1454,6 +1457,18 @@ class MicroAgent:
                         "ideas.\n"
                         f"{gate_memory}"
                     )
+                todo_observation_chain = self._format_todo_observation_chain()
+                if todo_observation_chain:
+                    add_runtime_context(
+                        "Observation-backed todo continuation follows. Treat this "
+                        "as the current experiment chain, not as background. The next "
+                        "candidate should either repair the latest actionable failure "
+                        "inside the same hypothesis, or explicitly use the observations "
+                        "to choose a narrower measured probe. Do not reset to a generic "
+                        "tactic when the chain contains a concrete invariant, no-signal, "
+                        "or diagnostic observation.\n"
+                        f"{todo_observation_chain}"
+                    )
                 active_todo = self._format_active_todo()
                 if active_todo:
                     add_runtime_context(
@@ -1797,6 +1812,12 @@ class MicroAgent:
                 results,
                 failed=failed,
             )
+            diagnostic_results = await self._run_diagnostic_commands(when="after_test")
+            diagnostic_summary = self._diagnostic_summary(diagnostic_results, limit=900)
+            if diagnostic_summary:
+                self.state.notes.append(
+                    f"Candidate {candidate.candidate_id} diagnostics: {diagnostic_summary}"
+                )
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} applied={applied} "
                 f"metric={metric} failed={failed} improved={improved}"
@@ -1812,6 +1833,7 @@ class MicroAgent:
                 results=results,
                 failure_detail=failure_detail,
                 repair_parent_id=repair_parent_id,
+                diagnostic_results=diagnostic_results,
             )
             self._append_candidate_history(
                 candidate,
@@ -2818,6 +2840,112 @@ class MicroAgent:
             results.append(TestResult(**result))
         return results
 
+    async def _run_diagnostic_commands(self, when: str = "after_test") -> list[dict[str, Any]]:
+        specs = self._diagnostic_command_specs(when=when)
+        if not specs:
+            return []
+        workflow = self.config.get("workflow", {})
+        default_timeout = int(workflow.get("diagnostic_timeout_seconds", 120) or 120)
+        default_limit = int(workflow.get("diagnostic_output_limit", 12_000) or 12_000)
+        results: list[dict[str, Any]] = []
+        for index, spec in enumerate(specs, start=1):
+            command = str(spec.get("command", "")).strip()
+            if not command:
+                continue
+            name = str(spec.get("name") or f"diagnostic-{index}")
+            output_limit = int(spec.get("output_limit", default_limit) or default_limit)
+            timeout = int(spec.get("timeout_seconds", default_timeout) or default_timeout)
+            start = self._profile_span_start()
+            try:
+                result = await self.mcp.run_command(
+                    command,
+                    cwd=str(self.state.repo_root),
+                    timeout_seconds=timeout,
+                    output_limit=output_limit,
+                )
+            except Exception as exc:
+                result = {
+                    "command": command,
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": f"{type(exc).__name__}: {exc}",
+                }
+            self._record_profile_span(
+                "diagnostic_command",
+                start,
+                {
+                    "name": name,
+                    "command": command,
+                    "cwd": str(self.state.repo_root),
+                    "exit_code": result.get("exit_code"),
+                    "stdout_chars": len(str(result.get("stdout", ""))),
+                    "stderr_chars": len(str(result.get("stderr", ""))),
+                    "success": result.get("exit_code") == 0,
+                },
+            )
+            results.append(
+                {
+                    "name": name,
+                    "command": command,
+                    "exit_code": result.get("exit_code"),
+                    "stdout": self._truncate_text(str(result.get("stdout", "")), output_limit),
+                    "stderr": self._truncate_text(str(result.get("stderr", "")), output_limit),
+                }
+            )
+        return results
+
+    def _diagnostic_command_specs(self, when: str = "after_test") -> list[dict[str, Any]]:
+        configured = self.config.get("workflow", {}).get("diagnostic_commands", [])
+        if configured in (None, "", []):
+            return []
+        if not isinstance(configured, list):
+            configured = [configured]
+        specs: list[dict[str, Any]] = []
+        for item in configured:
+            if isinstance(item, dict):
+                command = str(item.get("command", "")).strip()
+                if not command:
+                    continue
+                item_when = str(item.get("when", "after_test") or "after_test")
+                if item_when != when:
+                    continue
+                spec = {
+                    "name": str(item.get("name") or ""),
+                    "command": command,
+                    "when": item_when,
+                }
+                for key in ("timeout_seconds", "output_limit"):
+                    if item.get(key) is not None:
+                        spec[key] = item[key]
+                specs.append(spec)
+                continue
+            command = str(item).strip()
+            if command:
+                specs.append({"name": "", "command": command, "when": "after_test"})
+        return specs
+
+    def _diagnostic_summary(
+        self, diagnostic_results: list[dict[str, Any]], limit: int = 1200
+    ) -> str:
+        if not diagnostic_results:
+            return ""
+        items: list[str] = []
+        for result in diagnostic_results:
+            output = "\n".join(
+                part
+                for part in (
+                    str(result.get("stdout", "")).strip(),
+                    str(result.get("stderr", "")).strip(),
+                )
+                if part
+            )
+            name = str(result.get("name") or "diagnostic")
+            items.append(
+                f"{name} exit={result.get('exit_code')}: "
+                f"{self._truncate_text(output, 500) if output else 'no output'}"
+            )
+        return self._truncate_text(" | ".join(items), limit)
+
     @staticmethod
     def _candidate_queue_message(output_format: str) -> dict[str, str]:
         if output_format == "xml":
@@ -3184,6 +3312,109 @@ class MicroAgent:
             return ""
         return json.dumps(active_todo, ensure_ascii=False, indent=2)
 
+    def _format_todo_observation_chain(self) -> str:
+        if not self.config.get("workflow", {}).get(
+            "observation_backed_todo_continuation", True
+        ):
+            return ""
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return ""
+        if active_todo.get("status") not in {"active", "attempted", "validated"}:
+            return ""
+        todo_id = str(active_todo.get("todo_id", ""))
+        if not todo_id:
+            return ""
+        attempts = self._recent_todo_attempts(todo_id)
+        attempt_limit = int(
+            self.config.get("workflow", {}).get("todo_observation_chain_attempt_limit", 5)
+            or 5
+        )
+        compact_attempts: list[dict[str, Any]] = []
+        for attempt in attempts[-attempt_limit:]:
+            if not isinstance(attempt, dict):
+                continue
+            compact: dict[str, Any] = {
+                "loop": attempt.get("loop"),
+                "status": attempt.get("status"),
+                "metric": attempt.get("metric"),
+                "strategy_axis": attempt.get("strategy_axis"),
+                "tactic_stage": attempt.get("tactic_stage"),
+                "stage_result": attempt.get("stage_result"),
+                "failure_class": attempt.get("failure_class"),
+                "summary": self._truncate_text(str(attempt.get("summary", "")), 320),
+                "recovery_hint": self._truncate_text(
+                    str(attempt.get("recovery_hint", "")), 280
+                ),
+                "diagnostic_summary": self._truncate_text(
+                    str(attempt.get("diagnostic_summary", "")), 360
+                ),
+            }
+            next_actions = attempt.get("next_actions")
+            if isinstance(next_actions, list) and next_actions:
+                compact["next_actions"] = [
+                    self._truncate_text(str(action), 180)
+                    for action in next_actions[:3]
+                    if action
+                ]
+            compact_attempts.append(
+                {
+                    key: value
+                    for key, value in compact.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        latest = compact_attempts[-1] if compact_attempts else {}
+        continuation_focus = self._todo_continuation_focus(latest)
+        chain = {
+            "todo": {
+                "todo_id": active_todo.get("todo_id"),
+                "status": active_todo.get("status"),
+                "strategy_axis": active_todo.get("strategy_axis"),
+                "family_key": active_todo.get("family_key"),
+                "tactic_stage": active_todo.get("tactic_stage", "local_edit"),
+                "attempts": active_todo.get("attempts", 0),
+                "non_budget_attempts": active_todo.get("non_budget_attempts", 0),
+                "title": active_todo.get("title"),
+                "context": self._truncate_text(str(active_todo.get("context", "")), 700),
+                "micro_goal": active_todo.get("micro_goal"),
+            },
+            "recent_attempts": compact_attempts,
+            "continuation_focus": continuation_focus,
+            "continuation_rule": (
+                "Continue from the latest observation. A no-signal result means "
+                "the edit did not change the measured observable enough; an invariant "
+                "failure means preserve that invariant before trying to optimize. "
+                "Only switch tactic when the observation chain explains why the "
+                "current hypothesis is exhausted."
+            ),
+        }
+        return json.dumps(chain, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _todo_continuation_focus(latest_attempt: dict[str, Any]) -> str:
+        failure_class = str(latest_attempt.get("failure_class", ""))
+        if failure_class in {"invariant_broken", "scope_too_broad", "guard_missing"}:
+            return (
+                "Repair the named invariant at smaller scope before broadening the tactic."
+            )
+        if failure_class in {"no_improvement", "probe_no_signal"}:
+            return (
+                "Use diagnostics or generated artifacts to identify what did not change; "
+                "then move the edit to the smallest code region that can change that observable."
+            )
+        if failure_class == "patch_miss":
+            return "Refresh exact source context and repair the patch target before judging the tactic."
+        if failure_class == "duplicate_variant":
+            return "Change the implementation shape or edit site; do not rename the same variant."
+        if failure_class:
+            return "Use the latest failure class as the next hypothesis, not a reset signal."
+        return "Design the next smallest measurable probe for this todo."
+
     def _format_structural_state_context(self) -> str:
         if not self._structural_state_enabled():
             return ""
@@ -3385,6 +3616,9 @@ class MicroAgent:
             last_recovery_hint = (
                 last_attempt.get("recovery_hint") if isinstance(last_attempt, dict) else ""
             )
+            last_diagnostic_summary = (
+                last_attempt.get("diagnostic_summary") if isinstance(last_attempt, dict) else ""
+            )
             summary.append(
                 {
                     "todo_id": todo.get("todo_id"),
@@ -3426,6 +3660,11 @@ class MicroAgent:
                         str(last_recovery_hint), 260
                     )
                     if last_recovery_hint
+                    else "",
+                    "last_diagnostic_summary": self._truncate_text(
+                        str(last_diagnostic_summary), 360
+                    )
+                    if last_diagnostic_summary
                     else "",
                 }
             )
@@ -3900,14 +4139,18 @@ class MicroAgent:
                 "artifact_id",
                 "patch_path",
                 "test_output_path",
+                "diagnostic_summary",
             ):
                 value = record.get(key)
                 if value:
                     item[key] = (
                         self._truncate_text(str(value), 500)
-                        if key in {"no_change_reason", "failure_detail"}
+                        if key in {"no_change_reason", "failure_detail", "diagnostic_summary"}
                         else value
                     )
+            diagnostics = record.get("diagnostics")
+            if isinstance(diagnostics, list) and diagnostics:
+                item["diagnostics"] = diagnostics[:3]
             formatted.append(item)
         return json.dumps(
             formatted,
@@ -3955,6 +4198,7 @@ class MicroAgent:
         failure_detail: str = "",
         no_change_reason: str = "",
         repair_parent_id: str = "",
+        diagnostic_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         extra: dict[str, Any] = {}
         if failure_detail:
@@ -3972,8 +4216,14 @@ class MicroAgent:
             results=results,
             failure_detail=failure_detail,
             no_change_reason=no_change_reason,
+            diagnostic_results=diagnostic_results or [],
         )
         extra.update(observation)
+        if diagnostic_results:
+            extra["diagnostics"] = self._compact_diagnostic_results(diagnostic_results)
+            diagnostic_summary = self._diagnostic_summary(diagnostic_results)
+            if diagnostic_summary:
+                extra["diagnostic_summary"] = diagnostic_summary
         extra.update(
             self._write_candidate_artifacts(
                 candidate,
@@ -3987,6 +4237,7 @@ class MicroAgent:
                 no_change_reason=no_change_reason,
                 repair_parent_id=repair_parent_id,
                 observation=observation,
+                diagnostic_results=diagnostic_results or [],
             )
         )
         return extra
@@ -4019,6 +4270,7 @@ class MicroAgent:
         results: list[TestResult],
         failure_detail: str = "",
         no_change_reason: str = "",
+        diagnostic_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         failure_class = self._candidate_failure_class(
             status=status,
@@ -4037,6 +4289,7 @@ class MicroAgent:
             failure_class=failure_class,
             failure_detail=failure_detail,
             no_change_reason=no_change_reason,
+            diagnostic_results=diagnostic_results or [],
         )
         next_actions = self._candidate_next_actions(failure_class)
         recovery_hint = self._candidate_recovery_hint(failure_class)
@@ -4149,6 +4402,7 @@ class MicroAgent:
         failure_class: str,
         failure_detail: str = "",
         no_change_reason: str = "",
+        diagnostic_results: list[dict[str, Any]] | None = None,
     ) -> str:
         axis = candidate.strategy_axis or ",".join(self._candidate_strategy_axes(candidate))
         parts = [
@@ -4161,7 +4415,33 @@ class MicroAgent:
         detail = no_change_reason or failure_detail
         if detail:
             parts.append(self._truncate_text(detail, 280))
+        diagnostic_summary = self._diagnostic_summary(diagnostic_results or [], limit=320)
+        if diagnostic_summary:
+            parts.append(f"diagnostics={diagnostic_summary}")
         return "; ".join(parts)
+
+    def _compact_diagnostic_results(
+        self, diagnostic_results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        compact: list[dict[str, Any]] = []
+        for result in diagnostic_results:
+            output = "\n".join(
+                part
+                for part in (
+                    str(result.get("stdout", "")).strip(),
+                    str(result.get("stderr", "")).strip(),
+                )
+                if part
+            )
+            compact.append(
+                {
+                    "name": result.get("name"),
+                    "command": result.get("command"),
+                    "exit_code": result.get("exit_code"),
+                    "output": self._truncate_text(output, 1200),
+                }
+            )
+        return compact
 
     @staticmethod
     def _candidate_next_actions(failure_class: str) -> list[str]:
@@ -4598,6 +4878,7 @@ class MicroAgent:
         no_change_reason: str = "",
         repair_parent_id: str = "",
         observation: dict[str, Any] | None = None,
+        diagnostic_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         artifact_dir = self._candidate_artifact_dir()
         if artifact_dir is None:
@@ -4626,6 +4907,8 @@ class MicroAgent:
             metadata["no_change_reason"] = self._truncate_text(no_change_reason, 2000)
         if repair_parent_id:
             metadata["repair_parent_id"] = repair_parent_id
+        if diagnostic_results:
+            metadata["diagnostics"] = self._compact_diagnostic_results(diagnostic_results)
         if observation:
             metadata.update(
                 {
@@ -4838,6 +5121,8 @@ class MicroAgent:
             "repair_parent_id",
             "patch_path",
             "test_output_path",
+            "diagnostic_summary",
+            "diagnostics",
         ):
             value = candidate_record.get(key)
             if value:

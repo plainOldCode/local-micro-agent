@@ -183,6 +183,13 @@ lexical wording misses.
 whose candidate/change reasons are effectively the same as a recent rejected
 attempt, preventing retry budget from being spent on retesting the same
 micro-variant.
+With `workflow.observation_backed_todo_continuation=true` (default), active
+todos also carry an observation chain into CODE and REFLECT even when
+pre-first-improvement contracts are soft. The chain includes recent attempts,
+structured failure classes, recovery hints, and diagnostic summaries. This keeps
+a todo from becoming a small isolated loop: the next candidate is asked to
+continue from the latest evidence, repair the named invariant, or move the edit
+to a measurably relevant location instead of resetting to a generic tactic.
 
 By default, `workflow.brainstorm_score_tactics=true` scores selectable
 BRAINSTORM tactics instead of accepting the first valid block. The score uses
@@ -240,6 +247,16 @@ store the concrete no-change reason, such as target-not-found, no-op replacement
 comment-only edits, out-of-plan paths, or patch rejection. Recent candidate
 history includes those details so later CODE calls can repair the actual miss
 instead of only seeing a generic rejection status.
+
+Set `workflow.diagnostic_commands` to attach user-defined observation commands
+to each evaluated candidate after tests run. Diagnostics are advisory feedback:
+they do not change pass/fail or metric acceptance. Each command can be a string
+or an object with `name`, `command`, `when` (`after_test`), `timeout_seconds`,
+and `output_limit`. Outputs are stored in candidate history/artifacts and fed
+back to REFLECT/CODE so the next attempt can see what the edit actually changed
+or failed to change. For example, a performance task might record generated IR
+or bundle counts; a web task might record bundle size or accessibility output;
+a database task might record an `EXPLAIN` summary.
 
 Set `workflow.repair_target_not_found=true` to turn a stale search block into a
 narrow same-candidate repair pass. When a candidate has no applied edits because
