@@ -691,6 +691,22 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertIn("Controller validation", curated)
         self.assertIn("execution hazard", curated)
 
+    def test_semantic_analysis_keeps_code_symbols_that_look_like_model_names(self) -> None:
+        raw = """# Code-usable facts
+- Preserve the claude_response field.
+- Do not rename opuses in the public payload.
+
+Background / non-constraints
+- Best known benchmark note: Claude reached 1,363 cycles.
+"""
+
+        curated = MicroAgent._curate_semantic_analysis(raw, 4000)
+
+        self.assertIn("claude_response", curated)
+        self.assertIn("opuses", curated)
+        self.assertNotIn("1,363", curated)
+        self.assertNotIn("Background / non-constraints", curated)
+
     def test_read_persists_raw_and_curated_semantic_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

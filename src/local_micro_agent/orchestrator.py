@@ -3292,8 +3292,6 @@ class MicroAgent:
             "previous run",
             "benchmark note",
             "outside this run",
-            "claude",
-            "opus",
         )
         lowered_all = text.lower()
         delayed_visibility = bool(
@@ -3306,10 +3304,17 @@ class MicroAgent:
             stripped = raw_line.strip()
             section_match = re.match(r"^#{1,6}\s*(.+?)\s*$", stripped)
             bullet_section_match = re.match(r"^[-*]\s*([A-Za-z][^:]{1,80}):\s*$", stripped)
+            plain_section_match = (
+                stripped.lower()
+                if stripped.lower() in code_usable_sections | non_constraint_sections
+                else None
+            )
             if section_match:
                 current_section = section_match.group(1).strip().lower()
             elif bullet_section_match:
                 current_section = bullet_section_match.group(1).strip().lower()
+            elif plain_section_match:
+                current_section = plain_section_match
             section_key = (current_section or "").strip()
             if section_key in non_constraint_sections:
                 continue
