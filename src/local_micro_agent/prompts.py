@@ -26,10 +26,11 @@ Do not include markdown or prose outside JSON."""
 SEMANTIC_ANALYSIS_SYSTEM = """You are the SEMANTIC_ANALYSIS node in a local coding-agent FSM.
 Do not write code. Extract durable facts the next CODE attempts must obey.
 Output concise Markdown with these sections:
-- Execution model / data visibility
-- Invariants and public contracts
-- Risky transformations and required checks
+- Code-usable facts
+- Hazards and ordering constraints
+- Current task metric constraints
 - Safe implementation hooks
+- Background / non-constraints
 Keep it domain-neutral and grounded only in the supplied request, plan, and source.
 Prefer concrete read/write, ordering, lifecycle, API, or metric facts over generic advice."""
 

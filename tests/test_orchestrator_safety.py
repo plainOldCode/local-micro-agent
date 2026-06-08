@@ -669,6 +669,67 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("reads happen before writes", state.scratch["semantic_analysis"])
             self.assertEqual(state.current, AgentStateName.CODE)
 
+    def test_semantic_analysis_filters_background_before_code_prompt(self) -> None:
+        raw = """# Code-usable facts
+- Preserve the public API contract.
+
+# Background / non-constraints
+- Best known benchmark note: Claude reached 1,363 cycles.
+
+# Hazards and ordering constraints
+- Reads happen before delayed writes become visible.
+- There is no intra-step data dependency hazard.
+"""
+
+        curated = MicroAgent._curate_semantic_analysis(raw, 4000)
+
+        self.assertIn("Preserve the public API contract", curated)
+        self.assertIn("Reads happen before delayed writes", curated)
+        self.assertNotIn("1,363", curated)
+        self.assertNotIn("Claude", curated)
+        self.assertNotIn("no intra-step data dependency hazard", curated.lower())
+        self.assertIn("Controller validation", curated)
+        self.assertIn("execution hazard", curated)
+
+    def test_read_persists_raw_and_curated_semantic_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "seed_files": ["target.py"],
+                    "semantic_analysis_after_read": True,
+                    "semantic_analysis_path": ".local_micro_agent/semantic.md",
+                    "semantic_analysis_curated_path": ".local_micro_agent/semantic.curated.md",
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(
+                "# Code-usable facts\n"
+                "- Preserve behavior.\n\n"
+                "# Background / non-constraints\n"
+                "- Best known benchmark note: Claude reached 1,363 cycles.\n"
+            )
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            raw = repo / ".local_micro_agent" / "semantic.md"
+            curated = repo / ".local_micro_agent" / "semantic.curated.md"
+            self.assertIn("1,363", raw.read_text())
+            self.assertNotIn("1,363", curated.read_text())
+            self.assertNotIn("1,363", state.scratch["semantic_analysis"])
+
     def test_reflect_state_stores_summary_for_next_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(

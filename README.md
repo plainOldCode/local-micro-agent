@@ -46,12 +46,15 @@ across runs.
 For tasks where the source has a subtle execution model, enable
 `workflow.semantic_analysis_after_read=true`. After `READ`, the agent writes a
 domain-neutral semantic analysis artifact to
-`workflow.semantic_analysis_path` and feeds it into later `CODE` and
-`BRAINSTORM` prompts. The artifact should capture facts such as data visibility,
-read/write hazards, API contracts, lifecycle ordering, metric constraints, and
-safe implementation hooks. It is generated from the current request and source
-files, not from hidden benchmark-specific rules; existing artifacts at the same
-path are loaded back into the prompt for resumed runs.
+`workflow.semantic_analysis_path`, writes the controller-filtered prompt copy to
+`workflow.semantic_analysis_curated_path`, and feeds only the curated copy into
+later `CODE` and `BRAINSTORM` prompts. The artifact should capture facts such as
+data visibility, read/write hazards, API contracts, lifecycle ordering, current
+metric constraints, and safe implementation hooks. Background benchmark notes or
+other non-constraints are kept out of the curated prompt context. It is generated
+from the current request and source files, not from hidden benchmark-specific
+rules; existing artifacts at the same path are filtered again before resumed
+runs load them into the prompt.
 
 For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
 Rejected candidate fingerprints are then remembered inside the current run,

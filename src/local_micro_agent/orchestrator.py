@@ -339,7 +339,10 @@ class MicroAgent:
             "semantic_analysis_path", ".local_micro_agent/semantic_analysis.md"
         )
         if path.exists():
-            text = path.read_text(errors="replace").strip()
+            text = self._curate_semantic_analysis(
+                path.read_text(errors="replace"),
+                int(workflow.get("semantic_analysis_char_limit", 8000) or 8000),
+            )
             if text:
                 self.state.scratch["semantic_analysis"] = text
                 self.state.notes.append(f"Loaded semantic analysis: {path}")
@@ -363,9 +366,19 @@ class MicroAgent:
             return
         limit = int(workflow.get("semantic_analysis_char_limit", 8000) or 8000)
         analysis = self._slice_text(analysis, limit)
-        self.state.scratch["semantic_analysis"] = analysis
+        curated = self._curate_semantic_analysis(analysis, limit)
+        if not curated:
+            self.state.notes.append("Semantic analysis discarded: no code-usable facts")
+            return
+        self.state.scratch["semantic_analysis"] = curated
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(analysis + "\n")
+        curated_path = self._workflow_artifact_path(
+            "semantic_analysis_curated_path",
+            ".local_micro_agent/semantic_analysis.curated.md",
+        )
+        curated_path.parent.mkdir(parents=True, exist_ok=True)
+        curated_path.write_text(curated + "\n")
         self.state.notes.append(f"Persisted semantic analysis: {path}")
 
     async def reflect(self) -> None:
@@ -3252,6 +3265,81 @@ class MicroAgent:
         head = limit // 2
         tail = limit - head
         return text[:head] + "\n[...truncated...]\n" + text[-tail:]
+
+    @classmethod
+    def _curate_semantic_analysis(cls, text: str, limit: int) -> str:
+        """Keep only semantic context that is safe to feed into CODE attempts."""
+        code_usable_sections = {
+            "code-usable facts",
+            "hazards and ordering constraints",
+            "current task metric constraints",
+            "safe implementation hooks",
+            "execution model / data visibility",
+            "invariants and public contracts",
+            "risky transformations and required checks",
+        }
+        non_constraint_sections = {
+            "background / non-constraints",
+            "background",
+            "non-constraints",
+            "notes",
+            "leaderboard",
+        }
+        background_patterns = (
+            "best known",
+            "leaderboard",
+            "prior run",
+            "previous run",
+            "benchmark note",
+            "outside this run",
+            "claude",
+            "opus",
+        )
+        lowered_all = text.lower()
+        delayed_visibility = bool(
+            re.search(r"\bread[s]?\b.*\b(before|previous|old)\b.*\bwrite", lowered_all)
+            or re.search(r"\bwrite[s]?\b.*\b(end|after|later)\b", lowered_all)
+        )
+        lines: list[str] = []
+        current_section: str | None = None
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            section_match = re.match(r"^#{1,6}\s*(.+?)\s*$", stripped)
+            bullet_section_match = re.match(r"^[-*]\s*([A-Za-z][^:]{1,80}):\s*$", stripped)
+            if section_match:
+                current_section = section_match.group(1).strip().lower()
+            elif bullet_section_match:
+                current_section = bullet_section_match.group(1).strip().lower()
+            section_key = (current_section or "").strip()
+            if section_key in non_constraint_sections:
+                continue
+            lowered = stripped.lower()
+            if any(pattern in lowered for pattern in background_patterns):
+                continue
+            if delayed_visibility and re.search(
+                r"\b(no|not|without)\b.*\b(data\s+dependency|dependency|hazard)",
+                lowered,
+            ):
+                continue
+            if section_key and section_key not in code_usable_sections:
+                if not stripped.startswith(("-", "*")):
+                    continue
+            if stripped:
+                lines.append(raw_line.rstrip())
+
+        curated = "\n".join(lines).strip()
+        if delayed_visibility:
+            warning = (
+                "Controller validation: delayed write visibility or read-before-write "
+                "ordering is an execution hazard. Do not move producer/consumer work "
+                "into the same logical step unless the source proves the read still "
+                "observes the required value."
+            )
+            if warning not in curated:
+                curated = f"{curated}\n\n{warning}" if curated else warning
+        if not curated:
+            return ""
+        return cls._slice_text(curated, limit)
 
     def _context_for_file(self, rel_path: str, content: str) -> str:
         symbols_by_path = self.config.get("workflow", {}).get("context_symbols")
