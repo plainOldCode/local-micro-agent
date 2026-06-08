@@ -1129,20 +1129,30 @@ class MicroAgent:
         axis = str(selected_tactic.get("strategy_axis", "general_edit"))
         todo_id = f"todo-{self.state.loop_count:03d}-{axis}"
         tactic_text = selected_tactic.get("text", "")
+        tactic_stage = self._tactic_stage_for_text(tactic_text)
+        structural = tactic_stage.startswith("structural_")
         todo = {
             "todo_id": todo_id,
             "parent_tactic_id": f"brainstorm-loop-{self.state.loop_count}",
             "status": "active",
             "strategy_axis": axis,
             "family_key": self._tactic_family_key(tactic_text),
+            "tactic_stage": tactic_stage,
             "title": f"Feasibility probe for {axis}",
             "context": tactic_text,
             "micro_goal": (
-                "Implement the smallest correctness-preserving feasibility probe for this "
-                "tactic. Do not attempt the full architecture migration in one patch."
+                "Implement the smallest correctness-preserving structural scaffold/probe "
+                "for this tactic. Prefer preserving current behavior over improving the "
+                "metric in this step."
+                if structural
+                else "Implement the smallest correctness-preserving feasibility probe for "
+                "this tactic. Do not attempt the full architecture migration in one patch."
             ),
             "implementation_hint": (
-                "Prefer one narrow edit that proves the tactic changes real behavior "
+                "Start with a guarded or behavior-preserving scaffold. If enabling behavior, "
+                "scope it to the smallest safe slice and keep an easy rollback path."
+                if structural
+                else "Prefer one narrow edit that proves the tactic changes real behavior "
                 "before expanding it."
             ),
             "allowed_files": sorted(self._writable_files()),
@@ -1152,7 +1162,11 @@ class MicroAgent:
                 "mixing multiple independent tactics",
             ],
             "expected_signal": (
-                "Tests still pass, and any configured metric remains parseable. A metric "
+                "Tests still pass, configured metrics remain parseable, and the artifact "
+                "shows whether this was a scaffold, guarded probe, or expansion. Metric "
+                "improvement is optional before the expansion stage."
+                if structural
+                else "Tests still pass, and any configured metric remains parseable. A metric "
                 "improvement is welcome but not required for the first feasibility probe."
             ),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1160,6 +1174,23 @@ class MicroAgent:
         }
         self.state.scratch["active_todo"] = todo
         self._persist_todo_plan(todo)
+
+    def _tactic_stage_for_text(self, text: str) -> str:
+        if not self.config.get("workflow", {}).get("structural_tactic_lifecycle", True):
+            return "local_edit"
+        normalized = self._normalize_fingerprint_text(text)
+        if re.search(r"\b(scaffold|wrapper|shim|adapter)\b", normalized):
+            return "structural_scaffold"
+        if re.search(r"\b(expand|broaden|roll out|generalize)\b", normalized):
+            return "structural_expand"
+        structural_patterns = (
+            r"\b(rewrite|refactor|scheduler|scheduling|pipeline|lifecycle)\b",
+            r"\b(state machine|migration|parser|cache layer|architecture)\b",
+            r"\b(vector|unroll|packing|parallel|interleave|tiling)\b",
+        )
+        if any(re.search(pattern, normalized) for pattern in structural_patterns):
+            return "structural_probe"
+        return "local_edit"
 
     def _persist_todo_plan(self, todo: dict[str, Any]) -> None:
         plan_path = self._workflow_artifact_path(
@@ -3057,6 +3088,7 @@ class MicroAgent:
                     "todo_id": todo.get("todo_id"),
                     "status": todo.get("status"),
                     "strategy_axis": todo.get("strategy_axis"),
+                    "tactic_stage": todo.get("tactic_stage", "local_edit"),
                     "attempts": todo.get("attempts", 0),
                     "context": self._truncate_text(str(todo.get("context", "")), 280),
                     "last_status": (
@@ -3067,6 +3099,11 @@ class MicroAgent:
                     ),
                     "last_failure_class": (
                         last_attempt.get("failure_class")
+                        if isinstance(last_attempt, dict)
+                        else None
+                    ),
+                    "last_stage_result": (
+                        last_attempt.get("stage_result")
                         if isinstance(last_attempt, dict)
                         else None
                     ),
@@ -3427,6 +3464,8 @@ class MicroAgent:
                 "failed": record.get("failed"),
                 "strategy_axis": record.get("strategy_axis", ""),
                 "strategy_axes": record.get("strategy_axes", []),
+                "tactic_stage": record.get("tactic_stage", ""),
+                "stage_result": record.get("stage_result", ""),
                 "changes": record.get("changes", []),
             }
             for key in (
@@ -3527,6 +3566,24 @@ class MicroAgent:
         )
         return extra
 
+    def _active_todo_stage(self) -> str:
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict):
+            return "local_edit"
+        stage = str(active_todo.get("tactic_stage", "local_edit") or "local_edit")
+        if stage in {
+            "local_edit",
+            "structural_scaffold",
+            "structural_probe",
+            "structural_expand",
+        }:
+            return stage
+        return "local_edit"
+
     def _candidate_observation(
         self,
         candidate: CodeCandidate,
@@ -3558,7 +3615,12 @@ class MicroAgent:
         )
         next_actions = self._candidate_next_actions(failure_class)
         recovery_hint = self._candidate_recovery_hint(failure_class)
+        tactic_stage = self._active_todo_stage()
         observation: dict[str, Any] = {
+            "tactic_stage": tactic_stage,
+            "stage_result": self._candidate_stage_result(
+                tactic_stage, failure_class, metric=metric, failed=failed
+            ),
             "failure_class": failure_class,
             "summary": self._truncate_text(summary, 700),
             "next_actions": [
@@ -3569,6 +3631,29 @@ class MicroAgent:
             "recovery_hint": self._truncate_text(recovery_hint, 700),
         }
         return observation
+
+    @staticmethod
+    def _candidate_stage_result(
+        tactic_stage: str, failure_class: str, metric: int | None, failed: bool
+    ) -> str:
+        if tactic_stage == "structural_scaffold":
+            if not failed and metric is not None:
+                return "scaffold_validated"
+            if failure_class in {"scope_too_broad", "invariant_broken", "guard_missing"}:
+                return "scaffold_needs_smaller_scope"
+        if tactic_stage == "structural_probe":
+            if failure_class == "probe_no_signal":
+                return "probe_validated_no_metric_gain"
+            if not failed and metric is not None:
+                return "probe_validated"
+            if failure_class in {"scope_too_broad", "invariant_broken", "guard_missing"}:
+                return "probe_needs_guard_or_scope"
+        if tactic_stage == "structural_expand":
+            if failure_class == "no_improvement":
+                return "expand_no_improvement"
+            if failure_class in {"scope_too_broad", "invariant_broken", "guard_missing"}:
+                return "expand_needs_previous_probe"
+        return failure_class
 
     def _candidate_failure_class(
         self,
@@ -3608,13 +3693,25 @@ class MicroAgent:
             indicator in detail_text for indicator in patch_indicators
         ):
             return "patch_miss"
+        tactic_stage = self._active_todo_stage()
+        structural = tactic_stage.startswith("structural_")
         if any(result.exit_code != 0 for result in results):
+            if structural:
+                if re.search(r"\b(assert|invariant|mismatch|expected|actual)\b", detail_text):
+                    return "invariant_broken"
+                return "scope_too_broad"
             return "correctness_failure"
         if metric is None and (failed or results):
             return "metric_missing"
         if metric is not None and not failed and status_text.startswith("rejected"):
+            if tactic_stage == "structural_scaffold":
+                return "scaffold_validated"
+            if tactic_stage == "structural_probe":
+                return "probe_no_signal"
             return "no_improvement"
         if failed:
+            if structural:
+                return "scope_too_broad"
             return "correctness_failure"
         return "rejected"
 
@@ -3652,6 +3749,18 @@ class MicroAgent:
                 "Use the failing command output as the next hypothesis.",
                 "Make a smaller semantic change that preserves observed invariants.",
             ],
+            "scope_too_broad": [
+                "Retry the same structural tactic at a smaller guarded scope.",
+                "Add or tighten the invariant guard before expanding behavior.",
+            ],
+            "invariant_broken": [
+                "Identify the exact invariant broken by the test failure.",
+                "Preserve the old behavior by default, then enable only a guarded probe.",
+            ],
+            "guard_missing": [
+                "Add an explicit safety predicate before applying the structural change.",
+                "Prefer a scaffold that can fall back to the original path.",
+            ],
             "metric_missing": [
                 "Preserve the configured metric output path and format.",
                 "Run the benchmark command locally before changing tactic.",
@@ -3659,6 +3768,14 @@ class MicroAgent:
             "no_improvement": [
                 "Do not repeat the same tactic shape.",
                 "Keep correctness, but change the bottleneck hypothesis or edit location.",
+            ],
+            "probe_no_signal": [
+                "Keep the validated structural probe, but change the measured scope.",
+                "Do not treat this as a correctness failure; seek a narrower performance signal.",
+            ],
+            "scaffold_validated": [
+                "Build the next guarded probe on this scaffold.",
+                "Keep the scaffold behavior-preserving until a probe has evidence.",
             ],
             "duplicate_variant": [
                 "Change the implementation family or touched code region.",
@@ -3692,12 +3809,30 @@ class MicroAgent:
             "correctness_failure": (
                 "Recover from the concrete failing assertion/command before optimizing further."
             ),
+            "scope_too_broad": (
+                "Treat this as structural learning, not tactic failure: shrink scope, add guards, "
+                "and preserve fallback behavior before retrying."
+            ),
+            "invariant_broken": (
+                "Recover by naming the broken invariant and making the next structural probe "
+                "behavior-preserving by default."
+            ),
+            "guard_missing": (
+                "Recover by adding an explicit guard or fallback path before enabling the change."
+            ),
             "metric_missing": (
                 "Recover by restoring benchmark/metric observability before judging speed."
             ),
             "no_improvement": (
                 "Treat this as valid negative performance evidence; vary the tactic, axis, "
                 "or edit site rather than retrying the same shape."
+            ),
+            "probe_no_signal": (
+                "Treat this as a validated probe without performance gain; expand or move the "
+                "probe only if the scaffold stayed correct."
+            ),
+            "scaffold_validated": (
+                "Persist the scaffold and ask the next CODE attempt for one guarded probe."
             ),
             "duplicate_variant": (
                 "Recover by making a substantively different candidate, not a renamed variant."
@@ -4159,9 +4294,41 @@ class MicroAgent:
             )
         if self._is_patch_application_failure_record(record):
             record["budget_counted"] = False
+        if self._is_structural_learning_record(record):
+            record["budget_counted"] = False
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         self._append_todo_attempt(record)
+
+    def _is_structural_learning_record(self, record: dict[str, Any]) -> bool:
+        if not self.config.get("workflow", {}).get("structural_tactic_lifecycle", True):
+            return False
+        todo_id = str(record.get("todo_id", ""))
+        if not todo_id:
+            return False
+        stage = str(record.get("tactic_stage", ""))
+        if not stage.startswith("structural_"):
+            return False
+        failure_class = str(record.get("failure_class", ""))
+        if failure_class not in {"scope_too_broad", "invariant_broken", "guard_missing"}:
+            return False
+        soft_limit = int(
+            self.config.get("workflow", {}).get("structural_tactic_soft_failures", 2)
+            or 2
+        )
+        prior_soft = 0
+        for attempt in self._recent_todo_attempts(todo_id):
+            if (
+                isinstance(attempt, dict)
+                and attempt.get("budget_counted") is False
+                and str(attempt.get("failure_class", "")) in {
+                    "scope_too_broad",
+                    "invariant_broken",
+                    "guard_missing",
+                }
+            ):
+                prior_soft += 1
+        return prior_soft < soft_limit
 
     def _active_todo_id(self) -> str:
         if self._todo_contract_soft_now():
@@ -4191,6 +4358,8 @@ class MicroAgent:
             "failed": candidate_record.get("failed"),
             "strategy_axis": candidate_record.get("strategy_axis"),
             "strategy_axes": candidate_record.get("strategy_axes"),
+            "tactic_stage": candidate_record.get("tactic_stage"),
+            "stage_result": candidate_record.get("stage_result"),
             "reason": candidate_record.get("reason"),
         }
         if candidate_record.get("budget_counted") is False:
@@ -4236,8 +4405,29 @@ class MicroAgent:
             return
         for todo in todos:
             if isinstance(todo, dict) and todo.get("todo_id") == attempt.get("todo_id"):
-                todo["last_patch_failure"] = attempt
-                todo["patch_failures"] = int(todo.get("patch_failures", 0) or 0) + 1
+                todo["last_non_budget_attempt"] = attempt
+                todo["non_budget_attempts"] = int(todo.get("non_budget_attempts", 0) or 0) + 1
+                patch_detail = self._normalize_fingerprint_text(
+                    " ".join(
+                        str(attempt.get(key, ""))
+                        for key in ("failure_class", "failure_detail", "no_change_reason")
+                    )
+                )
+                if attempt.get("failure_class") == "patch_miss" or any(
+                    indicator in patch_detail
+                    for indicator in (
+                        "target not found",
+                        "patch rejected",
+                        "patch apply failed",
+                        "replacement target is ambiguous",
+                        "no writable file content changed",
+                        "no changes applied",
+                        "no-op",
+                        "only changes comments",
+                    )
+                ):
+                    todo["last_patch_failure"] = attempt
+                    todo["patch_failures"] = int(todo.get("patch_failures", 0) or 0) + 1
                 self.state.scratch["active_todo"] = todo
                 if active_path.exists() and plan.get("active_todo_id") == todo.get("todo_id"):
                     active_path.write_text(
@@ -4296,7 +4486,10 @@ class MicroAgent:
         self, attempt: dict[str, Any], previous_status: Any, next_attempts: int
     ) -> str:
         status = str(attempt.get("status", ""))
+        failure_class = str(attempt.get("failure_class", ""))
         if status in {"improved", "accepted"}:
+            return "validated"
+        if failure_class in {"scaffold_validated", "probe_no_signal"}:
             return "validated"
         if not status.startswith("rejected"):
             return "attempted"

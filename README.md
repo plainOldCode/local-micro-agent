@@ -109,6 +109,17 @@ default and summarized back into later `CODE` prompts. Useful knobs include
 `adaptive_gate_all_skipped_relax_streak`, `adaptive_gate_recent_limit`, and
 `adaptive_gate_decisions_path`.
 
+Structural tactics such as schedulers, parser rewrites, cache layers, lifecycle
+refactors, and vectorization often need a scaffold/probe/expand lifecycle rather
+than a single metric-winning patch. With
+`workflow.structural_tactic_lifecycle=true`, active todos whose tactic text
+looks structural are tagged with `tactic_stage` such as `structural_probe`.
+Their candidate records include `stage_result`, and early correctness failures
+are recorded as structural learning classes like `scope_too_broad` or
+`invariant_broken` instead of immediately exhausting the todo. The controller
+allows up to `workflow.structural_tactic_soft_failures` non-budgeted structural
+learning failures before normal todo budgeting resumes.
+
 Use `workflow.brainstorm_open_novelty_lanes` to give `BRAINSTORM` a compact
 menu of still-open exploration lanes. These lanes are included whenever
 brainstorming runs by default, even before the all-skipped/new-family gate

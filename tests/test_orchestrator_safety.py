@@ -746,6 +746,97 @@ Background / non-constraints
             self.assertNotIn("1,363", curated.read_text())
             self.assertNotIn("1,363", state.scratch["semantic_analysis"])
 
+    def test_structural_tactic_creates_structural_probe_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            agent._create_active_todo_from_selected_tactic(
+                {
+                    "strategy_axis": "performance",
+                    "family_key": "scheduler_rewrite",
+                    "text": (
+                        "family_key: scheduler_rewrite\n"
+                        "Rewrite the scheduler with a guarded pipeline probe."
+                    ),
+                }
+            )
+
+            todo = agent.state.scratch["active_todo"]
+            self.assertEqual(todo["tactic_stage"], "structural_probe")
+            self.assertIn("scaffold/probe", todo["micro_goal"])
+
+    def test_structural_correctness_failure_does_not_exhaust_todo_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"raise AssertionError('invariant mismatch')\""],
+                    "candidate_queue": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "todo_plan_path": ".local_micro_agent/todo_plan.json",
+                    "active_todo_path": ".local_micro_agent/active_todo.json",
+                    "todo_attempts_path": ".local_micro_agent/todo_attempts.jsonl",
+                    "todo_attempt_budget": 1,
+                    "todo_soft_until_first_improvement": False,
+                    "structural_tactic_lifecycle": True,
+                    "structural_tactic_soft_failures": 2,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            todo = {
+                "todo_id": "todo-000-performance",
+                "status": "active",
+                "strategy_axis": "performance",
+                "family_key": "scheduler_rewrite",
+                "tactic_stage": "structural_probe",
+                "context": "Rewrite scheduler with a guarded probe.",
+                "attempts": 0,
+            }
+            state.scratch["active_todo"] = todo
+            agent._persist_todo_plan(todo)
+            candidate = CodeCandidate(
+                "structural",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="todo-000-performance guarded scheduler probe",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "todo-000-performance guarded scheduler probe",
+                strategy_axis="performance",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
+            self.assertIn('"failure_class": "invariant_broken"', history)
+            self.assertIn('"budget_counted": false', history)
+            active_todo = json.loads((repo / ".local_micro_agent" / "active_todo.json").read_text())
+            self.assertEqual(active_todo["status"], "active")
+            self.assertEqual(active_todo.get("attempts", 0), 0)
+            self.assertEqual(active_todo.get("non_budget_attempts"), 1)
+            self.assertNotIn("patch_failures", active_todo)
+
     def test_reflect_state_stores_summary_for_next_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(
