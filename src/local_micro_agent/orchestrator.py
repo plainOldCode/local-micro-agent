@@ -26,7 +26,7 @@ from .prompts import (
     semantic_analysis_prompt,
     test_prompt,
 )
-from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
+from .state import AgentState, AgentStateName, CodeChange, ExternalContext, FileSnapshot, TestResult
 from .strategy import (
     DEFAULT_STRATEGY_AXIS_GUIDANCE,
     DEFAULT_STRATEGY_AXIS_KEYWORDS,
@@ -399,6 +399,7 @@ class MicroAgent:
         return self.state
 
     async def plan(self) -> None:
+        await self._load_external_contexts()
         seeded_plan = self.config.get("workflow", {}).get("plan_markdown")
         if seeded_plan:
             self.state.plan_markdown = seeded_plan.strip()
@@ -430,6 +431,7 @@ class MicroAgent:
             content = await self.mcp.read_file(str(abs_path))
             content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
+        await self._load_external_contexts()
         await self._maybe_refresh_semantic_analysis()
         self.state.current = AgentStateName.CODE
 
@@ -3505,6 +3507,104 @@ class MicroAgent:
         if path.is_absolute():
             return path
         return self.state.repo_root / path
+
+    async def _load_external_contexts(self) -> None:
+        specs = self._external_context_specs()
+        if not specs:
+            self.state.external_context = []
+            return
+        workflow = self.config.get("workflow", {})
+        total_limit = int(workflow.get("external_context_char_limit", 12000) or 0)
+        item_limit = int(workflow.get("external_context_item_char_limit", 6000) or 0)
+        if total_limit <= 0 or item_limit <= 0:
+            self.state.external_context = []
+            return
+        contexts: list[ExternalContext] = []
+        remaining = total_limit
+        for spec in specs:
+            raw_path = str(spec.get("path") or "").strip()
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            abs_path = path if path.is_absolute() else self.state.repo_root / path
+            source = str(spec.get("source") or raw_path)
+            if remaining <= 0:
+                break
+            try:
+                content = await self.mcp.read_file(str(abs_path))
+            except FileNotFoundError:
+                self.state.notes.append(f"External context file not found: {source}")
+                continue
+            sha = hashlib.sha256(content.encode()).hexdigest()
+            budget = min(item_limit, remaining)
+            sliced = self._slice_text(content, budget)
+            remaining -= len(sliced)
+            contexts.append(
+                ExternalContext(
+                    kind=str(spec.get("kind") or "hint"),
+                    source=source,
+                    title=str(spec.get("title") or self._external_context_title(content, source)),
+                    content=sliced,
+                    sha256=sha,
+                    trust=str(spec.get("trust") or "advisory"),
+                    fetched_at=spec.get("fetched_at"),
+                )
+            )
+        self.state.external_context = contexts
+        sources_key = tuple((item.source, item.sha256) for item in contexts)
+        if contexts and self.state.scratch.get("external_context_sources") != sources_key:
+            self.state.notes.append(
+                "Loaded external context: " + ", ".join(item.source for item in contexts)
+            )
+            self.state.scratch["external_context_sources"] = sources_key
+
+    def _external_context_specs(self) -> list[dict[str, Any]]:
+        workflow = self.config.get("workflow", {})
+        configured = workflow.get("external_context_paths")
+        if configured in (None, "", []):
+            return []
+        if not isinstance(configured, list):
+            configured = [configured]
+        specs: list[dict[str, Any]] = []
+        for item in configured:
+            if isinstance(item, dict):
+                raw_path = item.get("path") or item.get("source")
+                if not raw_path:
+                    continue
+                spec = {
+                    "path": str(raw_path),
+                    "source": str(item.get("source") or raw_path),
+                    "title": str(item.get("title") or ""),
+                    "kind": str(item.get("kind") or "hint"),
+                    "trust": str(item.get("trust") or "advisory"),
+                }
+                fetched_at = item.get("fetched_at")
+                if fetched_at:
+                    spec["fetched_at"] = str(fetched_at)
+                specs.append(spec)
+            else:
+                raw_path = str(item).strip()
+                if raw_path:
+                    specs.append(
+                        {
+                            "path": raw_path,
+                            "source": raw_path,
+                            "title": "",
+                            "kind": "hint",
+                            "trust": "advisory",
+                        }
+                    )
+        return specs
+
+    @staticmethod
+    def _external_context_title(content: str, source: str) -> str:
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                title = stripped.lstrip("#").strip()
+                if title:
+                    return title
+        return Path(source).name or source
 
     @staticmethod
     def _snapshot_patch(

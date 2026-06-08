@@ -56,6 +56,16 @@ from the current request and source files, not from hidden benchmark-specific
 rules; existing artifacts at the same path are filtered again before resumed
 runs load them into the prompt.
 
+Use `workflow.external_context_paths` to inject read-only advisory context packs
+such as Markdown notes from a human, prior high-quality analysis, repo docs, or
+later fetched web references. These packs are stored separately from source file
+context, carry source/hash/trust metadata, and are labeled as advisory in
+`PLAN`, `READ`, `SEMANTIC_ANALYSIS`, `REFLECT`, `BRAINSTORM`, and `CODE`
+prompts. Local source files, tests, and the current user request remain
+authoritative. Bound the total and per-item prompt size with
+`workflow.external_context_char_limit` and
+`workflow.external_context_item_char_limit`.
+
 For non-code freeform reasoning, enable `workflow.reasoning_lane_enabled=true`
 and map `workflow.reasoning_lane_model_role` to a low-temperature provider with
 thinking enabled, for example `models.reasoner = "qwen_reason"`. By default the
@@ -272,6 +282,8 @@ being silently mixed into clean-eval prompts.
 Use `workflow.project_instruction_files` to name instruction files explicitly.
 Use `workflow.project_context_files` to fully override the auto-detected context
 set, or set `workflow.readme_first=false` for controlled experiments.
+Use `workflow.external_context_paths` for explicit advisory context that should
+be visible to prompts without being treated as local source code.
 
 Seeded workflow options are for resume and harness experiments, not the normal
 first look at a repository:

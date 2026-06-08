@@ -23,6 +23,17 @@ class FileSnapshot:
 
 
 @dataclass
+class ExternalContext:
+    kind: str
+    source: str
+    title: str
+    content: str
+    sha256: str
+    trust: str = "advisory"
+    fetched_at: str | None = None
+
+
+@dataclass
 class CodeChange:
     path: str
     reason: str
@@ -63,6 +74,7 @@ class AgentState:
     plan_markdown: str = ""
     planned_files: list[str] = field(default_factory=list)
     file_context: list[FileSnapshot] = field(default_factory=list)
+    external_context: list[ExternalContext] = field(default_factory=list)
     proposed_changes: list[CodeChange] = field(default_factory=list)
     test_results: list[TestResult] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)

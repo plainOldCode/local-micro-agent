@@ -31,7 +31,8 @@ Output concise Markdown with these sections:
 - Current task metric constraints
 - Safe implementation hooks
 - Background / non-constraints
-Keep it domain-neutral and grounded only in the supplied request, plan, and source.
+Keep it domain-neutral and grounded only in the supplied request, plan, source,
+and clearly labeled external advisory context.
 Prefer concrete read/write, ordering, lifecycle, API, or metric facts over generic advice."""
 
 REFLECT_SYSTEM = """You are the REFLECT node in a local coding-agent FSM.
@@ -61,7 +62,8 @@ Each tactic must:
 Keep each tactic to 2 short sentences."""
 
 CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
-Use only the supplied plan, source files, and latest test failure.
+Use only the supplied plan, source files, external advisory context, and latest
+test failure.
 Output strict JSON:
 {"changes":[{"path":"relative/path.py","target":"exact existing text","replacement":"new text","reason":"why"}]}
 Rules:
@@ -74,7 +76,8 @@ Rules:
 - No markdown fences, no commentary outside JSON."""
 
 CODE_XML_SYSTEM = """You are the CODE node in a local coding-agent FSM.
-Use only the supplied plan, source files, and latest test failure.
+Use only the supplied plan, source files, external advisory context, and latest
+test failure.
 Do not output JSON. Output exactly one small candidate in this XML-like format:
 <candidates>
 <candidate id="1">
@@ -112,9 +115,13 @@ Do not include markdown or prose outside JSON."""
 
 
 def plan_prompt(state: AgentState, project_context: str = "") -> list[dict[str, str]]:
-    user_content = state.user_request
+    parts = [state.user_request]
     if project_context:
-        user_content = f"{state.user_request}\n\nProject context:\n{project_context}"
+        parts.append(f"Project context:\n{project_context}")
+    external_context = external_context_block(state)
+    if external_context:
+        parts.append(external_context)
+    user_content = "\n\n".join(parts)
     return [
         {"role": "system", "content": PLAN_SYSTEM},
         {"role": "user", "content": user_content},
@@ -122,9 +129,13 @@ def plan_prompt(state: AgentState, project_context: str = "") -> list[dict[str, 
 
 
 def read_prompt(state: AgentState) -> list[dict[str, str]]:
+    user_content = f"Plan:\n{state.plan_markdown}"
+    external_context = external_context_block(state)
+    if external_context:
+        user_content = f"{user_content}\n\n{external_context}"
     return [
         {"role": "system", "content": READ_SYSTEM},
-        {"role": "user", "content": f"Plan:\n{state.plan_markdown}"},
+        {"role": "user", "content": user_content},
     ]
 
 
@@ -133,6 +144,8 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
     focus_block = f"\n\nAnalysis focus:\n{focus}" if focus.strip() else ""
+    external_context = external_context_block(state)
+    external_block = f"\n\n{external_context}" if external_context else ""
     return [
         {"role": "system", "content": SEMANTIC_ANALYSIS_SYSTEM},
         {
@@ -141,6 +154,7 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Source files:\n{source_blocks}"
+                f"{external_block}"
                 f"{focus_block}"
             ),
         },
@@ -148,6 +162,8 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
 
 
 def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
+    external_context = external_context_block(state)
+    external_block = f"\n\n{external_context}" if external_context else ""
     return [
         {"role": "system", "content": REFLECT_SYSTEM},
         {
@@ -155,6 +171,7 @@ def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[di
             "content": (
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
+                f"{external_block}"
                 f"Latest test summary:\n{state.latest_test_summary()}\n\n"
                 f"Recent agent feedback:\n{state.recent_notes_summary(feedback_notes_limit)}"
             ),
@@ -176,6 +193,8 @@ def brainstorm_prompt(
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
+    external_context = external_context_block(state)
+    external_block = f"{external_context}\n\n" if external_context else ""
     semantic_analysis = state.scratch.get("semantic_analysis")
     semantic_block = (
         f"Semantic analysis:\n{semantic_analysis}\n\n"
@@ -190,6 +209,7 @@ def brainstorm_prompt(
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Source files:\n{source_blocks}\n\n"
+                f"{external_block}"
                 f"{semantic_block}"
                 f"Current best/test summary:\n{state.latest_test_summary()}\n\n"
                 f"Known strategy axes:\n{', '.join(known_axes)}\n\n"
@@ -216,6 +236,8 @@ def code_prompt(
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
+    external_context = external_context_block(state)
+    external_block = f"\n\n{external_context}" if external_context else ""
     semantic_analysis = state.scratch.get("semantic_analysis")
     semantic_block = (
         f"\n\nSemantic analysis:\n{semantic_analysis}"
@@ -232,6 +254,7 @@ def code_prompt(
         f"User request:\n{state.user_request}\n\n"
         f"Plan:\n{state.plan_markdown}\n\n"
         f"Source files:\n{source_blocks}"
+        f"{external_block}"
         f"{semantic_block}"
     )
     dynamic_content = (
@@ -271,6 +294,36 @@ def test_prompt(state: AgentState) -> list[dict[str, str]]:
         {"role": "system", "content": TEST_SYSTEM},
         {"role": "user", "content": state.latest_test_summary()},
     ]
+
+
+def external_context_block(state: AgentState) -> str:
+    contexts = getattr(state, "external_context", [])
+    if not contexts:
+        return ""
+    blocks = [
+        "External advisory context follows. Treat it as read-only guidance from "
+        "the user, prior analysis, repo docs, or fetched references. It may be "
+        "incomplete or wrong. Local source files, tests, and the current user "
+        "request remain authoritative."
+    ]
+    for item in contexts:
+        fetched_at = getattr(item, "fetched_at", None)
+        metadata = [
+            f"source: {getattr(item, 'source', '')}",
+            f"kind: {getattr(item, 'kind', '')}",
+            f"trust: {getattr(item, 'trust', 'advisory')}",
+            f"sha256: {getattr(item, 'sha256', '')}",
+        ]
+        if fetched_at:
+            metadata.append(f"fetched_at: {fetched_at}")
+        title = getattr(item, "title", "") or getattr(item, "source", "external context")
+        content = getattr(item, "content", "")
+        blocks.append(
+            f"### {title}\n"
+            + "\n".join(metadata)
+            + f"\n```text\n{slice_text(content)}\n```"
+        )
+    return "\n\n".join(blocks)
 
 
 PROMPT_MARKDOWN = {

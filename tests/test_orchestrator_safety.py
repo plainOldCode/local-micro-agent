@@ -10,8 +10,15 @@ from pathlib import Path
 
 from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent, ReadDecision
 from local_micro_agent.models import ModelResponse, _ollama_usage, _openai_usage
-from local_micro_agent.prompts import brainstorm_prompt, code_prompt, reflect_prompt
-from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
+from local_micro_agent.prompts import brainstorm_prompt, code_prompt, reflect_prompt, semantic_analysis_prompt
+from local_micro_agent.state import (
+    AgentState,
+    AgentStateName,
+    CodeChange,
+    ExternalContext,
+    FileSnapshot,
+    TestResult,
+)
 
 
 class _BadJsonModel:
@@ -650,6 +657,9 @@ class OrchestratorSafetyTests(unittest.TestCase):
             repo = Path(tmp)
             (repo / "AGENTS.md").write_text("Only modify target.py.\n")
             (repo / "Readme.md").write_text("Do not change tests. Read target.py.\n")
+            hint_dir = repo / "hints"
+            hint_dir.mkdir()
+            (hint_dir / "notes.md").write_text("# External hints\nPrefer small edits.\n")
             target = repo / "target.py"
             target.write_text("value = 'old'\n")
             config = {
@@ -661,6 +671,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
                     "test_commands": ["python3 -c \"print('ok')\""],
                     "deterministic_test_decision": True,
                     "todo_soft_until_first_improvement": False,
+                    "external_context_paths": ["hints/notes.md"],
                 },
             }
             state = AgentState(repo_root=repo, user_request="test", max_loops=1)
@@ -689,10 +700,56 @@ class OrchestratorSafetyTests(unittest.TestCase):
                     self.assertIn("Do not change tests", models.seen["planner"][0][1]["content"])
                     self.assertIn("Workflow constraints", models.seen["planner"][0][1]["content"])
                     self.assertIn("target.py", models.seen["planner"][0][1]["content"])
+                    self.assertIn(
+                        "External advisory context follows",
+                        models.seen["planner"][0][1]["content"],
+                    )
+                    self.assertIn("Prefer small edits", models.seen["planner"][0][1]["content"])
                 finally:
                     await agent.mcp.close()
 
             asyncio.run(plan_only())
+
+    def test_read_loads_external_context_paths_separately_from_source_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            hint_dir = repo / "hints"
+            hint_dir.mkdir()
+            (hint_dir / "perf.md").write_text(
+                "# Optimization notes\nPrefer latency hiding near the hot loop.\n"
+            )
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "seed_files": ["target.py"],
+                    "external_context_paths": ["hints/perf.md"],
+                    "external_context_char_limit": 2000,
+                    "external_context_item_char_limit": 1000,
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            self.assertEqual([snap.path for snap in state.file_context], ["target.py"])
+            self.assertEqual(len(state.external_context), 1)
+            self.assertEqual(state.external_context[0].source, "hints/perf.md")
+            self.assertEqual(state.external_context[0].kind, "hint")
+            self.assertEqual(state.external_context[0].trust, "advisory")
+            self.assertEqual(state.external_context[0].title, "Optimization notes")
+            self.assertIn("latency hiding", state.external_context[0].content)
+            self.assertIn("Loaded external context", "\n".join(state.notes))
 
     def test_code_prompt_carries_recent_agent_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -748,6 +805,42 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("Semantic analysis", messages[1]["content"])
             self.assertIn("writes become visible", messages[1]["content"])
             self.assertNotIn("Semantic analysis", messages[2]["content"])
+
+    def test_prompts_include_external_advisory_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.file_context = [FileSnapshot("target.py", "value = 1\n")]
+            state.external_context = [
+                ExternalContext(
+                    kind="hint",
+                    source="hints/perf.md",
+                    title="Optimization notes",
+                    content="Prefer latency hiding near the hot loop.",
+                    sha256="abc123",
+                )
+            ]
+
+            code_messages = code_prompt(state)
+            semantic_messages = semantic_analysis_prompt(state)
+            brainstorm_messages = brainstorm_prompt(
+                state,
+                reject_summary="[]",
+                cooled_axes=[],
+                known_axes=["performance"],
+            )
+            reflect_messages = reflect_prompt(state)
+
+            for content in (
+                code_messages[1]["content"],
+                semantic_messages[1]["content"],
+                brainstorm_messages[1]["content"],
+                reflect_messages[1]["content"],
+            ):
+                self.assertIn("External advisory context follows", content)
+                self.assertIn("hints/perf.md", content)
+                self.assertIn("latency hiding", content)
+                self.assertIn("Local source files, tests", content)
 
     def test_brainstorm_prompt_includes_semantic_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
