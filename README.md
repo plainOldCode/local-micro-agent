@@ -199,6 +199,13 @@ caching, Anthropic cache breakpoints, Gemini cached content, or vLLM/SGLang
 automatic prefix caching. Avoid placing volatile timestamps, request IDs, or
 tool-output snippets before stable repo context if cache hit rate matters.
 
+By default, `workflow.current_source_context_before_code=true` rereads writable
+files immediately before each CODE attempt and appends the current source excerpt
+to the dynamic suffix. This keeps the stable prefix cache-friendly while giving
+the model fresh target/search text after accepted candidates have changed the
+repo. Use `workflow.current_source_context_char_limit` to bound that refreshed
+context.
+
 Set `workflow.record_candidate_artifacts=true` to persist candidate-level
 provenance under `.local_micro_agent/candidate_artifacts`. Each candidate gets a
 metadata JSON file, and candidates that apply edits also get a unified diff; test

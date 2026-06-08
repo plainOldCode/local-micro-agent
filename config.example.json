@@ -48,6 +48,8 @@
     "reflect_before_retry": false,
     "code_output_format": "json",
     "prompt_cache_friendly_layout": true,
+    "current_source_context_before_code": true,
+    "current_source_context_char_limit": 12000,
     "log_raw_model_outputs": false,
     "raw_model_output_dir": ".local_micro_agent/raw_model_outputs",
     "candidate_queue": false,

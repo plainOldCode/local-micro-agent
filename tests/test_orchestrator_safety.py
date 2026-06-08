@@ -3130,6 +3130,60 @@ value = 'fast'
             self.assertIn("Latest test summary:", messages[1]["content"])
             self.assertIn("dynamic feedback", messages[1]["content"])
 
+    def test_code_attempt_includes_refreshed_writable_source_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'current'\n")
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "prompt_cache_friendly_layout": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.CODE,
+                max_loops=1,
+            )
+            state.plan_markdown = "seeded"
+            state.planned_files = ["target.py"]
+            state.file_context = [FileSnapshot("target.py", "value = 'stale'\n")]
+            models = _RoleModelManager(
+                {
+                    "coder": (
+                        '{"changes":[{"path":"target.py",'
+                        '"target":"value = \'current\'\\n",'
+                        '"replacement":"value = \'new\'\\n",'
+                        '"reason":"edit current source"}]}'
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            async def code_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_once())
+
+            coder_messages = models.seen["coder"][0]
+            dynamic_content = coder_messages[-1]["content"]
+            self.assertIn("Current writable source context follows", dynamic_content)
+            self.assertIn("value = 'current'", dynamic_content)
+            self.assertNotIn("value = 'stale'", dynamic_content)
+            self.assertEqual(target.read_text(), "value = 'new'\n")
+
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -1314,6 +1314,15 @@ class MicroAgent:
                     else:
                         messages.append({"role": "system", "content": content})
 
+                current_source_context = await self._format_current_source_context()
+                if current_source_context:
+                    add_runtime_context(
+                        "Current writable source context follows. This is reread "
+                        "immediately before this CODE attempt and supersedes the "
+                        "stable Source files block above when they differ. Copy "
+                        "target/search text from this current context.\n"
+                        f"{current_source_context}"
+                    )
                 if self.config.get("workflow", {}).get("candidate_queue"):
                     messages = [*messages, self._candidate_queue_message(output_format)]
                 axis_contract = self._format_axis_contract()
@@ -3482,6 +3491,28 @@ class MicroAgent:
         tail = limit - head
         return text[:head] + "\n[...truncated...]\n" + text[-tail:]
 
+    async def _format_current_source_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("current_source_context_before_code", True):
+            return ""
+        paths = sorted(self._writable_files())
+        if not paths:
+            return ""
+        limit = int(workflow.get("current_source_context_char_limit", 12000) or 12000)
+        per_file_limit = max(1000, limit // max(len(paths), 1))
+        blocks: list[str] = []
+        for rel_path in paths:
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / rel_path))
+            except FileNotFoundError:
+                blocks.append(f"### {rel_path}\n<missing>")
+                continue
+            content = self._context_for_file(rel_path, content, record_note=False)
+            blocks.append(
+                f"### {rel_path}\n```text\n{self._slice_text(content, per_file_limit)}\n```"
+            )
+        return self._slice_text("\n\n".join(blocks), limit)
+
     @classmethod
     def _curate_semantic_analysis(cls, text: str, limit: int) -> str:
         """Keep only semantic context that is safe to feed into CODE attempts."""
@@ -3562,7 +3593,7 @@ class MicroAgent:
             return ""
         return cls._slice_text(curated, limit)
 
-    def _context_for_file(self, rel_path: str, content: str) -> str:
+    def _context_for_file(self, rel_path: str, content: str, record_note: bool = True) -> str:
         symbols_by_path = self.config.get("workflow", {}).get("context_symbols")
         if not isinstance(symbols_by_path, dict):
             return content
@@ -3570,15 +3601,18 @@ class MicroAgent:
         if not symbols:
             return content
         if not isinstance(symbols, list):
-            self.state.notes.append(f"Ignored non-list context_symbols for {rel_path}")
+            if record_note:
+                self.state.notes.append(f"Ignored non-list context_symbols for {rel_path}")
             return content
         excerpt = self._extract_python_symbols(content, [str(symbol) for symbol in symbols])
         if not excerpt:
-            self.state.notes.append(f"No requested context symbols found in {rel_path}")
+            if record_note:
+                self.state.notes.append(f"No requested context symbols found in {rel_path}")
             return content
-        self.state.notes.append(
-            f"Using symbol context for {rel_path}: {', '.join(str(symbol) for symbol in symbols)}"
-        )
+        if record_note:
+            self.state.notes.append(
+                f"Using symbol context for {rel_path}: {', '.join(str(symbol) for symbol in symbols)}"
+            )
         return excerpt
 
     @staticmethod
