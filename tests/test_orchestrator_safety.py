@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent
+from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent, ReadDecision
+from local_micro_agent.models import ModelResponse, _ollama_usage, _openai_usage
 from local_micro_agent.prompts import brainstorm_prompt, code_prompt, reflect_prompt
 from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
 
@@ -47,6 +48,28 @@ class _StaticModelManager:
 
     def get(self, role):
         return _StaticModel(self.output)
+
+
+class _UsageModel:
+    async def chat(self, messages):
+        return ModelResponse(
+            '{"changes":[]}',
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "provider_prompt_eval_count": 10,
+                "provider_eval_count": 5,
+                "provider_prompt_eval_duration_ns": 2_000_000_000,
+                "provider_eval_duration_ns": 1_000_000_000,
+                "provider_total_duration_ns": 3_000_000_000,
+            },
+        )
+
+
+class _UsageModelManager:
+    def get(self, role):
+        return _UsageModel()
 
 
 class _StreamingModel:
@@ -158,6 +181,41 @@ def takehome_workflow(**overrides: object) -> dict:
 
 
 class OrchestratorSafetyTests(unittest.TestCase):
+    def test_ollama_usage_maps_provider_token_stats(self) -> None:
+        usage = _ollama_usage(
+            {
+                "prompt_eval_count": 12,
+                "eval_count": 7,
+                "prompt_eval_duration": 3_000_000_000,
+                "eval_duration": 1_400_000_000,
+                "total_duration": 5_000_000_000,
+            }
+        )
+
+        self.assertEqual(usage["prompt_tokens"], 12)
+        self.assertEqual(usage["completion_tokens"], 7)
+        self.assertEqual(usage["total_tokens"], 19)
+        self.assertEqual(usage["provider_prompt_eval_count"], 12)
+        self.assertEqual(usage["provider_eval_count"], 7)
+        self.assertEqual(usage["provider_prompt_eval_duration_ns"], 3_000_000_000)
+        self.assertEqual(usage["provider_eval_duration_ns"], 1_400_000_000)
+        self.assertEqual(usage["provider_total_duration_ns"], 5_000_000_000)
+
+    def test_openai_usage_maps_token_stats(self) -> None:
+        usage = _openai_usage(
+            {
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 13,
+                    "total_tokens": 24,
+                }
+            }
+        )
+
+        self.assertEqual(usage["prompt_tokens"], 11)
+        self.assertEqual(usage["completion_tokens"], 13)
+        self.assertEqual(usage["total_tokens"], 24)
+
     def test_log_prefix_includes_timestamp(self) -> None:
         output = io.StringIO()
 
@@ -384,6 +442,91 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(model_events[0]["call_site"], "json_call")
             self.assertGreater(model_events[0]["prompt_chars"], 0)
             self.assertGreater(model_events[0]["output_chars"], 0)
+
+    def test_profile_agent_records_model_token_rates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"profile_agent": True},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _UsageModelManager()
+
+            decision = asyncio.run(
+                agent._json_call(
+                    "coder",
+                    [{"role": "user", "content": "make no changes"}],
+                    schema=CodeDecision,
+                )
+            )
+
+            self.assertIsNotNone(decision)
+            profile_path = repo / ".local_micro_agent" / "profile_events.jsonl"
+            rows = [
+                json.loads(line)
+                for line in profile_path.read_text().splitlines()
+                if line.strip()
+            ]
+            model_event = next(row for row in rows if row["event_type"] == "model_call")
+            self.assertEqual(model_event["prompt_tokens"], 10)
+            self.assertEqual(model_event["completion_tokens"], 5)
+            self.assertEqual(model_event["total_tokens"], 15)
+            self.assertEqual(model_event["provider_prompt_eval_count"], 10)
+            self.assertEqual(model_event["provider_eval_count"], 5)
+            self.assertEqual(model_event["provider_prompt_eval_duration_ms"], 2000.0)
+            self.assertEqual(model_event["provider_eval_duration_ms"], 1000.0)
+            self.assertEqual(model_event["provider_total_duration_ms"], 3000.0)
+            self.assertEqual(model_event["prompt_tokens_per_second"], 5.0)
+            self.assertEqual(model_event["completion_tokens_per_second"], 5.0)
+            self.assertEqual(model_event["total_tokens_per_second"], 5.0)
+            self.assertGreater(model_event["wall_tokens_per_second"], 0)
+
+    def test_reasoning_lane_routes_freeform_calls_without_touching_json_or_coder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {
+                    "default": "exact",
+                    "planner": "exact",
+                    "coder": "exact",
+                    "brainstorm": "explore",
+                    "reasoner": "reason",
+                },
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"reasoning_lane_enabled": True},
+            }
+            agent = MicroAgent(config, AgentState(repo_root=repo, user_request="test"))
+            models = _RoleModelManager(
+                {
+                    "reasoner": "freeform reasoning",
+                    "planner": '{"files":["target.py"]}',
+                    "coder": '{"changes":[]}',
+                    "brainstorm": "1. strategy_axis: general_edit\ntry one thing",
+                }
+            )
+            agent.models = models
+            messages = [{"role": "user", "content": "go"}]
+
+            async def run_calls() -> None:
+                await agent._model_chat("planner", messages, call_site="plan")
+                await agent._json_call("planner", messages, ReadDecision)
+                await agent._model_chat("planner", messages, call_site="semantic_analysis")
+                await agent._model_chat("reflector", messages, call_site="reflect")
+                await agent._model_chat("brainstorm", messages, call_site="brainstorm")
+                await agent._model_chat("coder", messages, call_site="json_call")
+
+            asyncio.run(run_calls())
+
+            self.assertEqual(len(models.seen["reasoner"]), 3)
+            self.assertEqual(len(models.seen["planner"]), 1)
+            self.assertEqual(len(models.seen["brainstorm"]), 1)
+            self.assertEqual(len(models.seen["coder"]), 1)
+            self.assertNotIn("reflector", models.seen)
 
     def test_profile_agent_records_streaming_model_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3648,6 +3791,68 @@ value = 'fast'
             agent.state.scratch.pop("active_todo", None)
             self.assertTrue(agent._should_brainstorm())
 
+    def test_soft_active_todo_still_blocks_brainstorm_before_first_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "candidates.jsonl").write_text(
+                '{"status":"rejected","metric":147734,"failed":false}\n'
+                '{"status":"rejected_todo_axis_drift","metric":147734,"failed":false}\n'
+            )
+            todo = {
+                "todo_id": "todo-001-memory_store_layout",
+                "status": "attempted",
+                "strategy_axis": "memory_store_layout",
+                "family_key": "store_address_reuse",
+                "context": "store address reuse tactic",
+                "attempts": 1,
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "brainstorm_after_rejections": 2,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempt_budget": 3,
+                        "todo_soft_until_first_improvement": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=2),
+            )
+            agent.state.scratch["active_todo"] = todo
+            drift_candidate = CodeCandidate(
+                "soft-drift",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="hazard-aware VLIW bundle scheduler",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "Implement a hazard-aware VLIW bundle scheduler.",
+                strategy_axis="instruction_scheduling",
+            )
+
+            self.assertFalse(agent._has_active_todo_budget())
+            self.assertTrue(agent._has_active_todo_brainstorm_budget())
+            self.assertEqual(agent._active_todo_id(), "todo-001-memory_store_layout")
+            self.assertFalse(agent._should_brainstorm())
+            self.assertIsNone(agent._active_todo_contract_rejection(drift_candidate))
+
+            agent.config["workflow"]["pre_improvement_todo_blocks_brainstorm"] = False
+            self.assertFalse(agent._has_active_todo_brainstorm_budget())
+            self.assertEqual(agent._active_todo_id(), "")
+            self.assertTrue(agent._should_brainstorm())
+
+            agent.config["workflow"]["pre_improvement_todo_blocks_brainstorm"] = True
+            todo["attempts"] = 3
+            self.assertFalse(agent._has_active_todo_brainstorm_budget())
+            self.assertTrue(agent._should_brainstorm())
+
     def test_active_todo_is_soft_before_first_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3690,7 +3895,7 @@ value = 'fast'
 
             self.assertFalse(agent._has_active_todo_budget())
             self.assertEqual(agent._format_active_todo(), "")
-            self.assertEqual(agent._active_todo_id(), "")
+            self.assertEqual(agent._active_todo_id(), "todo-001-memory_store_layout")
             self.assertIsNone(agent._active_todo_contract_rejection(candidate))
 
     def test_active_todo_is_hard_after_first_improvement(self) -> None:

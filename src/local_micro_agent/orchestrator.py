@@ -15,7 +15,7 @@ from typing import Any
 
 from .decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
 from .mcp_client import McpServerSpec, McpToolClient
-from .models import ModelManager
+from .models import ModelManager, ModelResponse
 from .prompts import (
     PROMPT_MARKDOWN,
     brainstorm_prompt,
@@ -146,6 +146,8 @@ class MicroAgent:
         self, role: str, messages: list[dict[str, str]], call_site: str = ""
     ) -> str:
         start = self._profile_span_start()
+        requested_role = role
+        role = self._model_role_for_call_site(role, call_site)
         prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
         model_name = self.config.get("models", {}).get(role) or self.config.get(
             "models", {}
@@ -161,15 +163,16 @@ class MicroAgent:
         )
         try:
             if stream_callback is not None:
-                output = await model.chat(messages, stream_callback=stream_callback)
+                response = await model.chat(messages, stream_callback=stream_callback)
             else:
-                output = await model.chat(messages)
+                response = await model.chat(messages)
         except Exception as exc:
             self._record_profile_span(
                 "model_call",
                 start,
                 {
                     "role": role,
+                    **({"requested_role": requested_role} if requested_role != role else {}),
                     "call_site": call_site,
                     "model_name": model_name,
                     "provider_kind": provider.get("kind"),
@@ -182,11 +185,14 @@ class MicroAgent:
                 },
             )
             raise
+        output, usage = self._normalize_model_response(response)
+        elapsed_seconds = max(time.perf_counter() - start["perf"], 0.0)
         self._record_profile_span(
             "model_call",
             start,
             {
                 "role": role,
+                **({"requested_role": requested_role} if requested_role != role else {}),
                 "call_site": call_site,
                 "model_name": model_name,
                 "provider_kind": provider.get("kind"),
@@ -196,9 +202,103 @@ class MicroAgent:
                 "output_chars": len(output),
                 "success": True,
                 **stream_stats,
+                **self._profile_model_usage_fields(usage, elapsed_seconds),
             },
         )
         return output
+
+    def _model_role_for_call_site(self, role: str, call_site: str) -> str:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("reasoning_lane_enabled", False):
+            return role
+        call_sites = workflow.get(
+            "reasoning_lane_call_sites", ["plan", "semantic_analysis", "reflect"]
+        )
+        if not isinstance(call_sites, list):
+            call_sites = []
+        if call_site not in {str(item) for item in call_sites}:
+            return role
+        excluded_roles = workflow.get(
+            "reasoning_lane_excluded_roles", ["coder", "brainstorm", "tester"]
+        )
+        if not isinstance(excluded_roles, list):
+            excluded_roles = []
+        if role in {str(item) for item in excluded_roles}:
+            return role
+        reasoning_role = str(workflow.get("reasoning_lane_model_role", "reasoner") or "")
+        if not reasoning_role or reasoning_role == role:
+            return role
+        if reasoning_role not in self.config.get("models", {}):
+            return role
+        return reasoning_role
+
+    @staticmethod
+    def _normalize_model_response(response: Any) -> tuple[str, dict[str, Any]]:
+        if isinstance(response, ModelResponse):
+            return response.content, dict(response.usage)
+        return str(response), {}
+
+    @staticmethod
+    def _profile_model_usage_fields(
+        usage: dict[str, Any], elapsed_seconds: float
+    ) -> dict[str, Any]:
+        if not usage:
+            return {}
+        fields: dict[str, Any] = {}
+
+        def numeric(key: str) -> int | float | None:
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and value >= 0:
+                return value
+            return None
+
+        prompt_tokens = numeric("prompt_tokens")
+        completion_tokens = numeric("completion_tokens")
+        total_tokens = numeric("total_tokens")
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        for key, value in (
+            ("prompt_tokens", prompt_tokens),
+            ("completion_tokens", completion_tokens),
+            ("total_tokens", total_tokens),
+        ):
+            if value is not None:
+                fields[key] = int(value)
+
+        duration_fields = {
+            "provider_prompt_eval_duration_ns": numeric("provider_prompt_eval_duration_ns"),
+            "provider_eval_duration_ns": numeric("provider_eval_duration_ns"),
+            "provider_total_duration_ns": numeric("provider_total_duration_ns"),
+        }
+        for key, value in duration_fields.items():
+            if value is not None:
+                fields[key] = int(value)
+                fields[key.removesuffix("_ns") + "_ms"] = round(value / 1_000_000, 3)
+
+        for key in ("provider_prompt_eval_count", "provider_eval_count"):
+            value = numeric(key)
+            if value is not None:
+                fields[key] = int(value)
+
+        prompt_duration = duration_fields["provider_prompt_eval_duration_ns"]
+        completion_duration = duration_fields["provider_eval_duration_ns"]
+        total_duration = duration_fields["provider_total_duration_ns"]
+        if prompt_tokens is not None and prompt_duration and prompt_duration > 0:
+            fields["prompt_tokens_per_second"] = round(
+                prompt_tokens / (prompt_duration / 1_000_000_000), 3
+            )
+        if completion_tokens is not None and completion_duration and completion_duration > 0:
+            fields["completion_tokens_per_second"] = round(
+                completion_tokens / (completion_duration / 1_000_000_000), 3
+            )
+        if total_tokens is not None and total_duration and total_duration > 0:
+            fields["total_tokens_per_second"] = round(
+                total_tokens / (total_duration / 1_000_000_000), 3
+            )
+        if total_tokens is not None and elapsed_seconds > 0:
+            fields["wall_tokens_per_second"] = round(total_tokens / elapsed_seconds, 3)
+        return fields
 
     def _profile_model_stream_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -3019,7 +3119,7 @@ class MicroAgent:
             return False
         if self.state.scratch.get("last_brainstorm_loop") == self.state.loop_count:
             return False
-        if self._has_active_todo_budget():
+        if self._has_active_todo_brainstorm_budget():
             return False
         records = self._candidate_history_records(limit=max(threshold, 1))
         if len(records) < threshold:
@@ -3029,16 +3129,28 @@ class MicroAgent:
     def _has_active_todo_budget(self) -> bool:
         if self._todo_contract_soft_now():
             return False
+        return self._active_todo_with_attempt_budget() is not None
+
+    def _has_active_todo_brainstorm_budget(self) -> bool:
+        if self._todo_contract_soft_now():
+            workflow = self.config.get("workflow", {})
+            if workflow.get("pre_improvement_todo_blocks_brainstorm", True) is False:
+                return False
+        return self._active_todo_with_attempt_budget() is not None
+
+    def _active_todo_with_attempt_budget(self) -> dict[str, Any] | None:
         active_todo = self.state.scratch.get("active_todo")
         if not isinstance(active_todo, dict):
             active_todo = self._load_active_todo()
             if active_todo:
                 self.state.scratch["active_todo"] = active_todo
         if not isinstance(active_todo, dict) or not active_todo:
-            return False
+            return None
         if active_todo.get("status") not in {"active", "attempted"}:
-            return False
-        return not self._todo_attempt_budget_exhausted(active_todo)
+            return None
+        if self._todo_attempt_budget_exhausted(active_todo):
+            return None
+        return active_todo
 
     def _format_tactic_library(self) -> str:
         tactic_library = self.state.scratch.get("tactic_library")
@@ -4549,7 +4661,9 @@ class MicroAgent:
 
     def _active_todo_id(self) -> str:
         if self._todo_contract_soft_now():
-            return ""
+            workflow = self.config.get("workflow", {})
+            if workflow.get("pre_improvement_todo_blocks_brainstorm", True) is False:
+                return ""
         active_todo = self.state.scratch.get("active_todo")
         if isinstance(active_todo, dict) and active_todo.get("status") in {"active", "attempted"}:
             if self._todo_attempt_budget_exhausted(active_todo):

@@ -56,6 +56,15 @@ from the current request and source files, not from hidden benchmark-specific
 rules; existing artifacts at the same path are filtered again before resumed
 runs load them into the prompt.
 
+For non-code freeform reasoning, enable `workflow.reasoning_lane_enabled=true`
+and map `workflow.reasoning_lane_model_role` to a low-temperature provider with
+thinking enabled, for example `models.reasoner = "qwen_reason"`. By default the
+lane only routes `plan`, `semantic_analysis`, and `reflect` call sites. Exact
+JSON/search-replace roles such as `coder`, `brainstorm`, and `tester` stay on
+their configured providers unless you explicitly change the call-site and
+excluded-role lists. This keeps planner-style reasoning separate from strict
+patch generation and JSON repair paths.
+
 For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
 Rejected candidate fingerprints are then remembered inside the current run,
 and an identical later candidate is rejected before tests run. The rejection is
@@ -145,6 +154,13 @@ separated from idea failures by default
 (`workflow.todo_ignore_patch_failures_for_budget=true`), so a tactic is not
 discarded just because generated patch/search text did not match the current
 source.
+Before the first metric improvement, `workflow.todo_soft_until_first_improvement=true`
+keeps active todo contracts advisory so exploratory candidates are not hard
+rejected for axis or family drift. That soft contract no longer disables
+brainstorm throttling: by default
+`workflow.pre_improvement_todo_blocks_brainstorm=true` lets an active todo with
+remaining attempt budget block repeated brainstorms until the tactic gets its
+budgeted tries. Set it to `false` to restore the older free-brainstorm behavior.
 By default, `workflow.todo_enforce_active_contract=true` also makes active todo
 contracts controller-enforced: a queued candidate whose declared
 `strategy_axis` or detected family drifts away from the active todo is rejected
@@ -232,6 +248,11 @@ or error information, and compact call metadata such as role, prompt/output
 character counts, command exit code, and stdout/stderr sizes. This is intended
 for comparing bottlenecks across local serving backends such as Ollama, LM
 Studio, vLLM, or SGLang; it is diagnostic logging, not prompt/KV caching.
+When provider usage metadata is available, model-call records also include
+`prompt_tokens`, `completion_tokens`, `total_tokens`, token-per-second rates,
+and provider timing fields such as Ollama prompt/eval/total durations. Providers
+that do not expose token usage continue to record character counts and elapsed
+wall time only.
 When profiling is enabled, providers with native streaming support may also
 stream model output into `.local_micro_agent/model_streams/*.txt`; model-call
 profile records include `stream_path`, `stream_chunks`, and `stream_chars`.

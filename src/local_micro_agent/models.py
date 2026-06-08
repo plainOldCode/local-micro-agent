@@ -5,8 +5,14 @@ import json
 import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from typing import Callable, ClassVar, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Callable, ClassVar, Protocol
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    content: str
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class ChatModel(Protocol):
@@ -14,7 +20,7 @@ class ChatModel(Protocol):
         self,
         messages: list[dict[str, str]],
         stream_callback: Callable[[str], None] | None = None,
-    ) -> str:
+    ) -> str | ModelResponse:
         ...
 
 
@@ -34,13 +40,48 @@ def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: int) -
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
 
+def _ollama_usage(data: dict[str, Any]) -> dict[str, Any]:
+    usage: dict[str, Any] = {}
+    prompt_tokens = data.get("prompt_eval_count")
+    completion_tokens = data.get("eval_count")
+    if isinstance(prompt_tokens, int):
+        usage["prompt_tokens"] = prompt_tokens
+        usage["provider_prompt_eval_count"] = prompt_tokens
+    if isinstance(completion_tokens, int):
+        usage["completion_tokens"] = completion_tokens
+        usage["provider_eval_count"] = completion_tokens
+    if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int):
+        usage["total_tokens"] = prompt_tokens + completion_tokens
+    for source_key, dest_key in (
+        ("prompt_eval_duration", "provider_prompt_eval_duration_ns"),
+        ("eval_duration", "provider_eval_duration_ns"),
+        ("total_duration", "provider_total_duration_ns"),
+    ):
+        value = data.get(source_key)
+        if isinstance(value, int):
+            usage[dest_key] = value
+    return usage
+
+
+def _openai_usage(data: dict[str, Any]) -> dict[str, Any]:
+    raw_usage = data.get("usage")
+    if not isinstance(raw_usage, dict):
+        return {}
+    usage: dict[str, Any] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = raw_usage.get(key)
+        if isinstance(value, int):
+            usage[key] = value
+    return usage
+
+
 def _post_ollama_stream(
     url: str,
     payload: dict,
     headers: dict[str, str],
     timeout: int,
     stream_callback: Callable[[str], None] | None,
-) -> str:
+) -> ModelResponse:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -49,6 +90,7 @@ def _post_ollama_stream(
         method="POST",
     )
     chunks: list[str] = []
+    done_data: dict[str, Any] = {}
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             for raw_line in response:
@@ -64,11 +106,12 @@ def _post_ollama_stream(
                         if stream_callback is not None:
                             stream_callback(chunk)
                 if data.get("done"):
+                    done_data = data
                     break
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    return "".join(chunks)
+    return ModelResponse("".join(chunks), usage=_ollama_usage(done_data))
 
 
 @dataclass(frozen=True)
@@ -86,7 +129,7 @@ class OpenAICompatibleModel:
         self,
         messages: list[dict[str, str]],
         stream_callback: Callable[[str], None] | None = None,
-    ) -> str:
+    ) -> ModelResponse:
         headers = {}
         if self.api_key_env:
             headers["Authorization"] = f"Bearer {os.getenv(self.api_key_env, 'local')}"
@@ -103,7 +146,8 @@ class OpenAICompatibleModel:
             headers,
             self.timeout_seconds,
         )
-        return data["choices"][0]["message"].get("content") or ""
+        content = data["choices"][0]["message"].get("content") or ""
+        return ModelResponse(content, usage=_openai_usage(data))
 
 
 @dataclass(frozen=True)
@@ -122,7 +166,7 @@ class OllamaNativeModel:
         self,
         messages: list[dict[str, str]],
         stream_callback: Callable[[str], None] | None = None,
-    ) -> str:
+    ) -> ModelResponse:
         payload = {
             "model": self.model,
             "messages": messages,
@@ -146,7 +190,8 @@ class OllamaNativeModel:
                 stream_callback,
             )
         data = await asyncio.to_thread(_post_json, url, payload, {}, self.timeout_seconds)
-        return data["message"].get("content") or ""
+        content = data["message"].get("content") or ""
+        return ModelResponse(content, usage=_ollama_usage(data))
 
 
 class ModelManager:
