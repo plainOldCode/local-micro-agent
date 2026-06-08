@@ -85,6 +85,11 @@
     "record_candidate_artifacts": false,
     "candidate_artifact_dir": ".local_micro_agent/candidate_artifacts",
     "candidate_artifact_output_limit": 12000,
+    "semantic_analysis_after_read": false,
+    "semantic_analysis_path": ".local_micro_agent/semantic_analysis.md",
+    "semantic_analysis_focus": "",
+    "semantic_analysis_model_role": "planner",
+    "semantic_analysis_char_limit": 8000,
     "repair_target_not_found": false,
     "repair_source_context_char_limit": 20000,
     "feedback_notes_limit": 12

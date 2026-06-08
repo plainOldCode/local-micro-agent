@@ -23,6 +23,7 @@ from .prompts import (
     plan_prompt,
     read_prompt,
     reflect_prompt,
+    semantic_analysis_prompt,
     test_prompt,
 )
 from .state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
@@ -329,7 +330,43 @@ class MicroAgent:
             content = await self.mcp.read_file(str(abs_path))
             content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
+        await self._maybe_refresh_semantic_analysis()
         self.state.current = AgentStateName.CODE
+
+    async def _maybe_refresh_semantic_analysis(self) -> None:
+        workflow = self.config.get("workflow", {})
+        path = self._workflow_artifact_path(
+            "semantic_analysis_path", ".local_micro_agent/semantic_analysis.md"
+        )
+        if path.exists():
+            text = path.read_text(errors="replace").strip()
+            if text:
+                self.state.scratch["semantic_analysis"] = text
+                self.state.notes.append(f"Loaded semantic analysis: {path}")
+        if not workflow.get("semantic_analysis_after_read"):
+            return
+        focus = str(workflow.get("semantic_analysis_focus", ""))
+        role = str(workflow.get("semantic_analysis_model_role", "planner"))
+        try:
+            output = await self._model_chat(
+                role,
+                semantic_analysis_prompt(self.state, focus=focus),
+                call_site="semantic_analysis",
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"Semantic analysis model call failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        analysis = output.strip()
+        if not analysis:
+            return
+        limit = int(workflow.get("semantic_analysis_char_limit", 8000) or 8000)
+        analysis = self._slice_text(analysis, limit)
+        self.state.scratch["semantic_analysis"] = analysis
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(analysis + "\n")
+        self.state.notes.append(f"Persisted semantic analysis: {path}")
 
     async def reflect(self) -> None:
         if self._should_brainstorm():

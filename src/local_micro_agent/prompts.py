@@ -23,6 +23,16 @@ Output strict JSON:
 {"files":["relative/path.py"],"reason":"short reason"}
 Do not include markdown or prose outside JSON."""
 
+SEMANTIC_ANALYSIS_SYSTEM = """You are the SEMANTIC_ANALYSIS node in a local coding-agent FSM.
+Do not write code. Extract durable facts the next CODE attempts must obey.
+Output concise Markdown with these sections:
+- Execution model / data visibility
+- Invariants and public contracts
+- Risky transformations and required checks
+- Safe implementation hooks
+Keep it domain-neutral and grounded only in the supplied request, plan, and source.
+Prefer concrete read/write, ordering, lifecycle, API, or metric facts over generic advice."""
+
 REFLECT_SYSTEM = """You are the REFLECT node in a local coding-agent FSM.
 Do not write code. Analyze only the latest rejected attempt and feedback.
 Output exactly 1-3 concise Markdown bullets:
@@ -117,6 +127,25 @@ def read_prompt(state: AgentState) -> list[dict[str, str]]:
     ]
 
 
+def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    focus_block = f"\n\nAnalysis focus:\n{focus}" if focus.strip() else ""
+    return [
+        {"role": "system", "content": SEMANTIC_ANALYSIS_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}"
+                f"{focus_block}"
+            ),
+        },
+    ]
+
+
 def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": REFLECT_SYSTEM},
@@ -146,6 +175,12 @@ def brainstorm_prompt(
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
+    semantic_analysis = state.scratch.get("semantic_analysis")
+    semantic_block = (
+        f"Semantic analysis:\n{semantic_analysis}\n\n"
+        if isinstance(semantic_analysis, str) and semantic_analysis.strip()
+        else ""
+    )
     return [
         {"role": "system", "content": BRAINSTORM_SYSTEM},
         {
@@ -154,6 +189,7 @@ def brainstorm_prompt(
                 f"User request:\n{state.user_request}\n\n"
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Source files:\n{source_blocks}\n\n"
+                f"{semantic_block}"
                 f"Current best/test summary:\n{state.latest_test_summary()}\n\n"
                 f"Known strategy axes:\n{', '.join(known_axes)}\n\n"
                 f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
@@ -179,6 +215,12 @@ def code_prompt(
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
     )
+    semantic_analysis = state.scratch.get("semantic_analysis")
+    semantic_block = (
+        f"\n\nSemantic analysis:\n{semantic_analysis}"
+        if isinstance(semantic_analysis, str) and semantic_analysis.strip()
+        else ""
+    )
     reflection = state.scratch.get("reflection")
     reflection_block = (
         f"\n\nRetry reflection:\n{reflection}"
@@ -189,6 +231,7 @@ def code_prompt(
         f"User request:\n{state.user_request}\n\n"
         f"Plan:\n{state.plan_markdown}\n\n"
         f"Source files:\n{source_blocks}"
+        f"{semantic_block}"
     )
     dynamic_content = (
         "Dynamic context for this CODE attempt:\n\n"
@@ -232,6 +275,7 @@ def test_prompt(state: AgentState) -> list[dict[str, str]]:
 PROMPT_MARKDOWN = {
     "PLAN": PLAN_SYSTEM,
     "READ": READ_SYSTEM,
+    "SEMANTIC_ANALYSIS": SEMANTIC_ANALYSIS_SYSTEM,
     "REFLECT": REFLECT_SYSTEM,
     "BRAINSTORM": BRAINSTORM_SYSTEM,
     "CODE": CODE_SYSTEM,

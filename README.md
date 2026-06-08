@@ -43,6 +43,16 @@ invalid or no-op candidate. Candidate history can also be persisted as JSONL
 with `workflow.candidate_history_path` so accepted/rejected directions survive
 across runs.
 
+For tasks where the source has a subtle execution model, enable
+`workflow.semantic_analysis_after_read=true`. After `READ`, the agent writes a
+domain-neutral semantic analysis artifact to
+`workflow.semantic_analysis_path` and feeds it into later `CODE` and
+`BRAINSTORM` prompts. The artifact should capture facts such as data visibility,
+read/write hazards, API contracts, lifecycle ordering, metric constraints, and
+safe implementation hooks. It is generated from the current request and source
+files, not from hidden benchmark-specific rules; existing artifacts at the same
+path are loaded back into the prompt for resumed runs.
+
 For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
 Rejected candidate fingerprints are then remembered inside the current run,
 and an identical later candidate is rejected before tests run. The rejection is

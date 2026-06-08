@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent
-from local_micro_agent.prompts import code_prompt, reflect_prompt
+from local_micro_agent.prompts import brainstorm_prompt, code_prompt, reflect_prompt
 from local_micro_agent.state import AgentState, AgentStateName, CodeChange, FileSnapshot, TestResult
 
 
@@ -591,6 +591,38 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("Retry reflection", messages[2]["content"])
             self.assertIn("invalid JSON", messages[2]["content"])
 
+    def test_code_prompt_includes_semantic_analysis_with_stable_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.file_context = [FileSnapshot("target.py", "value = 1\n")]
+            state.scratch["semantic_analysis"] = (
+                "- Execution model: writes become visible after each step."
+            )
+
+            messages = code_prompt(state)
+
+            self.assertIn("Semantic analysis", messages[1]["content"])
+            self.assertIn("writes become visible", messages[1]["content"])
+            self.assertNotIn("Semantic analysis", messages[2]["content"])
+
+    def test_brainstorm_prompt_includes_semantic_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.file_context = [FileSnapshot("target.py", "value = 1\n")]
+            state.scratch["semantic_analysis"] = "- API contract: keep output stable."
+
+            messages = brainstorm_prompt(
+                state,
+                reject_summary="[]",
+                cooled_axes=[],
+                known_axes=["performance"],
+            )
+
+            self.assertIn("Semantic analysis", messages[1]["content"])
+            self.assertIn("keep output stable", messages[1]["content"])
+
     def test_code_prompt_can_request_xml_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")
@@ -601,6 +633,41 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("Do not output JSON", messages[0]["content"])
             self.assertIn("<search>", messages[0]["content"])
             self.assertIn("<replace>", messages[0]["content"])
+
+    def test_read_can_persist_semantic_analysis_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "seed_files": ["target.py"],
+                    "semantic_analysis_after_read": True,
+                    "semantic_analysis_path": ".local_micro_agent/semantic.md",
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(
+                "- Execution model: reads happen before writes become visible."
+            )
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            artifact = repo / ".local_micro_agent" / "semantic.md"
+            self.assertTrue(artifact.exists())
+            self.assertIn("reads happen before writes", artifact.read_text())
+            self.assertIn("reads happen before writes", state.scratch["semantic_analysis"])
+            self.assertEqual(state.current, AgentStateName.CODE)
 
     def test_reflect_state_stores_summary_for_next_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
