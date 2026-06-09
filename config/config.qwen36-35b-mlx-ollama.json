@@ -5,6 +5,7 @@
     "coder": "qwen35_ollama",
     "brainstorm": "qwen35_explore",
     "reasoner": "qwen35_reason",
+    "reflector": "qwen35_reason",
     "tester": "qwen35_ollama"
   },
   "providers": {

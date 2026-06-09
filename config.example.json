@@ -5,6 +5,7 @@
     "coder": "qwen_local",
     "brainstorm": "qwen_explore",
     "reasoner": "qwen_reason",
+    "reflector": "qwen_reason",
     "tester": "qwen_local"
   },
   "providers": {

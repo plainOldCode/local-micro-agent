@@ -5,6 +5,7 @@
     "coder": "gemma12_ollama",
     "brainstorm": "gemma12_explore",
     "reasoner": "gemma12_reason",
+    "reflector": "gemma12_reason",
     "tester": "gemma12_ollama"
   },
   "providers": {

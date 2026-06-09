@@ -5,6 +5,7 @@
     "coder": "qwen27_ollama",
     "brainstorm": "qwen27_explore",
     "reasoner": "qwen27_reason",
+    "reflector": "qwen27_reason",
     "tester": "qwen27_ollama"
   },
   "providers": {

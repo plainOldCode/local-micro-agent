@@ -5,6 +5,7 @@
     "coder": "gemma31_ollama",
     "brainstorm": "gemma31_explore",
     "reasoner": "gemma31_reason",
+    "reflector": "gemma31_reason",
     "tester": "gemma31_ollama"
   },
   "providers": {
