@@ -272,6 +272,38 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertFalse(captured["payload"]["enableThinking"])
         self.assertEqual(captured["payload"]["custom"], {"field": 1})
 
+    def test_openai_compatible_model_can_prefill_disabled_thinking(self) -> None:
+        captured = {}
+        original = model_module._post_json
+        messages = [{"role": "user", "content": "hello"}]
+
+        def fake_post_json(url, payload, headers, timeout):
+            captured.update({"payload": payload})
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        model_module._post_json = fake_post_json
+        try:
+            response = asyncio.run(
+                OpenAICompatibleModel(
+                    base_url="http://localhost:1234/v1",
+                    model="local",
+                    think=False,
+                    disable_thinking_with_assistant_prefill=True,
+                ).chat(messages)
+            )
+        finally:
+            model_module._post_json = original
+
+        self.assertEqual(response.content, "ok")
+        self.assertEqual(messages, [{"role": "user", "content": "hello"}])
+        self.assertEqual(
+            captured["payload"]["messages"],
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "<think>\n\n</think>\n\n"},
+            ],
+        )
+
     def test_openai_compatible_model_uses_streaming_helper(self) -> None:
         captured = {}
         original = model_module._post_openai_stream

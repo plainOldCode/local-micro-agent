@@ -309,6 +309,10 @@ request body after the standard fields. This is useful for local servers such
 as LM Studio that expose model-specific custom fields in their chat templates.
 Some servers may ignore these keys on the OpenAI-compatible endpoint; verify
 with a smoke request before treating thinking as disabled for benchmark runs.
+For LM Studio models where thinking is enabled globally and per-request custom
+fields are ignored, set `disable_thinking_with_assistant_prefill=true` together
+with `think=false` to append an empty assistant `<think>` prefill for that
+provider only.
 
 For clean model-evaluation runs, do not inject prior-run winning patches or
 human-discovered transformation ladders into the prompt. Candidate ladders used

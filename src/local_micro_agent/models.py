@@ -104,6 +104,10 @@ def _openai_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return stream_payload
 
 
+def _apply_assistant_think_prefill(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [*messages, {"role": "assistant", "content": "<think>\n\n</think>\n\n"}]
+
+
 def _post_openai_stream(
     url: str,
     payload: dict[str, Any],
@@ -209,6 +213,7 @@ class OpenAICompatibleModel:
     max_tokens: int = 2048
     timeout_seconds: int = 120
     think: bool | None = None
+    disable_thinking_with_assistant_prefill: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     async def chat(
@@ -219,9 +224,12 @@ class OpenAICompatibleModel:
         headers = {}
         if self.api_key_env:
             headers["Authorization"] = f"Bearer {os.getenv(self.api_key_env, 'local')}"
+        request_messages = messages
+        if self.think is False and self.disable_thinking_with_assistant_prefill:
+            request_messages = _apply_assistant_think_prefill(messages)
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": request_messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
@@ -317,6 +325,9 @@ class ModelManager:
                 max_tokens=spec.get("max_tokens", 2048),
                 timeout_seconds=spec.get("timeout_seconds", 120),
                 think=spec.get("think"),
+                disable_thinking_with_assistant_prefill=spec.get(
+                    "disable_thinking_with_assistant_prefill", False
+                ),
                 extra_body=spec.get("extra_body") or {},
             )
         if spec["kind"] == "ollama_native":
