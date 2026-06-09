@@ -96,6 +96,14 @@ def _merge_openai_payload(base: dict[str, Any], extra_body: dict[str, Any] | Non
     return merged
 
 
+def _openai_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    stream_payload = {**payload, "stream": True}
+    options = dict(stream_payload.get("stream_options") or {})
+    options.setdefault("include_usage", True)
+    stream_payload["stream_options"] = options
+    return stream_payload
+
+
 def _post_openai_stream(
     url: str,
     payload: dict[str, Any],
@@ -103,8 +111,7 @@ def _post_openai_stream(
     timeout: int,
     stream_callback: Callable[[str], None] | None,
 ) -> ModelResponse:
-    stream_payload = {**payload, "stream": True}
-    stream_payload.setdefault("stream_options", {"include_usage": True})
+    stream_payload = _openai_stream_payload(payload)
     body = json.dumps(stream_payload).encode("utf-8")
     request = urllib.request.Request(
         url,

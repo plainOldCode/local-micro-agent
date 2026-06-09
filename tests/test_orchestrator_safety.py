@@ -306,6 +306,33 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual(captured["url"], "http://localhost:1234/v1/chat/completions")
         self.assertTrue(captured["payload"]["think"])
 
+    def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
+        payload = {
+            "model": "local",
+            "messages": [],
+            "stream_options": {"foo": "bar"},
+        }
+
+        stream_payload = model_module._openai_stream_payload(payload)
+
+        self.assertTrue(stream_payload["stream"])
+        self.assertEqual(
+            stream_payload["stream_options"],
+            {"foo": "bar", "include_usage": True},
+        )
+        self.assertEqual(payload["stream_options"], {"foo": "bar"})
+
+    def test_openai_stream_payload_allows_include_usage_override(self) -> None:
+        payload = {
+            "model": "local",
+            "messages": [],
+            "stream_options": {"include_usage": False},
+        }
+
+        stream_payload = model_module._openai_stream_payload(payload)
+
+        self.assertEqual(stream_payload["stream_options"], {"include_usage": False})
+
     def test_log_prefix_includes_timestamp(self) -> None:
         output = io.StringIO()
 
