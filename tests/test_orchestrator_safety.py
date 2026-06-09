@@ -792,6 +792,40 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(len(state.external_context), 1)
             self.assertIn("Skipped advisory external context", "\n".join(state.notes))
 
+    def test_read_cannot_promote_external_context_via_path_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            hint_dir = repo / "hints"
+            hint_dir.mkdir()
+            (hint_dir / "perf.md").write_text("# Advisory hint\nDo not edit me.\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "external_context_paths": ["hints/perf.md"],
+                    "external_context_char_limit": 2000,
+                    "external_context_item_char_limit": 1000,
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager('{"files":["hints/../hints/perf.md"]}')
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            self.assertEqual(state.planned_files, [])
+            self.assertEqual(state.file_context, [])
+            self.assertEqual(agent._writable_files(), set())
+            self.assertIn("Skipped advisory external context", "\n".join(state.notes))
+
     def test_code_prompt_carries_recent_agent_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")
@@ -1123,6 +1157,55 @@ Background / non-constraints
             self.assertNotIn("run_spec", state.scratch)
             joined = "\n".join(message["content"] for message in code_prompt(state))
             self.assertNotIn("old-task", joined)
+
+    def test_run_spec_generation_failure_does_not_keep_old_artifact_in_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "spec_id": "old-run",
+                        "task_graph": [
+                            {
+                                "task_id": "old-task",
+                                "strategy_axis": "performance",
+                                "status": "open",
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            state = AgentState(repo_root=repo, user_request="new request")
+            config = {
+                "models": {"default": "failing"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "seed_files": ["target.py"],
+                    "run_spec_after_read": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _FailingModelManager()
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            self.assertNotIn("run_spec", state.scratch)
+            joined = "\n".join(message["content"] for message in code_prompt(state))
+            self.assertNotIn("old-task", joined)
+            self.assertIn("Run spec model call failed", "\n".join(state.notes))
 
     def test_spec_prompt_requests_task_graph_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -493,35 +493,36 @@ class MicroAgent:
         if not self._run_spec_enabled():
             self.state.scratch.pop("run_spec", None)
             return
+        if workflow.get("run_spec_after_read"):
+            self.state.scratch.pop("run_spec", None)
+            focus = str(workflow.get("run_spec_focus", ""))
+            role = str(workflow.get("run_spec_model_role", "planner"))
+            try:
+                output = await self._model_chat(
+                    role,
+                    spec_prompt(self.state, focus=focus),
+                    call_site="run_spec",
+                )
+                spec = parse_json_object(output)
+            except Exception as exc:
+                self.state.notes.append(
+                    f"Run spec model call failed: {type(exc).__name__}: {exc}"
+                )
+                return
+            spec = self._normalize_run_spec(spec)
+            if not spec:
+                self.state.notes.append("Run spec discarded: no task_graph")
+                return
+            self.state.scratch["run_spec"] = spec
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+            self.state.notes.append(f"Persisted run spec: {path}")
+            return
         if path.exists():
             spec = self._load_run_spec(path)
             if spec:
                 self.state.scratch["run_spec"] = spec
                 self.state.notes.append(f"Loaded run spec: {path}")
-        if not workflow.get("run_spec_after_read"):
-            return
-        focus = str(workflow.get("run_spec_focus", ""))
-        role = str(workflow.get("run_spec_model_role", "planner"))
-        try:
-            output = await self._model_chat(
-                role,
-                spec_prompt(self.state, focus=focus),
-                call_site="run_spec",
-            )
-            spec = parse_json_object(output)
-        except Exception as exc:
-            self.state.notes.append(
-                f"Run spec model call failed: {type(exc).__name__}: {exc}"
-            )
-            return
-        spec = self._normalize_run_spec(spec)
-        if not spec:
-            self.state.notes.append("Run spec discarded: no task_graph")
-            return
-        self.state.scratch["run_spec"] = spec
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
-        self.state.notes.append(f"Persisted run spec: {path}")
 
     def _run_spec_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -558,12 +559,16 @@ class MicroAgent:
 
     def _repo_path_key(self, path: str) -> str:
         candidate = Path(path)
+        repo_root = self.state.repo_root.resolve(strict=False)
+        resolved = (
+            candidate.resolve(strict=False)
+            if candidate.is_absolute()
+            else (repo_root / candidate).resolve(strict=False)
+        )
         try:
-            if candidate.is_absolute():
-                candidate = candidate.relative_to(self.state.repo_root)
+            return resolved.relative_to(repo_root).as_posix()
         except ValueError:
-            return str(candidate)
-        return candidate.as_posix()
+            return str(resolved)
 
     @staticmethod
     def _load_run_spec(path: Path) -> dict[str, Any]:
