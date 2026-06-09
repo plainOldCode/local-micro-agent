@@ -1654,6 +1654,17 @@ class MicroAgent:
                         "ideas.\n"
                         f"{gate_memory}"
                     )
+                failure_memory = self._format_failure_memory()
+                if failure_memory:
+                    add_runtime_context(
+                        "Failure memory follows. Treat it as durable negative "
+                        "evidence from prior candidates. Do not treat improved "
+                        "diagnostics as valid unless tests also passed. Avoid "
+                        "candidate variants whose failure_signature, failure_class, "
+                        "or next_rule says avoid; when next_rule is repair_with_constraint, "
+                        "address why_invalid before optimizing further.\n"
+                        f"{failure_memory}"
+                    )
                 todo_observation_chain = self._format_todo_observation_chain()
                 if todo_observation_chain:
                     add_runtime_context(
@@ -2968,6 +2979,116 @@ class MicroAgent:
                     axis_state["failures"] += 1
         self._apply_history_cooldowns(memory, failure_statuses)
         return memory if memory["axes"] else None
+
+    def _failure_memory_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("adaptive_search_memory")) and workflow.get(
+            "failure_memory", True
+        ) is not False
+
+    def _failure_memory_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "failure_memory_path", ".local_micro_agent/failure_memory.jsonl"
+        )
+
+    def _format_failure_memory(self) -> str:
+        if not self._failure_memory_enabled():
+            return ""
+        path = self._failure_memory_path()
+        if not path.exists():
+            return ""
+        limit = int(self.config.get("workflow", {}).get("failure_memory_recent_limit", 8) or 8)
+        records: list[dict[str, Any]] = []
+        for line in path.read_text(errors="replace").splitlines()[-limit:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            records.append(
+                {
+                    key: record.get(key)
+                    for key in (
+                        "loop",
+                        "strategy_axis",
+                        "failure_class",
+                        "failure_signature",
+                        "observed_signal",
+                        "why_invalid",
+                        "next_rule",
+                        "repair_hint",
+                    )
+                    if record.get(key) not in (None, "", [], {})
+                }
+            )
+        if not records:
+            return ""
+        return json.dumps({"recent_failure_lessons": records}, ensure_ascii=False, indent=2)
+
+    def _remember_failure_lesson(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        applied: int,
+        failed: bool,
+        failure_class: str,
+        failure_detail: str,
+        no_change_reason: str,
+        diagnostic_results: list[dict[str, Any]],
+        recovery_hint: str,
+    ) -> dict[str, Any]:
+        if not self._failure_memory_enabled():
+            return {}
+        if status in {"improved", "accepted"} and not failed:
+            return {}
+        detail = no_change_reason or failure_detail
+        diagnostic_summary = self._diagnostic_summary(diagnostic_results, limit=500)
+        observed_signal = []
+        if metric is not None:
+            observed_signal.append(f"metric={metric}")
+        if diagnostic_summary:
+            observed_signal.append(f"diagnostics={diagnostic_summary}")
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "candidate_id": candidate.candidate_id,
+            "status": status,
+            "strategy_axis": candidate.strategy_axis,
+            "strategy_axes": self._candidate_strategy_axes(candidate),
+            "failure_class": failure_class,
+            "failure_signature": sorted(
+                self._tactic_signature(
+                    "\n".join(
+                        [candidate.reason, *(change.reason for change in candidate.changes)]
+                    )
+                )
+            )[:16],
+            "observed_signal": self._truncate_text(" | ".join(observed_signal), 700),
+            "why_invalid": self._truncate_text(detail or status, 700),
+            "next_rule": self._failure_memory_next_rule(failure_class, detail),
+            "repair_hint": self._truncate_text(recovery_hint, 500),
+        }
+        path = self._failure_memory_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return {
+            "failure_memory_path": self._repo_relative_path(path),
+            "failure_memory_next_rule": record["next_rule"],
+        }
+
+    @staticmethod
+    def _failure_memory_next_rule(failure_class: str, detail: str) -> str:
+        normalized = normalize_fingerprint_text(detail)
+        if failure_class in {"patch_miss", "duplicate_variant", "axis_mismatch", "family_mismatch"}:
+            return "avoid"
+        if "out of scratch space" in normalized or "out of memory" in normalized:
+            return "repair_with_constraint"
+        if failure_class in {"correctness_failure", "invariant_broken", "scope_too_broad"}:
+            return "repair_with_constraint"
+        if failure_class in {"no_improvement", "probe_no_signal"}:
+            return "avoid_same_variant"
+        return "avoid_or_repair_with_new_evidence"
 
     def _apply_history_cooldowns(
         self, memory: dict[str, Any], failure_statuses: set[str]
@@ -4430,6 +4551,20 @@ class MicroAgent:
             diagnostic_summary = self._diagnostic_summary(diagnostic_results)
             if diagnostic_summary:
                 extra["diagnostic_summary"] = diagnostic_summary
+        extra.update(
+            self._remember_failure_lesson(
+                candidate,
+                status=status,
+                metric=metric,
+                applied=applied,
+                failed=failed,
+                failure_class=observation.get("failure_class", ""),
+                failure_detail=failure_detail,
+                no_change_reason=no_change_reason,
+                diagnostic_results=diagnostic_results or [],
+                recovery_hint=str(observation.get("recovery_hint", "")),
+            )
+        )
         extra.update(
             self._write_candidate_artifacts(
                 candidate,

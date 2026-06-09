@@ -2570,6 +2570,139 @@ value = 'fast'
             self.assertIn("phase_interleave", joined)
             self.assertIn("cooled_down_axes", joined)
 
+    def test_rejected_candidate_writes_failure_memory_lesson(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    adaptive_search_memory=True,
+                    failure_memory=True,
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "bad",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="pack store with address calculation",
+                        target="old",
+                        replacement="new",
+                    )
+                ],
+                "diagnostic bundle count improves by packing a dependent store",
+                strategy_axis="issue_slot_pressure",
+            )
+
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected",
+                metric=None,
+                applied=1,
+                failed=True,
+                patch_text="",
+                results=[
+                    TestResult(
+                        "python3 test.py",
+                        1,
+                        stderr="AssertionError: store read stale address",
+                    )
+                ],
+                failure_detail="AssertionError: store read stale address",
+                diagnostic_results=[
+                    {
+                        "name": "stats",
+                        "command": "python3 stats.py",
+                        "exit_code": 0,
+                        "stdout": '{"non_debug_bundles": 106774}',
+                        "stderr": "",
+                    }
+                ],
+            )
+
+            memory_path = repo / ".local_micro_agent" / "failure_memory.jsonl"
+            self.assertTrue(memory_path.exists())
+            record = json.loads(memory_path.read_text())
+            self.assertEqual(record["failure_class"], "correctness_failure")
+            self.assertEqual(record["next_rule"], "repair_with_constraint")
+            self.assertIn("106774", record["observed_signal"])
+            self.assertIn("stale address", record["why_invalid"])
+            self.assertEqual(extra["failure_memory_path"], ".local_micro_agent/failure_memory.jsonl")
+
+    def test_code_prompt_includes_failure_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failure_memory.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop": 7,
+                        "strategy_axis": "issue_slot_pressure",
+                        "failure_class": "correctness_failure",
+                        "failure_signature": ["pack", "store"],
+                        "observed_signal": "diagnostics=non_debug_bundles=106774",
+                        "why_invalid": "store read an address written in the same bundle",
+                        "next_rule": "repair_with_constraint",
+                        "repair_hint": "split dependent reads from same-bundle writes",
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                    "adaptive_search_memory": True,
+                    "failure_memory": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.CODE,
+                max_loops=1,
+            )
+            state.plan_markdown = "seeded"
+            state.planned_files = ["target.py"]
+            models = _RoleModelManager(
+                {
+                    "coder": (
+                        '{"changes":[{"path":"target.py","target":"value = '
+                        "'old'\\n\",\"replacement\":\"value = 'new'\\n\"}]}"
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            async def code_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_once())
+
+            coder_messages = models.seen["coder"][0]
+            joined = "\n".join(message["content"] for message in coder_messages)
+            self.assertIn("Failure memory follows", joined)
+            self.assertIn("repair_with_constraint", joined)
+            self.assertIn("same-bundle writes", joined)
+
     def test_reflect_brainstorms_after_rejection_streak(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
