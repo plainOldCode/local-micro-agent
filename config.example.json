@@ -34,6 +34,8 @@
       "model": "qwen3.6:27b",
       "temperature": 0.0,
       "max_tokens": 2048,
+      "think": false,
+      "extra_body": {},
       "timeout_seconds": 120
     }
   },

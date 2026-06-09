@@ -75,6 +75,83 @@ def _openai_usage(data: dict[str, Any]) -> dict[str, Any]:
     return usage
 
 
+def _openai_chat_content(data: dict[str, Any]) -> str:
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return ""
+    return message.get("content") or ""
+
+
+def _merge_openai_payload(base: dict[str, Any], extra_body: dict[str, Any] | None) -> dict[str, Any]:
+    if not extra_body:
+        return base
+    merged = dict(base)
+    merged.update(extra_body)
+    return merged
+
+
+def _post_openai_stream(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int,
+    stream_callback: Callable[[str], None] | None,
+) -> ModelResponse:
+    stream_payload = {**payload, "stream": True}
+    stream_payload.setdefault("stream_options", {"include_usage": True})
+    body = json.dumps(stream_payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    chunks: list[str] = []
+    reasoning_chunks: list[str] = []
+    done_data: dict[str, Any] = {}
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_text = line.removeprefix("data:").strip()
+                if data_text == "[DONE]":
+                    break
+                data = json.loads(data_text)
+                done_data = data
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+                delta = choices[0].get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                reasoning_chunk = delta.get("reasoning_content") or ""
+                if reasoning_chunk:
+                    reasoning_chunks.append(reasoning_chunk)
+                    if stream_callback is not None:
+                        stream_callback(reasoning_chunk)
+                chunk = delta.get("content") or ""
+                if chunk:
+                    chunks.append(chunk)
+                    if stream_callback is not None:
+                        stream_callback(chunk)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+    usage = _openai_usage(done_data)
+    if reasoning_chunks:
+        usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
+    return ModelResponse("".join(chunks), usage=usage)
+
+
 def _post_ollama_stream(
     url: str,
     payload: dict,
@@ -116,7 +193,7 @@ def _post_ollama_stream(
 
 @dataclass(frozen=True)
 class OpenAICompatibleModel:
-    supports_streaming: ClassVar[bool] = False
+    supports_streaming: ClassVar[bool] = True
 
     base_url: str
     model: str
@@ -124,6 +201,8 @@ class OpenAICompatibleModel:
     temperature: float = 0.0
     max_tokens: int = 2048
     timeout_seconds: int = 120
+    think: bool | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     async def chat(
         self,
@@ -139,14 +218,29 @@ class OpenAICompatibleModel:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if self.think is not None:
+            payload["think"] = self.think
+            payload["enable_thinking"] = self.think
+            payload["enableThinking"] = self.think
+        payload = _merge_openai_payload(payload, self.extra_body)
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        if stream_callback is not None:
+            return await asyncio.to_thread(
+                _post_openai_stream,
+                url,
+                payload,
+                headers,
+                self.timeout_seconds,
+                stream_callback,
+            )
         data = await asyncio.to_thread(
             _post_json,
-            f"{self.base_url.rstrip('/')}/chat/completions",
+            url,
             payload,
             headers,
             self.timeout_seconds,
         )
-        content = data["choices"][0]["message"].get("content") or ""
+        content = _openai_chat_content(data)
         return ModelResponse(content, usage=_openai_usage(data))
 
 
@@ -215,6 +309,8 @@ class ModelManager:
                 temperature=spec.get("temperature", 0.0),
                 max_tokens=spec.get("max_tokens", 2048),
                 timeout_seconds=spec.get("timeout_seconds", 120),
+                think=spec.get("think"),
+                extra_body=spec.get("extra_body") or {},
             )
         if spec["kind"] == "ollama_native":
             return OllamaNativeModel(

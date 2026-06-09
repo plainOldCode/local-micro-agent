@@ -297,11 +297,18 @@ wall time only.
 When profiling is enabled, providers with native streaming support may also
 stream model output into `.local_micro_agent/model_streams/*.txt`; model-call
 profile records include `stream_path`, `stream_chunks`, and `stream_chars`.
-Ollama native supports this path. Providers without a streaming implementation
-fall back to the normal non-streaming call. Set
+Ollama native and OpenAI-compatible providers support this path. Set
 `workflow.profile_model_stream=false` to disable streaming artifacts, or tune
 `workflow.profile_model_stream_log_interval_chars` to control the compact
 progress lines written to `agent.log`.
+
+OpenAI-compatible providers also accept optional request passthrough fields:
+`think` adds common thinking-control keys (`think`, `enable_thinking`, and
+`enableThinking`) to the chat request, and `extra_body` is merged into the
+request body after the standard fields. This is useful for local servers such
+as LM Studio that expose model-specific custom fields in their chat templates.
+Some servers may ignore these keys on the OpenAI-compatible endpoint; verify
+with a smoke request before treating thinking as disabled for benchmark runs.
 
 For clean model-evaluation runs, do not inject prior-run winning patches or
 human-discovered transformation ladders into the prompt. Candidate ladders used

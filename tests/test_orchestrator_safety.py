@@ -8,8 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import local_micro_agent.models as model_module
 from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent, ReadDecision
-from local_micro_agent.models import ModelResponse, _ollama_usage, _openai_usage
+from local_micro_agent.models import ModelResponse, OpenAICompatibleModel, _ollama_usage, _openai_usage
 from local_micro_agent.prompts import (
     brainstorm_prompt,
     code_prompt,
@@ -228,6 +229,82 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual(usage["prompt_tokens"], 11)
         self.assertEqual(usage["completion_tokens"], 13)
         self.assertEqual(usage["total_tokens"], 24)
+
+    def test_openai_compatible_model_sends_think_and_extra_body(self) -> None:
+        captured = {}
+        original = model_module._post_json
+
+        def fake_post_json(url, payload, headers, timeout):
+            captured.update(
+                {"url": url, "payload": payload, "headers": headers, "timeout": timeout}
+            )
+            return {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+
+        model_module._post_json = fake_post_json
+        try:
+            response = asyncio.run(
+                OpenAICompatibleModel(
+                    base_url="http://localhost:1234/v1",
+                    model="local",
+                    api_key_env="MISSING_API_KEY",
+                    temperature=0.2,
+                    max_tokens=42,
+                    timeout_seconds=7,
+                    think=False,
+                    extra_body={"enableThinking": False, "custom": {"field": 1}},
+                ).chat([{"role": "user", "content": "hello"}])
+            )
+        finally:
+            model_module._post_json = original
+
+        self.assertEqual(response.content, "ok")
+        self.assertEqual(captured["url"], "http://localhost:1234/v1/chat/completions")
+        self.assertEqual(captured["timeout"], 7)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer local")
+        self.assertEqual(captured["payload"]["model"], "local")
+        self.assertEqual(captured["payload"]["temperature"], 0.2)
+        self.assertEqual(captured["payload"]["max_tokens"], 42)
+        self.assertFalse(captured["payload"]["think"])
+        self.assertFalse(captured["payload"]["enable_thinking"])
+        self.assertFalse(captured["payload"]["enableThinking"])
+        self.assertEqual(captured["payload"]["custom"], {"field": 1})
+
+    def test_openai_compatible_model_uses_streaming_helper(self) -> None:
+        captured = {}
+        original = model_module._post_openai_stream
+
+        def fake_stream(url, payload, headers, timeout, stream_callback):
+            captured.update({"url": url, "payload": payload, "timeout": timeout})
+            stream_callback("he")
+            stream_callback("llo")
+            return ModelResponse(
+                "hello",
+                usage={"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            )
+
+        model_module._post_openai_stream = fake_stream
+        try:
+            chunks: list[str] = []
+            response = asyncio.run(
+                OpenAICompatibleModel(
+                    base_url="http://localhost:1234/v1",
+                    model="local",
+                    think=True,
+                ).chat(
+                    [{"role": "user", "content": "hello"}],
+                    stream_callback=chunks.append,
+                )
+            )
+        finally:
+            model_module._post_openai_stream = original
+
+        self.assertEqual(response.content, "hello")
+        self.assertEqual(chunks, ["he", "llo"])
+        self.assertEqual(captured["url"], "http://localhost:1234/v1/chat/completions")
+        self.assertTrue(captured["payload"]["think"])
 
     def test_log_prefix_includes_timestamp(self) -> None:
         output = io.StringIO()
