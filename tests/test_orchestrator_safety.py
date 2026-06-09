@@ -108,6 +108,26 @@ class _StreamingModelManager:
         return _StreamingModel(self.chunks)
 
 
+class _ReasoningStreamingModel:
+    supports_streaming = True
+
+    async def chat(self, messages, stream_callback=None):
+        if stream_callback is not None:
+            stream_callback({"kind": "reasoning", "content": "think-a"})
+            stream_callback({"kind": "reasoning", "content": "think-b"})
+            stream_callback('{"changes":')
+            stream_callback("[]}")
+        return ModelResponse(
+            '{"changes":[]}',
+            usage={"reasoning_content_chars": len("think-athink-b")},
+        )
+
+
+class _ReasoningStreamingModelManager:
+    def get(self, role):
+        return _ReasoningStreamingModel()
+
+
 class _SequenceModel:
     def __init__(self, outputs: list[str]):
         self.outputs = outputs
@@ -338,6 +358,49 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual(chunks, ["he", "llo"])
         self.assertEqual(captured["url"], "http://localhost:1234/v1/chat/completions")
         self.assertTrue(captured["payload"]["think"])
+
+    def test_ollama_stream_captures_thinking_separately(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                rows = [
+                    {"message": {"thinking": "think-a"}},
+                    {"message": {"thinking": "think-b", "content": "ok"}},
+                    {"done": True, "prompt_eval_count": 2, "eval_count": 3},
+                ]
+                return iter((json.dumps(row).encode("utf-8") for row in rows))
+
+        original = model_module.urllib.request.urlopen
+        model_module.urllib.request.urlopen = lambda request, timeout: FakeResponse()
+        try:
+            chunks: list[object] = []
+            response = model_module._post_ollama_stream(
+                "http://localhost:11434/api/chat",
+                {"model": "fake", "messages": [], "stream": True},
+                {},
+                30,
+                chunks.append,
+            )
+        finally:
+            model_module.urllib.request.urlopen = original
+
+        self.assertEqual(response.content, "ok")
+        self.assertEqual(
+            chunks,
+            [
+                {"kind": "reasoning", "content": "think-a"},
+                {"kind": "reasoning", "content": "think-b"},
+                "ok",
+            ],
+        )
+        self.assertEqual(response.usage["reasoning_content_chars"], len("think-athink-b"))
+        self.assertFalse(response.usage["reasoning_only_response"])
+        self.assertEqual(response.usage["completion_tokens"], 3)
 
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
@@ -717,6 +780,54 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(model_event["stream_chunks"], 2)
             self.assertEqual(model_event["stream_chars"], len('{"changes":[]}'))
             self.assertEqual(model_event["stream_path"], ".local_micro_agent/model_streams/" + stream_files[0].name)
+
+    def test_profile_agent_records_reasoning_stream_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {"default": "stream"},
+                "providers": {"stream": {"kind": "ollama_native", "model": "fake"}},
+                "mcp_servers": {},
+                "workflow": {
+                    "profile_agent": True,
+                    "profile_model_stream_log_interval_chars": 0,
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _ReasoningStreamingModelManager()
+
+            decision = asyncio.run(
+                agent._json_call(
+                    "coder",
+                    [{"role": "user", "content": "make no changes"}],
+                    schema=CodeDecision,
+                )
+            )
+
+            self.assertIsNotNone(decision)
+            stream_files = sorted((repo / ".local_micro_agent" / "model_streams").glob("*.txt"))
+            reasoning_files = sorted(
+                (repo / ".local_micro_agent" / "model_streams").glob("*.reasoning.txt")
+            )
+            content_files = [
+                path for path in stream_files if not path.name.endswith(".reasoning.txt")
+            ]
+            self.assertEqual(len(content_files), 1)
+            self.assertEqual(len(reasoning_files), 1)
+            self.assertEqual(content_files[0].read_text(), '{"changes":[]}')
+            self.assertEqual(reasoning_files[0].read_text(), "think-athink-b")
+            profile_path = repo / ".local_micro_agent" / "profile_events.jsonl"
+            rows = [
+                json.loads(line)
+                for line in profile_path.read_text().splitlines()
+                if line.strip()
+            ]
+            model_event = next(row for row in rows if row["event_type"] == "model_call")
+            self.assertEqual(model_event["stream_chunks"], 2)
+            self.assertEqual(model_event["reasoning_stream_chunks"], 2)
+            self.assertEqual(model_event["reasoning_stream_chars"], len("think-athink-b"))
+            self.assertEqual(model_event["reasoning_content_chars"], len("think-athink-b"))
 
     def test_metric_rejects_non_improvement_and_restores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

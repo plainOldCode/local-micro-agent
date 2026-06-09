@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Protocol
 
 
+StreamChunk = str | dict[str, str]
+StreamCallback = Callable[[StreamChunk], None]
+
+
 @dataclass(frozen=True)
 class ModelResponse:
     content: str
@@ -19,7 +23,7 @@ class ChatModel(Protocol):
     async def chat(
         self,
         messages: list[dict[str, str]],
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> str | ModelResponse:
         ...
 
@@ -113,7 +117,7 @@ def _post_openai_stream(
     payload: dict[str, Any],
     headers: dict[str, str],
     timeout: int,
-    stream_callback: Callable[[str], None] | None,
+    stream_callback: StreamCallback | None,
 ) -> ModelResponse:
     stream_payload = _openai_stream_payload(payload)
     body = json.dumps(stream_payload).encode("utf-8")
@@ -168,7 +172,7 @@ def _post_ollama_stream(
     payload: dict,
     headers: dict[str, str],
     timeout: int,
-    stream_callback: Callable[[str], None] | None,
+    stream_callback: StreamCallback | None,
 ) -> ModelResponse:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -178,6 +182,7 @@ def _post_ollama_stream(
         method="POST",
     )
     chunks: list[str] = []
+    reasoning_chunks: list[str] = []
     done_data: dict[str, Any] = {}
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -188,6 +193,13 @@ def _post_ollama_stream(
                 data = json.loads(line)
                 message = data.get("message")
                 if isinstance(message, dict):
+                    reasoning_chunk = (
+                        message.get("thinking") or message.get("reasoning_content") or ""
+                    )
+                    if reasoning_chunk:
+                        reasoning_chunks.append(reasoning_chunk)
+                        if stream_callback is not None:
+                            stream_callback({"kind": "reasoning", "content": reasoning_chunk})
                     chunk = message.get("content") or ""
                     if chunk:
                         chunks.append(chunk)
@@ -199,7 +211,11 @@ def _post_ollama_stream(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    return ModelResponse("".join(chunks), usage=_ollama_usage(done_data))
+    usage = _ollama_usage(done_data)
+    if reasoning_chunks:
+        usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
+        usage["reasoning_only_response"] = not bool(chunks)
+    return ModelResponse("".join(chunks), usage=usage)
 
 
 @dataclass(frozen=True)
@@ -219,7 +235,7 @@ class OpenAICompatibleModel:
     async def chat(
         self,
         messages: list[dict[str, str]],
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> ModelResponse:
         headers = {}
         if self.api_key_env:
@@ -274,7 +290,7 @@ class OllamaNativeModel:
     async def chat(
         self,
         messages: list[dict[str, str]],
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> ModelResponse:
         payload = {
             "model": self.model,
@@ -299,8 +315,14 @@ class OllamaNativeModel:
                 stream_callback,
             )
         data = await asyncio.to_thread(_post_json, url, payload, {}, self.timeout_seconds)
-        content = data["message"].get("content") or ""
-        return ModelResponse(content, usage=_ollama_usage(data))
+        message = data.get("message") or {}
+        content = message.get("content") or ""
+        usage = _ollama_usage(data)
+        reasoning = message.get("thinking") or message.get("reasoning_content") or ""
+        if reasoning:
+            usage["reasoning_content_chars"] = len(reasoning)
+            usage["reasoning_only_response"] = not bool(content)
+        return ModelResponse(content, usage=usage)
 
 
 class ModelManager:

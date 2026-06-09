@@ -282,6 +282,13 @@ class MicroAgent:
             if value is not None:
                 fields[key] = int(value)
 
+        reasoning_chars = numeric("reasoning_content_chars")
+        if reasoning_chars is not None:
+            fields["reasoning_content_chars"] = int(reasoning_chars)
+        reasoning_only = usage.get("reasoning_only_response")
+        if isinstance(reasoning_only, bool):
+            fields["reasoning_only_response"] = reasoning_only
+
         prompt_duration = duration_fields["provider_prompt_eval_duration_ns"]
         completion_duration = duration_fields["provider_eval_duration_ns"]
         total_duration = duration_fields["provider_total_duration_ns"]
@@ -331,6 +338,7 @@ class MicroAgent:
             "model_stream_dir", ".local_micro_agent/model_streams"
         )
         stream_path = stream_dir / ("-".join(label_parts) + ".txt")
+        reasoning_stream_path = stream_dir / ("-".join(label_parts) + ".reasoning.txt")
         stream_path.parent.mkdir(parents=True, exist_ok=True)
         stream_path.write_text("")
         interval = int(workflow.get("profile_model_stream_log_interval_chars", 2000) or 0)
@@ -339,6 +347,9 @@ class MicroAgent:
             "stream_path": self._repo_relative_path(stream_path),
             "stream_chunks": 0,
             "stream_chars": 0,
+            "reasoning_stream_path": self._repo_relative_path(reasoning_stream_path),
+            "reasoning_stream_chunks": 0,
+            "reasoning_stream_chars": 0,
         }
         next_log_at = {"value": interval}
         self._log(
@@ -347,8 +358,22 @@ class MicroAgent:
             f"provider={provider.get('kind', '')} path={stats['stream_path']}"
         )
 
-        def on_chunk(chunk: str) -> None:
+        def on_chunk(chunk: Any) -> None:
+            chunk_kind = "content"
+            if isinstance(chunk, dict):
+                chunk_kind = str(chunk.get("kind") or "content")
+                chunk = str(chunk.get("content") or "")
             if not chunk:
+                return
+            if chunk_kind == "reasoning":
+                with reasoning_stream_path.open("a") as handle:
+                    handle.write(chunk)
+                stats["reasoning_stream_chunks"] = (
+                    int(stats.get("reasoning_stream_chunks", 0)) + 1
+                )
+                stats["reasoning_stream_chars"] = (
+                    int(stats.get("reasoning_stream_chars", 0)) + len(chunk)
+                )
                 return
             with stream_path.open("a") as handle:
                 handle.write(chunk)
