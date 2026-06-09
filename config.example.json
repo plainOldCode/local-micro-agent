@@ -12,7 +12,7 @@
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:27b",
-      "temperature": 0.1,
+      "temperature": 0.0,
       "max_tokens": 32768,
       "num_ctx": 64000,
       "think": false,
