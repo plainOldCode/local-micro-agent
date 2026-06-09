@@ -14,6 +14,7 @@ from local_micro_agent.models import ModelResponse, OpenAICompatibleModel, _olla
 from local_micro_agent.prompts import (
     brainstorm_prompt,
     code_prompt,
+    read_prompt,
     reflect_prompt,
     semantic_analysis_prompt,
     spec_prompt,
@@ -2787,6 +2788,78 @@ value = 'fast'
             todo_plan = repo / ".local_micro_agent" / "todo_plan.json"
             self.assertIn("hash_build", active_todo.read_text())
             self.assertIn("todo-000-hash_build", todo_plan.read_text())
+
+    def test_brainstorm_selection_can_refresh_read_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            history_dir = repo / ".local_micro_agent"
+            history_dir.mkdir()
+            (history_dir / "candidates.jsonl").write_text(
+                '{"status":"rejected","strategy_axis":"issue_slot_pressure","strategy_axes":["issue_slot_pressure"],"reason":"bad bundle"}\n'
+                '{"status":"rejected","strategy_axis":"issue_slot_pressure","strategy_axes":["issue_slot_pressure"],"reason":"same hazard"}\n'
+            )
+            (history_dir / "failure_memory.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop": 2,
+                        "strategy_axis": "issue_slot_pressure",
+                        "failure_class": "correctness_failure",
+                        "why_invalid": "diagnostic improved but same-bundle read broke tests",
+                        "next_rule": "repair_with_constraint",
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    brainstorm_after_rejections=2,
+                    brainstorm_refresh_read_after_selection=True,
+                    adaptive_search_memory=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test", current=AgentStateName.REFLECT)
+            state.plan_markdown = "seeded"
+            state.file_context = [FileSnapshot("target.py", target.read_text())]
+            state.scratch["best_metric"] = 110870
+            models = _RoleModelManager(
+                {
+                    "brainstorm": (
+                        "1. strategy_axis: issue_slot_pressure\n"
+                        "family_key: bundle_dependency_repair\n"
+                        "Repair the dependency hazard before trying the lower bundle signal.\n"
+                        "2. strategy_axis: data_flow\nother\n"
+                        "3. strategy_axis: resource_management\nthird"
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            asyncio.run(agent.reflect())
+
+            self.assertEqual(state.current, AgentStateName.READ)
+            focus = state.scratch["focused_read_context"]
+            self.assertIn("bundle_dependency_repair", focus)
+            self.assertIn("failure_memory", focus)
+            self.assertIn("repair_with_constraint", focus)
+            self.assertIn("110870", focus)
+            self.assertIn("promoted to focused READ/SPEC refresh", "\n".join(state.notes))
+
+    def test_read_prompt_includes_focused_read_context(self) -> None:
+        state = AgentState(repo_root=Path("."), user_request="test")
+        state.plan_markdown = "seeded"
+        state.scratch["focused_read_context"] = "selected tactic and failure memory"
+
+        messages = read_prompt(state)
+
+        self.assertIn("Focused read context", messages[1]["content"])
+        self.assertIn("selected tactic and failure memory", messages[1]["content"])
 
     def test_all_skipped_streak_requires_new_brainstorm_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

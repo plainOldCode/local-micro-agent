@@ -161,6 +161,9 @@ def plan_prompt(state: AgentState, project_context: str = "") -> list[dict[str, 
 
 def read_prompt(state: AgentState) -> list[dict[str, str]]:
     user_content = f"Plan:\n{state.plan_markdown}"
+    focused = state.scratch.get("focused_read_context")
+    if isinstance(focused, str) and focused.strip():
+        user_content = f"{user_content}\n\nFocused read context:\n{focused}"
     external_context = external_context_block(state)
     if external_context:
         user_content = f"{user_content}\n\n{external_context}"

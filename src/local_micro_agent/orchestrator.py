@@ -452,7 +452,9 @@ class MicroAgent:
                 self.state.notes.append(f"Loaded semantic analysis: {path}")
         if not workflow.get("semantic_analysis_after_read"):
             return
-        focus = str(workflow.get("semantic_analysis_focus", ""))
+        focus = self._focused_read_model_context(
+            str(workflow.get("semantic_analysis_focus", ""))
+        )
         role = str(workflow.get("semantic_analysis_model_role", "planner"))
         try:
             output = await self._model_chat(
@@ -495,7 +497,7 @@ class MicroAgent:
             return
         if workflow.get("run_spec_after_read"):
             self.state.scratch.pop("run_spec", None)
-            focus = str(workflow.get("run_spec_focus", ""))
+            focus = self._focused_read_model_context(str(workflow.get("run_spec_focus", "")))
             role = str(workflow.get("run_spec_model_role", "planner"))
             try:
                 output = await self._model_chat(
@@ -527,6 +529,13 @@ class MicroAgent:
     def _run_spec_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("run_spec_after_read") or workflow.get("run_spec_enabled"))
+
+    def _focused_read_model_context(self, configured_focus: str = "") -> str:
+        parts = [configured_focus.strip()] if configured_focus.strip() else []
+        focused = self.state.scratch.get("focused_read_context")
+        if isinstance(focused, str) and focused.strip():
+            parts.append(f"Focused read context:\n{focused}")
+        return "\n\n".join(parts)
 
     def _filter_read_files(self, files: list[str]) -> list[str]:
         external_paths = self._external_context_path_keys()
@@ -644,7 +653,11 @@ class MicroAgent:
     async def reflect(self) -> None:
         if self._should_brainstorm():
             await self._brainstorm()
-            self.state.current = AgentStateName.CODE
+            if self._brainstorm_refresh_read_enabled() and self._selected_tactic_for_current_loop():
+                self._prepare_brainstorm_refresh_epoch()
+                self.state.current = AgentStateName.READ
+            else:
+                self.state.current = AgentStateName.CODE
             return
         feedback_notes_limit = int(
             self.config.get("workflow", {}).get("feedback_notes_limit", 12)
@@ -717,6 +730,34 @@ class MicroAgent:
             self._persist_brainstorm_tactics(brainstorm, reject_summary)
             self._persist_brainstorm_selection()
             self.state.notes.append("Brainstorm tactics added for next CODE attempt")
+
+    def _brainstorm_refresh_read_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("brainstorm_refresh_read_after_selection"))
+
+    def _prepare_brainstorm_refresh_epoch(self) -> None:
+        selected_tactic = self._selected_tactic_for_current_loop()
+        if not selected_tactic:
+            return
+        failure_memory = self._format_failure_memory()
+        focus = {
+            "selected_tactic": selected_tactic,
+            "recent_reject_summary": self._format_recent_reject_summary(),
+            "failure_memory": failure_memory,
+            "current_best_metric": self.state.scratch.get("best_metric"),
+            "instruction": (
+                "Refresh file context, semantic analysis, and run spec around this "
+                "brainstorm hypothesis before the next CODE attempt. Preserve accepted "
+                "patterns, and use failure memory to avoid invalid diagnostic shortcuts."
+            ),
+        }
+        self.state.scratch["brainstorm_refresh_focus"] = focus
+        self.state.scratch["focused_read_context"] = json.dumps(
+            focus, ensure_ascii=False, indent=2
+        )
+        self.state.notes.append(
+            "Brainstorm selected tactic promoted to focused READ/SPEC refresh"
+        )
 
     def _select_brainstorm_tactic(self, brainstorm: str) -> dict[str, str] | None:
         strict_axis_pool = self._strict_strategy_axis_pool_enabled()
