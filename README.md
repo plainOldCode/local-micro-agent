@@ -369,6 +369,7 @@ CODE context with exact function/class excerpts:
 ## Files
 
 - `config.example.json`: provider and workflow configuration.
+- `config/`: ready-to-use local model provider configs.
 - `src/local_micro_agent/orchestrator.py`: FSM runner.
 - `src/local_micro_agent/state.py`: single global state bag.
 - `src/local_micro_agent/models.py`: model-manager abstraction.
@@ -386,4 +387,8 @@ python3 -m compileall src
 
 Copy `config.example.json`, point `models.default` at the preferred local
 model server, and set `workflow.seed_files` / `workflow.writable_files` for
-narrow experiments.
+narrow experiments. Existing tuned profiles live under `config/`, for example:
+
+```bash
+local-micro-agent --config config/config.qwen36-27b-mlx-ollama.json --repo . --request "..."
+```
