@@ -3,6 +3,7 @@
     "default": "qwen_local",
     "planner": "qwen_reason",
     "coder": "qwen_local",
+    "brainstorm": "qwen_explore",
     "reasoner": "qwen_reason",
     "tester": "qwen_local"
   },
@@ -22,6 +23,16 @@
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:27b",
       "temperature": 0.0,
+      "max_tokens": 4096,
+      "num_ctx": 64000,
+      "think": true,
+      "timeout_seconds": 300
+    },
+    "qwen_explore": {
+      "kind": "ollama_native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3.6:27b",
+      "temperature": 0.75,
       "max_tokens": 4096,
       "num_ctx": 64000,
       "think": true,
