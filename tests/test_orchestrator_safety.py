@@ -10,7 +10,13 @@ from pathlib import Path
 
 from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent, ReadDecision
 from local_micro_agent.models import ModelResponse, _ollama_usage, _openai_usage
-from local_micro_agent.prompts import brainstorm_prompt, code_prompt, reflect_prompt, semantic_analysis_prompt
+from local_micro_agent.prompts import (
+    brainstorm_prompt,
+    code_prompt,
+    reflect_prompt,
+    semantic_analysis_prompt,
+    spec_prompt,
+)
 from local_micro_agent.state import (
     AgentState,
     AgentStateName,
@@ -982,6 +988,73 @@ Background / non-constraints
             self.assertNotIn("1,363", curated.read_text())
             self.assertNotIn("1,363", state.scratch["semantic_analysis"])
 
+    def test_read_can_persist_run_spec_and_feed_code_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            state = AgentState(repo_root=repo, user_request="speed up target")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "seed_files": ["target.py"],
+                    "run_spec_after_read": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(
+                json.dumps(
+                    {
+                        "spec_id": "target-speed",
+                        "objective": "Reduce repeated target work.",
+                        "invariants": ["Preserve target output."],
+                        "known_facts": ["target.py defines value."],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "reduce repeated work",
+                                "strategy_axis": "performance",
+                                "family_key": "hot_path",
+                                "expected_signal": "cycles decreases",
+                                "status": "open",
+                            }
+                        ],
+                        "decision_rules": ["patch_miss means refresh source"],
+                    }
+                )
+            )
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            spec_path = repo / ".local_micro_agent" / "run_spec.json"
+            self.assertTrue(spec_path.exists())
+            self.assertEqual(state.scratch["run_spec"]["spec_id"], "target-speed")
+            messages = code_prompt(state)
+            joined = "\n".join(message["content"] for message in messages)
+            self.assertIn("Run-local spec", joined)
+            self.assertIn("task-001", joined)
+
+    def test_spec_prompt_requests_task_graph_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.plan_markdown = "plan"
+            state.file_context = [FileSnapshot("target.py", "value = 1\n")]
+
+            messages = spec_prompt(state)
+
+            self.assertIn("SPEC node", messages[0]["content"])
+            self.assertIn("task_graph", messages[0]["content"])
+            self.assertIn("target.py", messages[1]["content"])
+
     def test_structural_tactic_creates_structural_probe_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             agent = MicroAgent(
@@ -1003,6 +1076,39 @@ Background / non-constraints
             todo = agent.state.scratch["active_todo"]
             self.assertEqual(todo["tactic_stage"], "structural_probe")
             self.assertIn("scaffold/probe", todo["micro_goal"])
+
+    def test_active_todo_links_to_run_spec_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test", loop_count=7),
+            )
+            agent.state.scratch["run_spec"] = {
+                "spec_id": "perf",
+                "task_graph": [
+                    {
+                        "task_id": "task-002",
+                        "strategy_axis": "performance",
+                        "family_key": "hot_path",
+                        "status": "open",
+                    }
+                ],
+            }
+
+            agent._create_active_todo_from_selected_tactic(
+                {
+                    "strategy_axis": "performance",
+                    "family_key": "hot_path",
+                    "text": (
+                        "strategy_axis: performance\n"
+                        "family_key: hot_path\n"
+                        "Hook: target.py"
+                    ),
+                }
+            )
+
+            todo = agent.state.scratch["active_todo"]
+            self.assertEqual(todo["spec_task_id"], "task-002")
 
     def test_structural_correctness_failure_does_not_exhaust_todo_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1677,6 +1783,76 @@ Background / non-constraints
             self.assertIn("todo-001-performance", chain)
             self.assertIn("instructions unchanged", chain)
             self.assertIn("move the edit", chain)
+
+    def test_candidate_observation_updates_run_spec_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "spec_id": "perf",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "strategy_axis": "performance",
+                        "family_key": "hot_path",
+                        "status": "open",
+                    }
+                ],
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            todo = {
+                "todo_id": "todo-001-performance",
+                "status": "active",
+                "strategy_axis": "performance",
+                "spec_task_id": "task-001",
+            }
+            agent.state.scratch["run_spec"] = spec
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "miss",
+                [CodeChange("target.py", "performance edit", target="old", replacement="new")],
+                "same performance tactic",
+                "performance",
+            )
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected_no_changes",
+                metric=None,
+                applied=0,
+                failed=True,
+                patch_text="",
+                results=[],
+                failure_detail="Replacement target not found: target.py",
+                no_change_reason="Replacement target not found: target.py",
+            )
+
+            agent._append_candidate_history(
+                candidate,
+                status="rejected_no_changes",
+                metric=None,
+                applied=0,
+                failed=True,
+                extra=extra,
+            )
+
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = persisted["task_graph"][0]
+            self.assertEqual(task["status"], "needs_repair")
+            self.assertEqual(task["decision_hint"], "repair_with_fresh_source_context_before_retry")
+            self.assertEqual(task["last_observation"]["failure_class"], "patch_miss")
 
     def test_target_not_found_repair_can_fix_search_block_within_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

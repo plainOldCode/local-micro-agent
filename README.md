@@ -75,6 +75,20 @@ their configured providers unless you explicitly change the call-site and
 excluded-role lists. This keeps planner-style reasoning separate from strict
 patch generation and JSON repair paths.
 
+For long exploratory runs that otherwise drift between unrelated brainstorm
+ideas, enable `workflow.run_spec_after_read=true`. After `PLAN` and `READ`, the
+agent asks the model to synthesize a run-local spec from the current request,
+plan, read source, and semantic facts, then persists it to
+`workflow.run_spec_path` (default `.local_micro_agent/run_spec.json`). The spec
+contains objective/invariant facts plus a small `task_graph` of unit tasks with
+`task_id`, `strategy_axis`, `family_key`, expected signal, and status.
+`BRAINSTORM` is asked to derive tactics from open or repairable spec tasks, and
+new active todos keep `spec_task_id` lineage when a tactic maps to the graph.
+Candidate observations update the spec task state with controller hints such as
+`needs_repair`, `stale_variant`, `needs_guard_or_smaller_scope`, or
+`validated_no_metric_signal`, giving later loops an explicit repair/pivot/deepen
+signal instead of relying only on unstructured recent history.
+
 For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
 Rejected candidate fingerprints are then remembered inside the current run,
 and an identical later candidate is rejected before tests run. The rejection is

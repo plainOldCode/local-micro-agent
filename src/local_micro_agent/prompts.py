@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from .state import AgentState
 
 DEFAULT_CHAR_LIMIT = 15000
@@ -35,6 +37,33 @@ Keep it domain-neutral and grounded only in the supplied request, plan, source,
 and clearly labeled external advisory context.
 Prefer concrete read/write, ordering, lifecycle, API, or metric facts over generic advice."""
 
+SPEC_SYSTEM = """You are the SPEC node in a local coding-agent FSM.
+Do not write code. Convert the request, plan, read source, and semantic facts into
+one run-local execution spec that later BRAINSTORM/CODE/REFLECT attempts must follow.
+Output strict JSON with:
+{
+  "spec_id": "short-lowercase-id",
+  "objective": "one sentence",
+  "invariants": ["must preserve..."],
+  "known_facts": ["grounded fact from current read/source only"],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "title": "short task",
+      "strategy_axis": "axis_or_general_edit",
+      "family_key": "lowercase_snake_case_or_empty",
+      "expected_signal": "observable test/metric/diagnostic signal",
+      "status": "open"
+    }
+  ],
+  "decision_rules": ["when patch_miss then repair with fresh source", "..."]
+}
+Rules:
+- Ground every task in the supplied request, plan, source, and semantic facts.
+- Prefer small measurable unit tasks over broad ideas.
+- Do not include historical prior-run winners unless they are present in this run's input.
+- Keep task_graph to 3-8 tasks."""
+
 REFLECT_SYSTEM = """You are the REFLECT node in a local coding-agent FSM.
 Do not write code. Analyze only the latest rejected attempt and feedback.
 Output exactly 1-3 concise Markdown bullets:
@@ -48,6 +77,7 @@ Output exactly 3 numbered tactics in Markdown.
 Each tactic must:
 - be a different algorithmic or architectural paradigm
 - avoid repeating the rejected patterns
+- derive from an open or repairable Run-local spec task when one is supplied
 - name exactly one stable strategy_axis; prefer any domain axes explicitly
   requested by the task, otherwise use the supplied Known strategy axes
 - if Open novelty lanes are provided, include one novelty_lane line copied from
@@ -59,6 +89,7 @@ Each tactic must:
   listed in Forbidden family aliases and must avoid the same idea under a new name
 - put only secondary or uncertain category names after "new_axis_suggestion:"
 - include one concrete implementation hook in the supplied source
+- include one spec_task_id line when the tactic maps to a Run-local spec task
 Keep each tactic to 2 short sentences."""
 
 CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
@@ -161,6 +192,32 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
     ]
 
 
+def spec_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    semantic_analysis = state.scratch.get("semantic_analysis")
+    semantic_block = (
+        f"\n\nSemantic analysis:\n{semantic_analysis}"
+        if isinstance(semantic_analysis, str) and semantic_analysis.strip()
+        else ""
+    )
+    focus_block = f"\n\nSpec focus:\n{focus}" if focus.strip() else ""
+    return [
+        {"role": "system", "content": SPEC_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}"
+                f"{semantic_block}"
+                f"{focus_block}"
+            ),
+        },
+    ]
+
+
 def reflect_prompt(state: AgentState, feedback_notes_limit: int = 12) -> list[dict[str, str]]:
     external_context = external_context_block(state)
     external_block = f"\n\n{external_context}" if external_context else ""
@@ -208,6 +265,17 @@ def brainstorm_prompt(
         if isinstance(semantic_analysis, str) and semantic_analysis.strip()
         else ""
     )
+    run_spec = state.scratch.get("run_spec")
+    spec_block = (
+        f"Run-local spec:\n{run_spec}\n\n"
+        if isinstance(run_spec, str) and run_spec.strip()
+        else (
+            "Run-local spec:\n"
+            f"{json.dumps(run_spec, ensure_ascii=False, indent=2)}\n\n"
+            if isinstance(run_spec, dict) and run_spec
+            else ""
+        )
+    )
     return [
         {"role": "system", "content": BRAINSTORM_SYSTEM},
         {
@@ -218,6 +286,7 @@ def brainstorm_prompt(
                 f"Source files:\n{source_blocks}\n\n"
                 f"{external_block}"
                 f"{semantic_block}"
+                f"{spec_block}"
                 f"Current best/test summary:\n{state.latest_test_summary()}\n\n"
                 f"Known strategy axes:\n{', '.join(known_axes)}\n\n"
                 f"Cooled axes:\n{', '.join(cooled_axes) if cooled_axes else 'none'}\n\n"
@@ -251,6 +320,17 @@ def code_prompt(
         if isinstance(semantic_analysis, str) and semantic_analysis.strip()
         else ""
     )
+    run_spec = state.scratch.get("run_spec")
+    spec_block = (
+        f"\n\nRun-local spec:\n{run_spec}"
+        if isinstance(run_spec, str) and run_spec.strip()
+        else (
+            "\n\nRun-local spec:\n"
+            f"{json.dumps(run_spec, ensure_ascii=False, indent=2)}"
+            if isinstance(run_spec, dict) and run_spec
+            else ""
+        )
+    )
     reflection = state.scratch.get("reflection")
     reflection_block = (
         f"\n\nRetry reflection:\n{reflection}"
@@ -263,6 +343,7 @@ def code_prompt(
         f"Source files:\n{source_blocks}"
         f"{external_block}"
         f"{semantic_block}"
+        f"{spec_block}"
     )
     dynamic_content = (
         "Dynamic context for this CODE attempt:\n\n"

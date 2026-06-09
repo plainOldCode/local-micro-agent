@@ -24,6 +24,7 @@ from .prompts import (
     read_prompt,
     reflect_prompt,
     semantic_analysis_prompt,
+    spec_prompt,
     test_prompt,
 )
 from .state import AgentState, AgentStateName, CodeChange, ExternalContext, FileSnapshot, TestResult
@@ -433,6 +434,7 @@ class MicroAgent:
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
         await self._load_external_contexts()
         await self._maybe_refresh_semantic_analysis()
+        await self._maybe_refresh_run_spec()
         self.state.current = AgentStateName.CODE
 
     async def _maybe_refresh_semantic_analysis(self) -> None:
@@ -482,6 +484,116 @@ class MicroAgent:
         curated_path.parent.mkdir(parents=True, exist_ok=True)
         curated_path.write_text(curated + "\n")
         self.state.notes.append(f"Persisted semantic analysis: {path}")
+
+    async def _maybe_refresh_run_spec(self) -> None:
+        workflow = self.config.get("workflow", {})
+        path = self._workflow_artifact_path(
+            "run_spec_path", ".local_micro_agent/run_spec.json"
+        )
+        if path.exists():
+            spec = self._load_run_spec(path)
+            if spec:
+                self.state.scratch["run_spec"] = spec
+                self.state.notes.append(f"Loaded run spec: {path}")
+        if not (
+            workflow.get("run_spec_after_read")
+            or workflow.get("run_spec_enabled")
+            or workflow.get("run_spec_path")
+        ):
+            return
+        focus = str(workflow.get("run_spec_focus", ""))
+        role = str(workflow.get("run_spec_model_role", "planner"))
+        try:
+            output = await self._model_chat(
+                role,
+                spec_prompt(self.state, focus=focus),
+                call_site="run_spec",
+            )
+            spec = parse_json_object(output)
+        except Exception as exc:
+            self.state.notes.append(
+                f"Run spec model call failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        spec = self._normalize_run_spec(spec)
+        if not spec:
+            self.state.notes.append("Run spec discarded: no task_graph")
+            return
+        self.state.scratch["run_spec"] = spec
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+        self.state.notes.append(f"Persisted run spec: {path}")
+
+    @staticmethod
+    def _load_run_spec(path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _normalize_run_spec(self, spec: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(spec, dict):
+            return {}
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list) or not tasks:
+            return {}
+        normalized_tasks = []
+        known_axes = set(self._known_strategy_axes())
+        for index, task in enumerate(tasks, start=1):
+            if not isinstance(task, dict):
+                continue
+            axis = self._normalize_strategy_axis(str(task.get("strategy_axis", "")))
+            if not axis:
+                axis = "general_edit"
+            if self._strict_strategy_axis_pool_enabled() and axis not in known_axes:
+                axis = "general_edit"
+            task_id = str(task.get("task_id") or f"task-{index:03d}").strip()
+            normalized_tasks.append(
+                {
+                    "task_id": task_id,
+                    "title": str(task.get("title") or task_id).strip(),
+                    "strategy_axis": axis,
+                    "family_key": self._normalize_strategy_axis(
+                        str(task.get("family_key", ""))
+                    ),
+                    "expected_signal": str(task.get("expected_signal", "")).strip(),
+                    "status": str(task.get("status") or "open").strip(),
+                    "attempts": int(task.get("attempts", 0) or 0),
+                    "last_observation": task.get("last_observation", ""),
+                    "decision_hint": task.get("decision_hint", ""),
+                }
+            )
+        if not normalized_tasks:
+            return {}
+        return {
+            "version": 1,
+            "spec_id": str(spec.get("spec_id") or "run-spec").strip(),
+            "objective": str(spec.get("objective", "")).strip(),
+            "invariants": [
+                str(item).strip()
+                for item in spec.get("invariants", [])
+                if str(item).strip()
+            ]
+            if isinstance(spec.get("invariants"), list)
+            else [],
+            "known_facts": [
+                str(item).strip()
+                for item in spec.get("known_facts", [])
+                if str(item).strip()
+            ]
+            if isinstance(spec.get("known_facts"), list)
+            else [],
+            "task_graph": normalized_tasks,
+            "decision_rules": [
+                str(item).strip()
+                for item in spec.get("decision_rules", [])
+                if str(item).strip()
+            ]
+            if isinstance(spec.get("decision_rules"), list)
+            else [],
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
 
     async def reflect(self) -> None:
         if self._should_brainstorm():
@@ -641,6 +753,7 @@ class MicroAgent:
                         "strategy_axis": axis,
                         "family_key": family_key,
                         "novelty_lane": self._tactic_novelty_lane(block),
+                        "spec_task_id": self._explicit_spec_task_id(block),
                         "text": block.strip(),
                     }
                     record = {
@@ -696,6 +809,7 @@ class MicroAgent:
                 "strategy_axis": axis,
                 "family_key": family_key,
                 "novelty_lane": self._tactic_novelty_lane(block),
+                "spec_task_id": self._explicit_spec_task_id(block),
                 "text": block.strip(),
             }
             score, reasons = self._score_brainstorm_tactic(
@@ -766,6 +880,15 @@ class MicroAgent:
     @staticmethod
     def _explicit_tactic_family_key(text: str) -> str:
         return explicit_tactic_family_key(text)
+
+    @staticmethod
+    def _explicit_spec_task_id(text: str) -> str:
+        match = re.search(
+            r"spec[\s_*.-]*task[\s_*.-]*id\s*:\s*`?([A-Za-z0-9_.-]+)`?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else ""
 
     def _score_brainstorm_tactic(
         self,
@@ -1236,9 +1359,11 @@ class MicroAgent:
         tactic_text = selected_tactic.get("text", "")
         tactic_stage = self._tactic_stage_for_text(tactic_text)
         structural = tactic_stage.startswith("structural_")
+        spec_task_id = self._spec_task_id_for_tactic(selected_tactic)
         todo = {
             "todo_id": todo_id,
             "parent_tactic_id": f"brainstorm-loop-{self.state.loop_count}",
+            "spec_task_id": spec_task_id,
             "status": "active",
             "strategy_axis": axis,
             "family_key": self._tactic_family_key(tactic_text),
@@ -1279,6 +1404,32 @@ class MicroAgent:
         }
         self.state.scratch["active_todo"] = todo
         self._persist_todo_plan(todo)
+
+    def _spec_task_id_for_tactic(self, selected_tactic: dict[str, str]) -> str:
+        explicit = str(selected_tactic.get("spec_task_id", "") or "").strip()
+        if explicit:
+            return explicit
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict):
+            return ""
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list):
+            return ""
+        axis = self._normalize_strategy_axis(str(selected_tactic.get("strategy_axis", "")))
+        family = self._normalize_strategy_axis(str(selected_tactic.get("family_key", "")))
+        fallback = ""
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "open")) in {"validated", "retired", "failed"}:
+                continue
+            task_axis = self._normalize_strategy_axis(str(task.get("strategy_axis", "")))
+            task_family = self._normalize_strategy_axis(str(task.get("family_key", "")))
+            if family and task_family and family == task_family:
+                return str(task.get("task_id", ""))
+            if axis and task_axis == axis and not fallback:
+                fallback = str(task.get("task_id", ""))
+        return fallback
 
     def _tactic_stage_for_text(self, text: str) -> str:
         if not self.config.get("workflow", {}).get("structural_tactic_lifecycle", True):
@@ -4991,6 +5142,7 @@ class MicroAgent:
             "family_aliases": sorted(self._candidate_reason_family_aliases(candidate)),
             "changes": self._summarize_changes(candidate.changes),
             "todo_id": self._active_todo_id(),
+            "spec_task_id": self._active_todo_spec_task_id(),
         }
         if extra:
             record.update(
@@ -5011,6 +5163,7 @@ class MicroAgent:
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         self._append_todo_attempt(record)
+        self._update_run_spec_from_candidate_record(record)
 
     def _is_structural_learning_record(self, record: dict[str, Any]) -> bool:
         if not self.config.get("workflow", {}).get("structural_tactic_lifecycle", True):
@@ -5085,6 +5238,84 @@ class MicroAgent:
                 return ""
         return str(active_todo.get("todo_id", ""))
 
+    def _active_todo_spec_task_id(self) -> str:
+        if self._todo_contract_soft_now():
+            return ""
+        active_todo = self.state.scratch.get("active_todo")
+        if isinstance(active_todo, dict) and active_todo.get("status") in {"active", "attempted"}:
+            if self._todo_attempt_budget_exhausted(active_todo):
+                return ""
+            return str(active_todo.get("spec_task_id", "") or "")
+        return ""
+
+    def _update_run_spec_from_candidate_record(self, record: dict[str, Any]) -> None:
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict):
+            return
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list):
+            return
+        task = self._run_spec_task_for_record(tasks, record)
+        if task is None:
+            return
+        task["attempts"] = int(task.get("attempts", 0) or 0) + 1
+        task["last_observation"] = {
+            "loop": record.get("loop"),
+            "status": record.get("status"),
+            "metric": record.get("metric"),
+            "failure_class": record.get("failure_class"),
+            "stage_result": record.get("stage_result"),
+            "summary": self._truncate_text(str(record.get("summary", "")), 500),
+            "recovery_hint": record.get("recovery_hint"),
+        }
+        status = str(record.get("status", ""))
+        failure_class = str(record.get("failure_class", ""))
+        if status in {"improved", "accepted"}:
+            task["status"] = "validated"
+            task["decision_hint"] = "deepen_or_create_followup_from_validated_signal"
+        elif failure_class == "patch_miss":
+            task["status"] = "needs_repair"
+            task["decision_hint"] = "repair_with_fresh_source_context_before_retry"
+        elif failure_class == "duplicate_variant":
+            task["status"] = "stale_variant"
+            task["decision_hint"] = "pivot_or_reformulate_before_retry"
+        elif failure_class in {"invariant_broken", "scope_too_broad", "guard_missing"}:
+            task["status"] = "needs_guard_or_smaller_scope"
+            task["decision_hint"] = "shrink_scope_or_add_behavior_guard"
+        elif failure_class == "probe_no_signal":
+            task["status"] = "validated_no_metric_signal"
+            task["decision_hint"] = "change_measured_scope_or_retire"
+        elif status.startswith("rejected"):
+            task["status"] = "attempted"
+            task["decision_hint"] = "use_observation_before_next_action"
+        spec["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        self.state.scratch["run_spec"] = spec
+        path = self._workflow_artifact_path(
+            "run_spec_path", ".local_micro_agent/run_spec.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+
+    def _run_spec_task_for_record(
+        self, tasks: list[Any], record: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        spec_task_id = str(record.get("spec_task_id", "") or "")
+        if spec_task_id:
+            for task in tasks:
+                if isinstance(task, dict) and task.get("task_id") == spec_task_id:
+                    return task
+        axis = self._normalize_strategy_axis(str(record.get("strategy_axis", "")))
+        if not axis:
+            return None
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "open")) in {"validated", "retired", "failed"}:
+                continue
+            if self._normalize_strategy_axis(str(task.get("strategy_axis", ""))) == axis:
+                return task
+        return None
+
     def _append_todo_attempt(self, candidate_record: dict[str, Any]) -> None:
         todo_id = str(candidate_record.get("todo_id", ""))
         if not todo_id:
@@ -5106,6 +5337,7 @@ class MicroAgent:
             "tactic_stage": candidate_record.get("tactic_stage"),
             "stage_result": candidate_record.get("stage_result"),
             "reason": candidate_record.get("reason"),
+            "spec_task_id": candidate_record.get("spec_task_id"),
         }
         if candidate_record.get("budget_counted") is False:
             attempt["budget_counted"] = False
