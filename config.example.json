@@ -1,7 +1,7 @@
 {
   "models": {
     "default": "qwen_local",
-    "planner": "qwen_local",
+    "planner": "qwen_reason",
     "coder": "qwen_local",
     "reasoner": "qwen_reason",
     "tester": "qwen_local"

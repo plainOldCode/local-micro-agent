@@ -1,7 +1,7 @@
 {
   "models": {
     "default": "qwen35_ollama",
-    "planner": "qwen35_ollama",
+    "planner": "qwen35_reason",
     "coder": "qwen35_ollama",
     "reasoner": "qwen35_reason",
     "tester": "qwen35_ollama"
