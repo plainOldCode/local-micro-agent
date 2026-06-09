@@ -425,9 +425,9 @@ class MicroAgent:
             decision = ReadDecision(files=seeded_files, reason="seeded by workflow config")
         else:
             decision = await self._json_call("planner", read_prompt(self.state), ReadDecision)
-        self.state.planned_files = decision.files
+        self.state.planned_files = self._filter_read_files(decision.files)
         self.state.file_context = []
-        for rel_path in decision.files:
+        for rel_path in self.state.planned_files:
             abs_path = self.state.repo_root / rel_path
             content = await self.mcp.read_file(str(abs_path))
             content = self._context_for_file(rel_path, content)
@@ -490,16 +490,15 @@ class MicroAgent:
         path = self._workflow_artifact_path(
             "run_spec_path", ".local_micro_agent/run_spec.json"
         )
+        if not self._run_spec_enabled():
+            self.state.scratch.pop("run_spec", None)
+            return
         if path.exists():
             spec = self._load_run_spec(path)
             if spec:
                 self.state.scratch["run_spec"] = spec
                 self.state.notes.append(f"Loaded run spec: {path}")
-        if not (
-            workflow.get("run_spec_after_read")
-            or workflow.get("run_spec_enabled")
-            or workflow.get("run_spec_path")
-        ):
+        if not workflow.get("run_spec_after_read"):
             return
         focus = str(workflow.get("run_spec_focus", ""))
         role = str(workflow.get("run_spec_model_role", "planner"))
@@ -523,6 +522,48 @@ class MicroAgent:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
         self.state.notes.append(f"Persisted run spec: {path}")
+
+    def _run_spec_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("run_spec_after_read") or workflow.get("run_spec_enabled"))
+
+    def _filter_read_files(self, files: list[str]) -> list[str]:
+        external_paths = self._external_context_path_keys()
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for raw_path in files:
+            rel_path = str(raw_path).strip()
+            if not rel_path:
+                continue
+            path_key = self._repo_path_key(rel_path)
+            if path_key in external_paths:
+                self.state.notes.append(
+                    f"Skipped advisory external context as source file: {rel_path}"
+                )
+                continue
+            if path_key in seen:
+                continue
+            seen.add(path_key)
+            filtered.append(rel_path)
+        return filtered
+
+    def _external_context_path_keys(self) -> set[str]:
+        keys: set[str] = set()
+        for spec in self._external_context_specs():
+            for raw_path in (spec.get("path"), spec.get("source")):
+                if not raw_path:
+                    continue
+                keys.add(self._repo_path_key(str(raw_path)))
+        return {key for key in keys if key}
+
+    def _repo_path_key(self, path: str) -> str:
+        candidate = Path(path)
+        try:
+            if candidate.is_absolute():
+                candidate = candidate.relative_to(self.state.repo_root)
+        except ValueError:
+            return str(candidate)
+        return candidate.as_posix()
 
     @staticmethod
     def _load_run_spec(path: Path) -> dict[str, Any]:
@@ -3182,7 +3223,16 @@ class MicroAgent:
 
     def _writable_files(self) -> set[str]:
         workflow = self.config.get("workflow", {})
-        return set(workflow.get("writable_files") or self.state.planned_files)
+        candidates = workflow.get("writable_files") or self.state.planned_files
+        writable = {str(path) for path in candidates}
+        if workflow.get("allow_external_context_writes"):
+            return writable
+        external_paths = self._external_context_path_keys()
+        return {
+            path
+            for path in writable
+            if self._repo_path_key(path) not in external_paths
+        }
 
     async def _snapshot_files(self, paths: list[str]) -> dict[str, str | None]:
         snapshot = {}
