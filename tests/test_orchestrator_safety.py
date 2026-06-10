@@ -2190,6 +2190,64 @@ Background / non-constraints
             )
             self.assertFalse((repo / "pwned").exists())
 
+    def test_spec_mode_rejects_vacuous_synthesized_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 'old'\n")
+            model_output = json.dumps(
+                {
+                    "files": [
+                        {
+                            "path": "check_task.py",
+                            "content": (
+                                "import unittest\n\n"
+                                "class TaskTest(unittest.TestCase):\n"
+                                "    def test_placeholder(self):\n"
+                                "        self.assertTrue(True)\n"
+                            ),
+                        }
+                    ]
+                }
+            )
+            task = {
+                "task_id": "task-001",
+                "title": "write target",
+                "deliverables": ["target.py"],
+                "acceptance": {"kind": "synthesized"},
+            }
+            agent = MicroAgent(
+                {
+                    "models": {"default": "static"},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_acceptance_synth_retries": 0,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.models = _StaticModelManager(model_output)
+
+            async def exercise() -> bool:
+                await agent.mcp.start()
+                try:
+                    return await agent._synthesize_and_freeze_acceptance(task)
+                finally:
+                    await agent.mcp.close()
+
+            ok = asyncio.run(exercise())
+
+            self.assertFalse(ok)
+            self.assertNotEqual(task.get("status"), "closed")
+            self.assertNotIn("frozen_sha256", task.get("acceptance", {}))
+            self.assertIn("empty files or commands", "\n".join(agent.state.notes))
+            self.assertTrue(
+                agent._acceptance_results_ran_zero_tests(
+                    [TestResult(command="unittest", exit_code=0, stderr="Ran 0 tests in 0.000s")]
+                )
+            )
+
     def test_spec_mode_blocks_writes_to_frozen_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -645,6 +645,12 @@ class TodoLifecycleMixin:
                 continue
             red_results = await self._run_acceptance_commands(commands)
             red_failed = any(result.exit_code != 0 for result in red_results)
+            if not red_failed and self._acceptance_results_ran_zero_tests(red_results):
+                self.state.test_results = red_results
+                self.state.notes.append(
+                    f"Acceptance synth failed for {task_id} attempt {attempt}: zero tests discovered"
+                )
+                continue
             if not red_failed:
                 task["status"] = "closed"
                 task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -680,6 +686,14 @@ class TodoLifecycleMixin:
         )
         return False
 
+    @staticmethod
+    def _acceptance_results_ran_zero_tests(results: list[TestResult]) -> bool:
+        for result in results:
+            output = f"{result.stdout}\n{result.stderr}"
+            if re.search(r"\bRan\s+0\s+tests\b", output):
+                return True
+        return False
+
     def _normalize_acceptance_files(
         self, data: dict[str, Any], task_id: str
     ) -> list[tuple[str, str]]:
@@ -693,6 +707,8 @@ class TodoLifecycleMixin:
             raw_path = str(item.get("path") or f"test_{task_id}_{index}.py").strip()
             path = Path(raw_path)
             if path.is_absolute() or ".." in path.parts:
+                continue
+            if not fnmatch.fnmatch(path.name, "test*.py"):
                 continue
             content = str(item.get("content") or "")
             if not content.strip():
