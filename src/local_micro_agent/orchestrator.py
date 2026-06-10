@@ -84,6 +84,7 @@ class MicroAgent(
         await self.mcp.start()
         try:
             while self.state.current not in {AgentStateName.DONE, AgentStateName.FAILED}:
+                self.state.fsm_step_count += 1
                 if self.state.current == AgentStateName.PLAN:
                     self._log("PLAN")
                     await self._profiled_phase("PLAN", self.plan)

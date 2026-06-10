@@ -2486,18 +2486,23 @@ Background / non-constraints
             result = asyncio.run(agent.run())
 
             self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertGreater(result.fsm_step_count, result.loop_count)
             self.assertEqual((repo / "a.txt").read_text(), "done-a")
             self.assertEqual((repo / "b.txt").read_text(), "done-b")
             self.assertIn("Resumed run spec", "\n".join(result.notes))
             report = (artifact_dir / "spec_report.md").read_text()
             self.assertIn("status: `done`", report)
             self.assertIn("progress: 2/2 closed", report)
+            self.assertIn("code_test_loop_count: 1", report)
+            self.assertIn("fsm_step_count:", report)
+            self.assertIn("max_code_test_loops: 3", report)
             self.assertIn("task-001", report)
             self.assertIn("task-002", report)
             progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
             self.assertIn('"event": "scheduled"', progress_events)
             self.assertIn('"event": "closed"', progress_events)
             self.assertIn('"event": "done"', progress_events)
+            self.assertIn('"fsm_step":', progress_events)
 
     def test_run_spec_artifact_is_not_loaded_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

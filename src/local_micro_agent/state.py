@@ -77,6 +77,7 @@ class AgentState:
     user_request: str
     current: AgentStateName = AgentStateName.PLAN
     loop_count: int = 0
+    fsm_step_count: int = 0
     max_loops: int | None = None
     max_loops_defaulted: bool = field(default=True, init=False, repr=False)
     plan_markdown: str = ""

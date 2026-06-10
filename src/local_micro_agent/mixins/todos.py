@@ -246,6 +246,7 @@ class TodoLifecycleMixin:
             "event": event,
             "state": str(self.state.current),
             "loop": self.state.loop_count,
+            "fsm_step": self.state.fsm_step_count,
             "spec_id": spec.get("spec_id"),
             "active_task_id": spec.get("active_task_id"),
             "progress": self._run_spec_progress(spec),
@@ -1015,7 +1016,9 @@ class TodoLifecycleMixin:
             f"- objective: {spec.get('objective', '')}",
             f"- progress: {progress.get('closed', 0)}/{progress.get('total', 0)} closed, "
             f"{progress.get('deferred', 0)} deferred, {progress.get('failed', 0)} failed",
-            f"- loop_count: {self.state.loop_count}",
+            f"- code_test_loop_count: {self.state.loop_count}",
+            f"- fsm_step_count: {self.state.fsm_step_count}",
+            f"- max_code_test_loops: {self.state.max_loops}",
             "",
             "## Tasks",
             "",
