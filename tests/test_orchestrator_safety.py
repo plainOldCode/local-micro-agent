@@ -2658,6 +2658,84 @@ value = 'fast'
             self.assertEqual(rows[0]["metric"], 80)
             self.assertEqual(rows[1]["status"], "accepted")
 
+    def test_current_source_context_uses_line_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("alpha = 1\nbeta = 2\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"writable_files": ["target.py"]},
+            }
+            agent = MicroAgent(config, state)
+
+            async def format_context() -> str:
+                await agent.mcp.start()
+                try:
+                    return await agent._format_current_source_context()
+                finally:
+                    await agent.mcp.close()
+
+            context = asyncio.run(format_context())
+
+            self.assertIn("1: alpha = 1", context)
+            self.assertIn("2: beta = 2", context)
+
+    def test_target_not_found_repair_context_anchors_near_stale_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def unrelated():\n"
+                "    return 0\n\n"
+                "def hot_path():\n"
+                "    value = 'old'\n"
+                "    return value\n"
+            )
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "repair_source_context_char_limit": 12000,
+                    "repair_anchor_context_lines": 2,
+                },
+            }
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="edit hot path",
+                        target="def hot_path():\n    value = 'missing'\n",
+                        replacement="def hot_path():\n    value = 'fast'\n",
+                    )
+                ],
+                "edit hot path",
+            )
+
+            async def repair_context() -> str:
+                await agent.mcp.start()
+                try:
+                    return await agent._candidate_repair_source_context(
+                        candidate, {"target.py"}
+                    )
+                finally:
+                    await agent.mcp.close()
+
+            context = asyncio.run(repair_context())
+
+            self.assertIn("Original missing target/search text follows", context)
+            self.assertIn("Best current-source excerpt", context)
+            self.assertIn("4: def hot_path():", context)
+            self.assertIn("5:     value = 'old'", context)
+
     def test_target_not_found_repair_failure_records_repair_parent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2725,10 +2803,13 @@ value = 'fast'
                 .read_text()
                 .splitlines()[0]
             )
-            self.assertEqual(record["candidate_id"], "miss-repair1")
+            self.assertEqual(record["candidate_id"], "miss")
             self.assertEqual(record["status"], "rejected_no_changes")
-            self.assertEqual(record["repair_parent_id"], "miss")
             self.assertIn("Replacement target not found", record["failure_detail"])
+            self.assertIn(
+                "target-not-found repair rejected: repaired target still not found",
+                "\n".join(state.notes),
+            )
 
     def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

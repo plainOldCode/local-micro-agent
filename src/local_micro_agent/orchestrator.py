@@ -4459,6 +4459,60 @@ class MicroAgent:
         tail = limit - head
         return text[:head] + "\n[...truncated...]\n" + text[-tail:]
 
+    @staticmethod
+    def _line_numbered_text(text: str, start_line: int = 1) -> str:
+        lines = text.splitlines()
+        if not lines:
+            return ""
+        width = len(str(start_line + len(lines) - 1))
+        return "\n".join(
+            f"{line_no:>{width}}: {line}"
+            for line_no, line in enumerate(lines, start=start_line)
+        )
+
+    @staticmethod
+    def _anchor_tokens(text: str) -> set[str]:
+        return {
+            token.lower()
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
+            if len(token) >= 3
+        }
+
+    def _line_numbered_context(self, text: str, limit: int) -> str:
+        sliced = self._slice_text(text, limit)
+        return self._line_numbered_text(sliced)
+
+    def _best_anchor_excerpt(
+        self,
+        content: str,
+        anchor: str,
+        *,
+        context_lines: int,
+        limit: int,
+    ) -> str:
+        lines = content.splitlines()
+        if not lines:
+            return ""
+        tokens = self._anchor_tokens(anchor)
+        best_index = 0
+        best_score = -1
+        if tokens:
+            for index, line in enumerate(lines):
+                line_tokens = self._anchor_tokens(line)
+                score = len(tokens & line_tokens)
+                if score > best_score:
+                    best_index = index
+                    best_score = score
+        start = max(0, best_index - context_lines)
+        end = min(len(lines), best_index + context_lines + 1)
+        excerpt = "\n".join(lines[start:end])
+        if len(excerpt) > limit:
+            excerpt = self._slice_text(excerpt, limit)
+            start_line = 1
+        else:
+            start_line = start + 1
+        return self._line_numbered_text(excerpt, start_line=start_line)
+
     async def _format_current_source_context(self) -> str:
         workflow = self.config.get("workflow", {})
         if not workflow.get("current_source_context_before_code", True):
@@ -4476,9 +4530,8 @@ class MicroAgent:
                 blocks.append(f"### {rel_path}\n<missing>")
                 continue
             content = self._context_for_file(rel_path, content, record_note=False)
-            blocks.append(
-                f"### {rel_path}\n```text\n{self._slice_text(content, per_file_limit)}\n```"
-            )
+            numbered = self._line_numbered_context(content, per_file_limit)
+            blocks.append(f"### {rel_path}\n```text\n{numbered}\n```")
         return self._slice_text("\n\n".join(blocks), limit)
 
     @classmethod
@@ -5137,7 +5190,32 @@ class MicroAgent:
                 f"Candidate {candidate.candidate_id} target-not-found repair rejected: {note}"
             )
             return None
+        target_miss = await self._candidate_current_target_miss(repaired, allowed)
+        if target_miss:
+            self.state.notes.append(
+                "Candidate "
+                f"{candidate.candidate_id} target-not-found repair rejected: {target_miss}"
+            )
+            return None
         return repaired
+
+    async def _candidate_current_target_miss(
+        self, candidate: CodeCandidate, allowed: set[str]
+    ) -> str:
+        for change in candidate.changes:
+            if change.target is None or change.replacement is None:
+                continue
+            if change.path not in allowed:
+                return f"repaired change touches out-of-plan file {change.path}"
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / change.path))
+            except FileNotFoundError:
+                return f"repaired change targets missing file {change.path}"
+            if change.target not in content:
+                return f"repaired target still not found in {change.path}"
+            if content.count(change.target) != 1:
+                return f"repaired target is ambiguous in {change.path}"
+        return ""
 
     async def _target_not_found_repair_prompt(
         self,
@@ -5206,6 +5284,9 @@ class MicroAgent:
         limit = int(
             self.config.get("workflow", {}).get("repair_source_context_char_limit", 20000)
         )
+        context_lines = int(
+            self.config.get("workflow", {}).get("repair_anchor_context_lines", 18) or 18
+        )
         blocks = []
         seen = set()
         for change in candidate.changes:
@@ -5217,8 +5298,34 @@ class MicroAgent:
             except FileNotFoundError:
                 blocks.append(f"### {change.path}\n<missing>")
                 continue
+            anchor_excerpt = ""
+            if change.target:
+                anchor_limit = min(limit, 6000)
+                anchor_excerpt = self._best_anchor_excerpt(
+                    content,
+                    change.target,
+                    context_lines=context_lines,
+                    limit=anchor_limit,
+                )
+            if anchor_excerpt:
+                blocks.append(
+                    "### "
+                    f"{change.path}\n"
+                    "Original missing target/search text follows; it did not match the "
+                    "file exactly. Use it only to find the intended nearby region.\n"
+                    "```text\n"
+                    f"{self._truncate_text(change.target or '', 3000)}\n"
+                    "```\n"
+                    "Best current-source excerpt for that region follows with line numbers. "
+                    "Copy the repaired target/search text verbatim from these current lines, "
+                    "without the line-number prefixes.\n"
+                    "```text\n"
+                    f"{anchor_excerpt}\n"
+                    "```"
+                )
+                continue
             blocks.append(
-                f"### {change.path}\n```text\n{self._slice_text(content, limit)}\n```"
+                f"### {change.path}\n```text\n{self._line_numbered_context(content, limit)}\n```"
             )
         return "\n\n".join(blocks) if blocks else "No writable source context available."
 
