@@ -28,6 +28,21 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(coder["extra_options"]["top_k"], 20)
         self.assertEqual(coder["extra_options"]["min_p"], 0)
 
+        self.assertEqual(models["plan_deep"], "qwen36_a3b_plan_deep")
+        self.assertEqual(
+            workflow["model_role_overrides_by_call_site"]["plan"],
+            "plan_deep",
+        )
+        plan_deep = providers["qwen36_a3b_plan_deep"]
+        self.assertTrue(plan_deep["think"])
+        self.assertEqual(plan_deep["num_ctx"], 64000)
+        self.assertEqual(plan_deep["max_tokens"], 16384)
+        self.assertEqual(plan_deep["temperature"], 0.6)
+        self.assertEqual(plan_deep["timeout_seconds"], 900)
+        self.assertEqual(plan_deep["extra_options"]["top_p"], 0.95)
+        self.assertEqual(plan_deep["extra_options"]["top_k"], 20)
+        self.assertEqual(plan_deep["extra_options"]["min_p"], 0)
+
         self.assertEqual(models["spec_synth"], "qwen36_a3b_spec_synth")
         self.assertEqual(
             workflow["model_role_overrides_by_call_site"]["spec_synth"],

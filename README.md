@@ -288,8 +288,8 @@ call sites still applies; exact JSON/patch roles (`coder`, `brainstorm`,
 reasoning with empty final content, the call fails and the node takes its
 normal fallback path. Keep iterative output budgets small: the tuned configs
 cap JSON/patch and reflect-escalation lanes at 8K tokens. One-shot spec
-synthesis may use a larger dedicated lane, but should stay separated from
-retry/reflect lanes so repeated failures cannot burn long thinking budgets.
+synthesis and PLAN may use larger dedicated lanes, but should stay separated
+from retry/reflect lanes so repeated failures cannot burn long thinking budgets.
 A large `max_tokens` on a short controller call invites a full reasoning-only
 burn (`num_predict` includes thinking tokens on Ollama).
 
@@ -299,9 +299,10 @@ lane at `num_ctx=64000` to avoid runner reloads. Its default coder/tester lane
 uses `think=false`, `max_tokens=8192`, and low sampling (`temperature=0.15`,
 `top_p=0.9`, `top_k=20`, `min_p=0`) to reduce deterministic duplicate variants
 without making JSON/search-replace output too loose. `reflector` and
-`brainstorm` are fast no-think lanes. `spec_synth` is a separate one-shot
-thinking lane (`temperature=0.6`, `max_tokens=16384`) routed by call-site
-override, leaving `reasoner` as the protected 8K deep-reflect lane.
+`brainstorm` are fast no-think lanes. `plan_deep` and `spec_synth` are separate
+one-shot thinking lanes (`temperature=0.6`, `max_tokens=16384`) routed by
+call-site override, leaving `reasoner` as the protected 8K semantic/deep-reflect
+lane.
 
 For A3B model-tuning changes, run a short 10-loop smoke before long searches
 and inspect `profile_events.jsonl`: reasoning-only calls should be zero,

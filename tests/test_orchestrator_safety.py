@@ -1151,6 +1151,45 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(len(models.seen["reflector"]), 1)
             self.assertNotIn("reasoner", models.seen)
 
+    def test_call_site_model_override_can_pin_plan_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {
+                    "default": "exact",
+                    "planner": "planner-default",
+                    "plan_deep": "plan-deep",
+                    "reasoner": "deep-reason",
+                },
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reasoning_lane_enabled": True,
+                    "reasoning_lane_call_sites": ["plan"],
+                    "reasoning_lane_model_role": "reasoner",
+                    "model_role_overrides_by_call_site": {"plan": "plan_deep"},
+                },
+            }
+            agent = MicroAgent(config, AgentState(repo_root=repo, user_request="test"))
+            models = _RoleModelManager(
+                {
+                    "plan_deep": "plan output",
+                    "reasoner": "deep reasoning",
+                    "planner": "default planner",
+                }
+            )
+            agent.models = models
+
+            asyncio.run(
+                agent._model_chat(
+                    "planner", [{"role": "user", "content": "plan"}], call_site="plan"
+                )
+            )
+
+            self.assertEqual(len(models.seen["plan_deep"]), 1)
+            self.assertNotIn("reasoner", models.seen)
+            self.assertNotIn("planner", models.seen)
+
     def test_deep_reasoning_escalates_reflect_after_repeated_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

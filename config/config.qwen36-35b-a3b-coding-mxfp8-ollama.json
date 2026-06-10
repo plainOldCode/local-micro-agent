@@ -2,6 +2,7 @@
   "models": {
     "default": "qwen36_a3b_ollama",
     "planner": "qwen36_a3b_deep_reason",
+    "plan_deep": "qwen36_a3b_plan_deep",
     "coder": "qwen36_a3b_ollama",
     "brainstorm": "qwen36_a3b_brainstorm_fast",
     "reasoner": "qwen36_a3b_deep_reason",
@@ -34,6 +35,21 @@
       "num_ctx": 64000,
       "think": true,
       "timeout_seconds": 600,
+      "extra_options": {
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0
+      }
+    },
+    "qwen36_a3b_plan_deep": {
+      "kind": "ollama_native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3.6:35b-a3b-coding-mxfp8",
+      "temperature": 0.6,
+      "max_tokens": 16384,
+      "num_ctx": 64000,
+      "think": true,
+      "timeout_seconds": 900,
       "extra_options": {
         "top_p": 0.95,
         "top_k": 20,
@@ -174,6 +190,7 @@
       "tester"
     ],
     "model_role_overrides_by_call_site": {
+      "plan": "plan_deep",
       "reflect": "reflector",
       "brainstorm": "brainstorm",
       "spec_synth": "spec_synth"
