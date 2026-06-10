@@ -16,6 +16,8 @@ used as a base and selectively overridden.
 - `structural`: `search` plus the scaffold/probe/expand machinery for
   multi-step refactors: run-spec task graph, semantic analysis, structural
   tactic lifecycle, and structural state checkpoints.
+- `spec`: `structural` plus the experimental spec-mode scheduler. A v2
+  run_spec task graph becomes the deterministic loop driver.
 """
 from __future__ import annotations
 
@@ -75,10 +77,27 @@ _STRUCTURAL: dict[str, Any] = {
     "structural_state_checkpoint": True,
 }
 
+_SPEC: dict[str, Any] = {
+    **_STRUCTURAL,
+    "spec_mode": True,
+    "run_spec_enabled": True,
+    "run_spec_after_read": False,
+    "spec_resume": True,
+    "spec_max_tasks": 24,
+    "spec_task_attempt_budget": 8,
+    "spec_acceptance_dir": ".lma_acceptance",
+    "spec_acceptance_review": False,
+    "spec_regression_scope": "all",
+    "spec_invariant_commands": [],
+    "continue_after_improvement": False,
+    "deterministic_test_decision": True,
+}
+
 WORKFLOW_PRESETS: dict[str, dict[str, Any]] = {
     "minimal": _MINIMAL,
     "search": _SEARCH,
     "structural": _STRUCTURAL,
+    "spec": _SPEC,
 }
 
 

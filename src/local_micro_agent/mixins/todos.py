@@ -4,6 +4,7 @@ Extracted from orchestrator.py; mixed into MicroAgent.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import time
@@ -12,11 +13,12 @@ from typing import Any
 
 from ..decisions import CodeCandidate
 from ..prompts import spec_prompt
+from ..state import AgentStateName, FileSnapshot
 from ..validators import parse_json_object
 
 
 class TodoLifecycleMixin:
-    async def _maybe_refresh_run_spec(self) -> None:
+    async def _maybe_refresh_run_spec(self, force: bool = False) -> None:
         workflow = self.config.get("workflow", {})
         path = self._workflow_artifact_path(
             "run_spec_path", ".local_micro_agent/run_spec.json"
@@ -24,7 +26,7 @@ class TodoLifecycleMixin:
         if not self._run_spec_enabled():
             self.state.scratch.pop("run_spec", None)
             return
-        if workflow.get("run_spec_after_read"):
+        if workflow.get("run_spec_after_read") or force:
             self.state.scratch.pop("run_spec", None)
             focus = self._focused_read_model_context(str(workflow.get("run_spec_focus", "")))
             role = str(workflow.get("run_spec_model_role", "planner"))
@@ -57,7 +59,14 @@ class TodoLifecycleMixin:
 
     def _run_spec_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
-        return bool(workflow.get("run_spec_after_read") or workflow.get("run_spec_enabled"))
+        return bool(
+            workflow.get("run_spec_after_read")
+            or workflow.get("run_spec_enabled")
+            or workflow.get("spec_mode")
+        )
+
+    def _spec_mode_enabled(self) -> bool:
+        return bool(self.config.get("workflow", {}).get("spec_mode"))
 
     @staticmethod
     def _load_run_spec(path: Path) -> dict[str, Any]:
@@ -75,7 +84,11 @@ class TodoLifecycleMixin:
             return {}
         normalized_tasks = []
         known_axes = set(self._known_strategy_axes())
+        version = int(spec.get("version", 1) or 1)
+        max_tasks = int(self.config.get("workflow", {}).get("spec_max_tasks", 24) or 24)
         for index, task in enumerate(tasks, start=1):
+            if max_tasks > 0 and len(normalized_tasks) >= max_tasks:
+                break
             if not isinstance(task, dict):
                 continue
             axis = self._normalize_strategy_axis(str(task.get("strategy_axis", "")))
@@ -84,25 +97,24 @@ class TodoLifecycleMixin:
             if self._strict_strategy_axis_pool_enabled() and axis not in known_axes:
                 axis = "general_edit"
             task_id = str(task.get("task_id") or f"task-{index:03d}").strip()
-            normalized_tasks.append(
-                {
-                    "task_id": task_id,
-                    "title": str(task.get("title") or task_id).strip(),
-                    "strategy_axis": axis,
-                    "family_key": self._normalize_strategy_axis(
-                        str(task.get("family_key", ""))
-                    ),
-                    "expected_signal": str(task.get("expected_signal", "")).strip(),
-                    "status": str(task.get("status") or "open").strip(),
-                    "attempts": int(task.get("attempts", 0) or 0),
-                    "last_observation": task.get("last_observation", ""),
-                    "decision_hint": task.get("decision_hint", ""),
-                }
-            )
+            normalized = {
+                "task_id": task_id,
+                "title": str(task.get("title") or task_id).strip(),
+                "strategy_axis": axis,
+                "family_key": self._normalize_strategy_axis(str(task.get("family_key", ""))),
+                "expected_signal": str(task.get("expected_signal", "")).strip(),
+                "status": str(task.get("status") or "open").strip(),
+                "attempts": int(task.get("attempts", 0) or 0),
+                "last_observation": task.get("last_observation", ""),
+                "decision_hint": task.get("decision_hint", ""),
+            }
+            if version >= 2:
+                normalized.update(self._normalize_run_spec_v2_task(task))
+            normalized_tasks.append(normalized)
         if not normalized_tasks:
             return {}
-        return {
-            "version": 1,
+        normalized_spec = {
+            "version": 2 if version >= 2 else 1,
             "spec_id": str(spec.get("spec_id") or "run-spec").strip(),
             "objective": str(spec.get("objective", "")).strip(),
             "invariants": [
@@ -129,10 +141,360 @@ class TodoLifecycleMixin:
             else [],
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
+        if version >= 2:
+            normalized_spec["progress"] = self._run_spec_progress(normalized_spec)
+        return normalized_spec
+
+    def _normalize_run_spec_v2_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        depends_on = [
+            str(item).strip()
+            for item in task.get("depends_on", [])
+            if str(item).strip()
+        ] if isinstance(task.get("depends_on"), list) else []
+        deliverables = [
+            str(item).strip()
+            for item in task.get("deliverables", [])
+            if str(item).strip()
+        ] if isinstance(task.get("deliverables"), list) else []
+        read_hints = [
+            str(item).strip()
+            for item in task.get("read_hints", [])
+            if str(item).strip()
+        ] if isinstance(task.get("read_hints"), list) else []
+        acceptance = task.get("acceptance")
+        if not isinstance(acceptance, dict):
+            acceptance = {}
+        kind = str(acceptance.get("kind") or "command").strip() or "command"
+        commands = acceptance.get("commands")
+        if not isinstance(commands, list):
+            commands = workflow.get("test_commands", [])
+        normalized_acceptance = {
+            "kind": kind,
+            "commands": [str(command) for command in commands if str(command).strip()],
+        }
+        for key in ("test_paths", "frozen_sha256", "synthesized_at"):
+            value = acceptance.get(key)
+            if value not in (None, "", [], {}):
+                normalized_acceptance[key] = value
+        budget = task.get("budget")
+        if not isinstance(budget, dict):
+            budget = {}
+        attempts_max = int(
+            budget.get(
+                "attempts_max",
+                workflow.get("spec_task_attempt_budget", workflow.get("todo_attempt_budget", 3)),
+            )
+            or 1
+        )
+        attempts_used = int(budget.get("attempts_used", task.get("attempts", 0)) or 0)
+        return {
+            "depends_on": depends_on,
+            "deliverables": deliverables,
+            "read_hints": read_hints,
+            "acceptance": normalized_acceptance,
+            "budget": {"attempts_max": attempts_max, "attempts_used": attempts_used},
+            "closed_at": task.get("closed_at"),
+        }
 
     def _todo_soft_until_first_improvement_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("todo_soft_until_first_improvement", True))
+
+    def _run_spec_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "run_spec_path", ".local_micro_agent/run_spec.json"
+        )
+
+    def _persist_run_spec(self, spec: dict[str, Any]) -> None:
+        spec["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if int(spec.get("version", 1) or 1) >= 2:
+            spec["progress"] = self._run_spec_progress(spec)
+        self.state.scratch["run_spec"] = spec
+        path = self._run_spec_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+
+    def _run_spec_progress(self, spec: dict[str, Any]) -> dict[str, int]:
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list):
+            return {"total": 0, "closed": 0, "deferred": 0, "failed": 0}
+        statuses = [str(task.get("status", "")) for task in tasks if isinstance(task, dict)]
+        return {
+            "total": len(statuses),
+            "closed": statuses.count("closed"),
+            "deferred": statuses.count("deferred"),
+            "failed": statuses.count("failed"),
+        }
+
+    def _schedule_spec_task(self) -> None:
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict):
+            spec = self._load_run_spec(self._run_spec_path())
+            if spec:
+                spec = self._normalize_run_spec(spec)
+        if not isinstance(spec, dict) or int(spec.get("version", 1) or 1) < 2:
+            self.state.notes.append("Spec mode requires run_spec version 2")
+            self.state.current = self._retry_or_fail_without_spec()
+            return
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list) or not tasks:
+            self.state.current = self._retry_or_fail_without_spec()
+            return
+        self._clear_active_spec_task()
+        if all(str(task.get("status")) == "closed" for task in tasks if isinstance(task, dict)):
+            self._persist_run_spec(spec)
+            self.state.current = AgentStateName.DONE
+            return
+        open_candidates = self._schedulable_spec_tasks(tasks)
+        if not open_candidates:
+            restored = self._restore_deferred_spec_tasks(tasks)
+            if restored:
+                open_candidates = self._schedulable_spec_tasks(tasks)
+        if not open_candidates:
+            spec["progress"] = self._run_spec_progress(spec)
+            self._persist_run_spec(spec)
+            self.state.notes.append("Spec scheduler found no runnable task")
+            self.state.current = AgentStateName.FAILED
+            return
+        task = self._select_spec_task(tasks, open_candidates)
+        task["status"] = "in_progress"
+        task["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        spec["active_task_id"] = task.get("task_id")
+        self._persist_run_spec(spec)
+        todo = self._spec_task_to_active_todo(task)
+        self.state.scratch["active_todo"] = todo
+        self.state.scratch["current_spec_task_id"] = task.get("task_id")
+        self.state.scratch["current_spec_task"] = task
+        self._persist_todo_plan(todo)
+        self.state.notes.append(f"Scheduled spec task: {task.get('task_id')}")
+        self.state.current = AgentStateName.TASK_READ
+
+    def _retry_or_fail_without_spec(self) -> AgentStateName:
+        return AgentStateName.FAILED
+
+    def _clear_active_spec_task(self) -> None:
+        self.state.scratch.pop("current_spec_task_id", None)
+        self.state.scratch.pop("current_spec_task", None)
+        self.state.scratch.pop("active_todo", None)
+        active_path = self._workflow_artifact_path(
+            "active_todo_path", ".local_micro_agent/active_todo.json"
+        )
+        if active_path.exists():
+            active_path.unlink()
+
+    def _schedulable_spec_tasks(self, tasks: list[Any]) -> list[dict[str, Any]]:
+        closed = {
+            str(task.get("task_id"))
+            for task in tasks
+            if isinstance(task, dict) and str(task.get("status")) == "closed"
+        }
+        candidates = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "open")) != "open":
+                continue
+            deps = task.get("depends_on")
+            if isinstance(deps, list) and any(str(dep) not in closed for dep in deps):
+                continue
+            candidates.append(task)
+        return candidates
+
+    def _restore_deferred_spec_tasks(self, tasks: list[Any]) -> bool:
+        restored = False
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status")) != "deferred":
+                continue
+            if task.get("deferred_revisited"):
+                continue
+            task["status"] = "open"
+            task["deferred_revisited"] = True
+            restored = True
+        return restored
+
+    def _select_spec_task(
+        self, tasks: list[Any], candidates: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        dependent_counts = self._spec_dependent_counts(tasks)
+        order = {
+            str(task.get("task_id")): index
+            for index, task in enumerate(tasks)
+            if isinstance(task, dict)
+        }
+        return sorted(
+            candidates,
+            key=lambda task: (
+                0 if task.get("deferred_revisited") else 1,
+                -dependent_counts.get(str(task.get("task_id")), 0),
+                order.get(str(task.get("task_id")), 10_000),
+            ),
+        )[0]
+
+    def _spec_dependent_counts(self, tasks: list[Any]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            deps = task.get("depends_on")
+            if not isinstance(deps, list):
+                continue
+            for dep in deps:
+                key = str(dep)
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _spec_task_to_active_todo(self, task: dict[str, Any]) -> dict[str, Any]:
+        budget = task.get("budget") if isinstance(task.get("budget"), dict) else {}
+        return {
+            "todo_id": str(task.get("task_id")),
+            "spec_task_id": str(task.get("task_id")),
+            "status": "active",
+            "strategy_axis": str(task.get("strategy_axis") or "general_edit"),
+            "family_key": str(task.get("family_key") or task.get("strategy_axis") or ""),
+            "title": str(task.get("title") or task.get("task_id")),
+            "context": str(task.get("expected_signal") or task.get("title") or ""),
+            "micro_goal": "Complete the scheduled spec task and satisfy its frozen command acceptance.",
+            "implementation_hint": str(task.get("decision_hint") or ""),
+            "allowed_files": list(task.get("deliverables") or []),
+            "expected_signal": str(task.get("expected_signal") or ""),
+            "attempts": int(task.get("attempts", 0) or 0),
+            "budget": budget,
+            "source": "spec_scheduler",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "created_loop": self.state.loop_count,
+        }
+
+    async def _read_current_spec_task_context(self) -> None:
+        task = self._current_spec_task()
+        if not task:
+            self.state.current = AgentStateName.SCHEDULE
+            return
+        paths = self._spec_task_read_paths(task)
+        self.state.planned_files = self._filter_read_files(paths)
+        self.state.file_context = []
+        for rel_path in self.state.planned_files:
+            abs_path = self.state.repo_root / rel_path
+            try:
+                content = await self.mcp.read_file(str(abs_path))
+            except FileNotFoundError:
+                continue
+            content = self._context_for_file(rel_path, content)
+            self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
+        await self._load_external_contexts()
+        self.state.current = AgentStateName.CODE
+
+    def _spec_task_read_paths(self, task: dict[str, Any]) -> list[str]:
+        paths: list[str] = []
+        for key in ("read_hints", "deliverables"):
+            value = task.get(key)
+            if isinstance(value, list):
+                paths.extend(str(item) for item in value if str(item).strip())
+        spec = self.state.scratch.get("run_spec")
+        tasks = spec.get("task_graph") if isinstance(spec, dict) else []
+        deps = task.get("depends_on") if isinstance(task.get("depends_on"), list) else []
+        for dep in deps:
+            dep_task = next(
+                (
+                    item
+                    for item in tasks
+                    if isinstance(item, dict) and str(item.get("task_id")) == str(dep)
+                ),
+                None,
+            )
+            deliverables = dep_task.get("deliverables") if isinstance(dep_task, dict) else []
+            if isinstance(deliverables, list):
+                paths.extend(str(item) for item in deliverables if str(item).strip())
+        return list(dict.fromkeys(paths))
+
+    def _current_spec_task(self) -> dict[str, Any] | None:
+        task = self.state.scratch.get("current_spec_task")
+        if isinstance(task, dict):
+            return task
+        task_id = str(self.state.scratch.get("current_spec_task_id", "") or "")
+        spec = self.state.scratch.get("run_spec")
+        tasks = spec.get("task_graph") if isinstance(spec, dict) else []
+        for item in tasks:
+            if isinstance(item, dict) and str(item.get("task_id")) == task_id:
+                self.state.scratch["current_spec_task"] = item
+                return item
+        return None
+
+    def _current_spec_task_writable_files(self) -> list[str]:
+        if not self._spec_mode_enabled():
+            return []
+        task = self._current_spec_task()
+        if not task:
+            return []
+        deliverables = task.get("deliverables")
+        if not isinstance(deliverables, list):
+            return []
+        global_writable = self.config.get("workflow", {}).get("writable_files")
+        if not isinstance(global_writable, list) or not global_writable:
+            return [str(item) for item in deliverables if str(item).strip()]
+        allowed = {str(item) for item in global_writable}
+        patterns = [str(item) for item in global_writable]
+        return [
+            str(item)
+            for item in deliverables
+            if str(item) in allowed
+            or any(fnmatch.fnmatch(str(item), pattern) for pattern in patterns)
+        ]
+
+    def _test_commands_for_current_scope(self) -> list[str]:
+        task = self._current_spec_task() if self._spec_mode_enabled() else None
+        acceptance = task.get("acceptance") if isinstance(task, dict) else None
+        if isinstance(acceptance, dict) and acceptance.get("kind") in {"command", "metric"}:
+            commands = acceptance.get("commands")
+            if isinstance(commands, list) and commands:
+                return [str(command) for command in commands if str(command).strip()]
+        return [str(command) for command in self.config.get("workflow", {}).get("test_commands", [])]
+
+    def _handle_spec_task_test_result(self, failed: bool) -> None:
+        task = self._current_spec_task()
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(task, dict) or not isinstance(spec, dict):
+            self.state.current = AgentStateName.FAILED
+            return
+        budget = task.setdefault("budget", {})
+        attempts_used = int(budget.get("attempts_used", task.get("attempts", 0)) or 0) + 1
+        attempts_max = int(
+            budget.get(
+                "attempts_max",
+                self.config.get("workflow", {}).get("spec_task_attempt_budget", 3),
+            )
+            or 1
+        )
+        budget["attempts_used"] = attempts_used
+        task["attempts"] = attempts_used
+        task["last_observation"] = {
+            "loop": self.state.loop_count,
+            "failed": failed,
+            "summary": self.state.latest_test_summary(),
+        }
+        if not failed:
+            task["status"] = "closed"
+            task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self.state.notes.append(f"Closed spec task: {task.get('task_id')}")
+            self.state.loop_count += 1
+            self._persist_run_spec(spec)
+            self.state.current = AgentStateName.SCHEDULE
+            return
+        if attempts_used >= attempts_max:
+            task["status"] = "deferred" if not task.get("deferred_revisited") else "failed"
+            task["decision_hint"] = "budget_exhausted"
+            self.state.notes.append(
+                f"Spec task {task.get('task_id')} {task['status']} after {attempts_used} attempts"
+            )
+            self.state.loop_count += 1
+            self._persist_run_spec(spec)
+            self.state.current = AgentStateName.SCHEDULE
+            return
+        self.state.loop_count += 1
+        self._persist_run_spec(spec)
+        self.state.current = self._retry_state_after_failure()
 
     def _todo_contract_soft_now(self) -> bool:
         return (
@@ -821,6 +1183,8 @@ class TodoLifecycleMixin:
     def _update_run_spec_from_candidate_record(self, record: dict[str, Any]) -> None:
         spec = self.state.scratch.get("run_spec")
         if not isinstance(spec, dict):
+            return
+        if self._spec_mode_enabled() and int(spec.get("version", 1) or 1) >= 2:
             return
         tasks = spec.get("task_graph")
         if not isinstance(tasks, list):

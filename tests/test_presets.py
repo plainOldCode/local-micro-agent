@@ -43,6 +43,16 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertTrue(workflow["structural_tactic_lifecycle"])
         self.assertTrue(workflow["structural_state_checkpoint"])
 
+    def test_spec_preset_enables_spec_scheduler(self) -> None:
+        config = apply_workflow_preset({"workflow": {"preset": "spec"}})
+        workflow = config["workflow"]
+        self.assertTrue(workflow["spec_mode"])
+        self.assertTrue(workflow["run_spec_enabled"])
+        self.assertFalse(workflow["run_spec_after_read"])
+        self.assertEqual(workflow["spec_task_attempt_budget"], 8)
+        self.assertFalse(workflow["continue_after_improvement"])
+        self.assertTrue(workflow["deterministic_test_decision"])
+
     def test_explicit_workflow_key_wins_over_preset(self) -> None:
         config = apply_workflow_preset(
             {"workflow": {"preset": "search", "max_code_test_loops": 100}}

@@ -1779,6 +1779,123 @@ Background / non-constraints
             self.assertIn("Run-local spec", joined)
             self.assertIn("task-001", joined)
 
+    def test_spec_mode_schedules_v2_tasks_to_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "two-step",
+                        "objective": "Create two deliverables in order.",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "write a",
+                                "deliverables": ["a.txt"],
+                                "read_hints": ["a.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('a.txt').read_text() == 'done-a'\""
+                                    ],
+                                },
+                                "budget": {"attempts_max": 2},
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "write b",
+                                "depends_on": ["task-001"],
+                                "deliverables": ["b.txt"],
+                                "read_hints": ["b.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('b.txt').read_text() == 'done-b'\""
+                                    ],
+                                },
+                                "budget": {"attempts_max": 2},
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 5,
+                    "writable_files": ["*.txt"],
+                    "seed_files": [],
+                    "seed_changes": [
+                        {"path": "a.txt", "content": "done-a"},
+                        {"path": "b.txt", "content": "done-b"},
+                    ],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertEqual((repo / "a.txt").read_text(), "done-a")
+            self.assertEqual((repo / "b.txt").read_text(), "done-b")
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(spec["progress"], {"total": 2, "closed": 2, "deferred": 0, "failed": 0})
+            self.assertEqual([task["status"] for task in spec["task_graph"]], ["closed", "closed"])
+            self.assertEqual(spec["task_graph"][0]["budget"]["attempts_used"], 1)
+            self.assertEqual(spec["task_graph"][1]["budget"]["attempts_used"], 1)
+
+    def test_spec_mode_defers_task_after_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "blocked",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "write missing value",
+                                "deliverables": ["a.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('a.txt').read_text() == 'expected'\""
+                                    ],
+                                },
+                                "budget": {"attempts_max": 1},
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 3,
+                    "writable_files": ["a.txt"],
+                    "seed_files": [],
+                    "seed_changes": [{"path": "a.txt", "content": "wrong"}],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(spec["task_graph"][0]["status"], "failed")
+            self.assertEqual(spec["progress"], {"total": 1, "closed": 0, "deferred": 0, "failed": 1})
+
     def test_run_spec_artifact_is_not_loaded_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -87,6 +87,18 @@ class MicroAgent(
                 if self.state.current == AgentStateName.PLAN:
                     self._log("PLAN")
                     await self._profiled_phase("PLAN", self.plan)
+                elif self.state.current == AgentStateName.SPEC_SYNTH:
+                    self._log("SPEC_SYNTH")
+                    await self._profiled_phase("SPEC_SYNTH", self.spec_synth)
+                elif self.state.current == AgentStateName.SCHEDULE:
+                    self._log("SCHEDULE")
+                    await self._profiled_phase("SCHEDULE", self.schedule)
+                elif self.state.current == AgentStateName.TASK_READ:
+                    self._log("TASK_READ")
+                    await self._profiled_phase("TASK_READ", self.task_read)
+                elif self.state.current == AgentStateName.ACCEPT_SYNTH:
+                    self._log("ACCEPT_SYNTH")
+                    await self._profiled_phase("ACCEPT_SYNTH", self.accept_synth)
                 elif self.state.current == AgentStateName.READ:
                     self._log("READ")
                     await self._profiled_phase("READ", self.read)
@@ -177,6 +189,23 @@ class MicroAgent(
         await self._load_external_contexts()
         await self._maybe_refresh_semantic_analysis()
         await self._maybe_refresh_run_spec()
+        self.state.current = (
+            AgentStateName.SCHEDULE if self._spec_mode_enabled() else AgentStateName.CODE
+        )
+
+    async def spec_synth(self) -> None:
+        await self._maybe_refresh_run_spec(force=True)
+        self.state.current = AgentStateName.SCHEDULE
+
+    async def schedule(self) -> None:
+        self._schedule_spec_task()
+
+    async def task_read(self) -> None:
+        await self._read_current_spec_task_context()
+
+    async def accept_synth(self) -> None:
+        # M1 supports pre-authored command/metric acceptance only. The
+        # dedicated state is reserved for M2's synthesized acceptance files.
         self.state.current = AgentStateName.CODE
 
     def _read_fallback_files(self) -> list[str]:
@@ -826,7 +855,7 @@ class MicroAgent(
         self.state.notes.append(f"Candidate queue accepted metric={iteration_best_metric}")
 
     async def _run_test_commands(self) -> list[TestResult]:
-        commands = self.config.get("workflow", {}).get("test_commands", [])
+        commands = self._test_commands_for_current_scope()
         workflow = self.config.get("workflow", {})
         results = []
         for command in commands:
@@ -1167,6 +1196,9 @@ class MicroAgent(
         else:
             await self._persist_current_best_state()
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
+            if self._spec_mode_enabled():
+                self._handle_spec_task_test_result(failed)
+                return
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
                 self.state.current = self._retry_state_after_failure()
@@ -1218,7 +1250,8 @@ class MicroAgent(
 
     def _writable_files(self) -> set[str]:
         workflow = self.config.get("workflow", {})
-        candidates = workflow.get("writable_files") or self.state.planned_files
+        task_writable = self._current_spec_task_writable_files()
+        candidates = task_writable or workflow.get("writable_files") or self.state.planned_files
         writable = {str(path) for path in candidates}
         if workflow.get("allow_external_context_writes"):
             return writable

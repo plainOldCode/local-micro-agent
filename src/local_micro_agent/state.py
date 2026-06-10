@@ -8,6 +8,10 @@ from typing import Any
 
 class AgentStateName(StrEnum):
     PLAN = "plan"
+    SPEC_SYNTH = "spec_synth"
+    SCHEDULE = "schedule"
+    TASK_READ = "task_read"
+    ACCEPT_SYNTH = "accept_synth"
     READ = "read"
     REFLECT = "reflect"
     CODE = "code"
