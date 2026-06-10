@@ -52,7 +52,17 @@ class MicroAgent(
     CandidateRecordsMixin,
 ):
     def __init__(self, config: dict[str, Any], state: AgentState):
+        raw_workflow = config.get("workflow", {})
         self.config = apply_workflow_preset(config)
+        preset_loops = self.config.get("workflow", {}).get("max_code_test_loops")
+        if (
+            isinstance(raw_workflow, dict)
+            and "max_code_test_loops" not in raw_workflow
+            and isinstance(preset_loops, int)
+        ):
+            # The preset is the only source for the loop budget here; a state
+            # built from the raw config could not have seen it.
+            state.max_loops = preset_loops
         self.state = state
         self.models = ModelManager(self.config)
         self.mcp = McpToolClient(
@@ -1375,7 +1385,9 @@ class MicroAgent(
         return path
 
 def load_config(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
+    # Expand presets here so CLI-side values derived from the raw config,
+    # such as AgentState.max_loops, see the preset-provided defaults.
+    return apply_workflow_preset(json.loads(path.read_text()))
 
 
 def dump_prompts() -> str:

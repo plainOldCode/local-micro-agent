@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from local_micro_agent.orchestrator import MicroAgent
+import json
+
+from local_micro_agent.orchestrator import MicroAgent, load_config
 from local_micro_agent.presets import WORKFLOW_PRESETS, apply_workflow_preset
 from local_micro_agent.state import AgentState
 
@@ -59,6 +61,37 @@ class WorkflowPresetTests(unittest.TestCase):
         original = {"workflow": {"preset": "search"}}
         apply_workflow_preset(original)
         self.assertEqual(original, {"workflow": {"preset": "search"}})
+
+    def test_load_config_expands_preset_before_state_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"workflow": {"preset": "search"}}))
+            config = load_config(config_path)
+            self.assertEqual(config["workflow"]["max_code_test_loops"], 25)
+
+    def test_micro_agent_init_syncs_state_max_loops_from_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"preset": "search"},
+            }
+            MicroAgent(config, state)
+            self.assertEqual(state.max_loops, 25)
+
+    def test_explicit_loop_budget_leaves_state_max_loops_to_caller(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test", max_loops=7)
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"preset": "search", "max_code_test_loops": 7},
+            }
+            MicroAgent(config, state)
+            self.assertEqual(state.max_loops, 7)
 
     def test_micro_agent_init_applies_preset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
