@@ -386,6 +386,7 @@ class TodoLifecycleMixin:
             content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
         await self._load_external_contexts()
+        await self._ensure_spec_task_boundary_snapshot(task)
         self.state.current = AgentStateName.ACCEPT_SYNTH
 
     def _spec_task_read_paths(self, task: dict[str, Any]) -> list[str]:
@@ -669,7 +670,138 @@ class TodoLifecycleMixin:
         self.state.notes.append("Frozen synthesized acceptance hash mismatch")
         return True
 
-    def _handle_spec_task_test_result(self, failed: bool) -> None:
+    async def _run_spec_regression_gate(self) -> list[TestResult]:
+        task = self._current_spec_task()
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(task, dict) or not isinstance(spec, dict):
+            return []
+        workflow = self.config.get("workflow", {})
+        scope = str(workflow.get("spec_regression_scope", "all") or "all")
+        if scope == "none":
+            return []
+        current_id = str(task.get("task_id") or "")
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list):
+            return []
+        closed_tasks = [
+            item
+            for item in tasks
+            if isinstance(item, dict)
+            and str(item.get("status")) == "closed"
+            and str(item.get("task_id")) != current_id
+        ]
+        if scope == "dependents":
+            deps = self._spec_transitive_dependencies(current_id, tasks)
+            closed_tasks = [
+                item for item in closed_tasks if str(item.get("task_id")) in deps
+            ]
+        results: list[TestResult] = []
+        for closed_task in closed_tasks:
+            commands = self._spec_task_acceptance_commands(closed_task)
+            if not commands:
+                continue
+            frozen_result = self._frozen_acceptance_result_for_task(closed_task)
+            if frozen_result is not None:
+                results.append(frozen_result)
+                continue
+            task_results = await self._run_acceptance_commands(commands)
+            for result in task_results:
+                result.command = (
+                    f"regression:{closed_task.get('task_id')} {result.command}"
+                )
+            results.extend(task_results)
+        invariant_commands = workflow.get("spec_invariant_commands", [])
+        if isinstance(invariant_commands, str):
+            invariant_commands = [invariant_commands]
+        invariant_commands = [
+            str(command).strip()
+            for command in invariant_commands
+            if str(command).strip()
+        ] if isinstance(invariant_commands, list) else []
+        if invariant_commands:
+            invariant_results = await self._run_acceptance_commands(invariant_commands)
+            for result in invariant_results:
+                result.command = f"invariant:{result.command}"
+            results.extend(invariant_results)
+        if any(result.exit_code != 0 for result in results):
+            self.state.notes.append("Spec regression gate failed")
+        elif results:
+            self.state.notes.append("Spec regression gate passed")
+        return results
+
+    def _spec_task_acceptance_commands(self, task: dict[str, Any]) -> list[str]:
+        acceptance = task.get("acceptance")
+        if not isinstance(acceptance, dict):
+            return []
+        commands = acceptance.get("commands")
+        if not isinstance(commands, list):
+            return []
+        return [str(command).strip() for command in commands if str(command).strip()]
+
+    def _frozen_acceptance_result_for_task(self, task: dict[str, Any]) -> TestResult | None:
+        acceptance = task.get("acceptance")
+        if not isinstance(acceptance, dict):
+            return None
+        frozen = str(acceptance.get("frozen_sha256") or "")
+        paths = acceptance.get("test_paths")
+        if not frozen or not isinstance(paths, list):
+            return None
+        rel_paths = [str(path) for path in paths if str(path).strip()]
+        if self._hash_acceptance_files(rel_paths) == frozen:
+            return None
+        return TestResult(
+            command=f"regression:{task.get('task_id')} preflight:acceptance-frozen",
+            exit_code=1,
+            stderr="Frozen synthesized acceptance files changed before regression gate",
+        )
+
+    def _spec_transitive_dependencies(self, task_id: str, tasks: list[Any]) -> set[str]:
+        by_id = {
+            str(task.get("task_id")): task
+            for task in tasks
+            if isinstance(task, dict)
+        }
+        seen: set[str] = set()
+        stack = [task_id]
+        while stack:
+            current = stack.pop()
+            task = by_id.get(current)
+            deps = task.get("depends_on") if isinstance(task, dict) else []
+            if not isinstance(deps, list):
+                continue
+            for dep in deps:
+                dep_id = str(dep)
+                if dep_id in seen:
+                    continue
+                seen.add(dep_id)
+                stack.append(dep_id)
+        return seen
+
+    async def _ensure_spec_task_boundary_snapshot(self, task: dict[str, Any]) -> None:
+        task_id = str(task.get("task_id") or "")
+        current = self.state.scratch.get("spec_task_boundary_snapshot")
+        if isinstance(current, dict) and current.get("task_id") == task_id:
+            return
+        paths = sorted(self._writable_files())
+        self.state.scratch["spec_task_boundary_snapshot"] = {
+            "task_id": task_id,
+            "files": await self._snapshot_files(paths),
+        }
+        self.state.notes.append(f"Captured spec task boundary snapshot: {task_id}")
+
+    async def _restore_spec_task_boundary_snapshot(self) -> None:
+        snapshot = self.state.scratch.get("spec_task_boundary_snapshot")
+        if not isinstance(snapshot, dict):
+            return
+        files = snapshot.get("files")
+        if not isinstance(files, dict):
+            return
+        await self._restore_snapshot(files)
+        self.state.notes.append(
+            f"Restored spec task boundary snapshot: {snapshot.get('task_id')}"
+        )
+
+    async def _handle_spec_task_test_result(self, failed: bool) -> None:
         task = self._current_spec_task()
         spec = self.state.scratch.get("run_spec")
         if not isinstance(task, dict) or not isinstance(spec, dict):
@@ -696,10 +828,13 @@ class TodoLifecycleMixin:
             task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             self.state.notes.append(f"Closed spec task: {task.get('task_id')}")
             self.state.loop_count += 1
+            self.state.scratch.pop("spec_task_boundary_snapshot", None)
             self._persist_run_spec(spec)
             self.state.current = AgentStateName.SCHEDULE
             return
         if attempts_used >= attempts_max:
+            await self._restore_spec_task_boundary_snapshot()
+            self.state.scratch.pop("spec_task_boundary_snapshot", None)
             task["status"] = "deferred" if not task.get("deferred_revisited") else "failed"
             task["decision_hint"] = "budget_exhausted"
             self.state.notes.append(

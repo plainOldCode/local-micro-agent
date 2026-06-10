@@ -2026,6 +2026,169 @@ Background / non-constraints
                 any("Rejected out-of-plan change" in note for note in result.notes)
             )
 
+    def test_spec_regression_gate_keeps_changes_for_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "a.txt").write_text("done")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "regression-repair",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "keep a done",
+                                "deliverables": ["a.txt"],
+                                "status": "closed",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('a.txt').read_text() == 'done'\""
+                                    ],
+                                },
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "write b without breaking a",
+                                "depends_on": ["task-001"],
+                                "deliverables": ["a.txt", "b.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('b.txt').read_text() == 'done'\""
+                                    ],
+                                },
+                                "budget": {"attempts_max": 2},
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            outputs = [
+                json.dumps(
+                    {
+                        "changes": [
+                            {"path": "a.txt", "content": "broken", "reason": "bad regression"},
+                            {"path": "b.txt", "content": "done", "reason": "task output"},
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "changes": [
+                            {
+                                "path": "a.txt",
+                                "target": "broken",
+                                "replacement": "done",
+                                "reason": "repair closed task regression",
+                            }
+                        ]
+                    }
+                ),
+            ]
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": [],
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 4,
+                    "writable_files": ["*.txt"],
+                    "deterministic_test_decision": True,
+                    "retry_rejected_candidates": True,
+                    "spec_regression_scope": "all",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=4)
+            agent = MicroAgent(config, state)
+            agent.models = _SequenceModelManager(outputs)
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertEqual((repo / "a.txt").read_text(), "done")
+            self.assertEqual((repo / "b.txt").read_text(), "done")
+            self.assertTrue(
+                any("Keeping current task changes after regression gate failure" in note for note in result.notes)
+            )
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual([task["status"] for task in spec["task_graph"]], ["closed", "closed"])
+
+    def test_spec_task_boundary_snapshot_restores_on_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "a.txt").write_text("done")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "regression-rollback",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "keep a done",
+                                "deliverables": ["a.txt"],
+                                "status": "closed",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('a.txt').read_text() == 'done'\""
+                                    ],
+                                },
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "write b but regression remains",
+                                "depends_on": ["task-001"],
+                                "deliverables": ["a.txt", "b.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('b.txt').read_text() == 'done'\""
+                                    ],
+                                },
+                                "budget": {"attempts_max": 1},
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 2,
+                    "writable_files": ["*.txt"],
+                    "seed_files": [],
+                    "seed_changes": [
+                        {"path": "a.txt", "content": "broken"},
+                        {"path": "b.txt", "content": "done"},
+                    ],
+                    "spec_regression_scope": "all",
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual((repo / "a.txt").read_text(), "done")
+            self.assertFalse((repo / "b.txt").exists())
+            self.assertTrue(
+                any("Restored spec task boundary snapshot: task-002" in note for note in result.notes)
+            )
+
     def test_run_spec_artifact_is_not_loaded_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

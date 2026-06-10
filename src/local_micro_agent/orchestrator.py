@@ -1178,6 +1178,7 @@ class MicroAgent(
         }
 
     async def test(self) -> None:
+        self.state.scratch.pop("spec_regression_failed", None)
         frozen_acceptance_failed = self._frozen_acceptance_changed()
         if not frozen_acceptance_failed:
             self.state.test_results = await self._run_preflight_for_proposed_changes()
@@ -1193,13 +1194,25 @@ class MicroAgent(
             self.state.notes.append("No code changes were applied")
         metric_failed = self._evaluate_metric_acceptance()
         failed = failed or metric_failed
+        if self._spec_mode_enabled() and not failed:
+            regression_results = await self._run_spec_regression_gate()
+            if regression_results:
+                self.state.test_results.extend(regression_results)
+                failed = any(result.exit_code != 0 for result in regression_results)
+                if failed:
+                    self.state.scratch["spec_regression_failed"] = True
         if failed:
-            await self._restore_pre_code_snapshot()
+            if not self.state.scratch.get("spec_regression_failed"):
+                await self._restore_pre_code_snapshot()
+            else:
+                self.state.notes.append(
+                    "Keeping current task changes after regression gate failure"
+                )
         else:
             await self._persist_current_best_state()
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
             if self._spec_mode_enabled():
-                self._handle_spec_task_test_result(failed)
+                await self._handle_spec_task_test_result(failed)
                 return
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
