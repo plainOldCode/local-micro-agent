@@ -12,7 +12,13 @@ from pathlib import Path
 
 import local_micro_agent.models as model_module
 from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent, ReadDecision
-from local_micro_agent.models import ModelResponse, OpenAICompatibleModel, _ollama_usage, _openai_usage
+from local_micro_agent.models import (
+    ModelResponse,
+    OllamaNativeModel,
+    OpenAICompatibleModel,
+    _ollama_usage,
+    _openai_usage,
+)
 from local_micro_agent.prompts import (
     brainstorm_prompt,
     code_prompt,
@@ -332,6 +338,47 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertFalse(captured["payload"]["enable_thinking"])
         self.assertFalse(captured["payload"]["enableThinking"])
         self.assertEqual(captured["payload"]["custom"], {"field": 1})
+
+    def test_ollama_native_model_sends_top_level_format(self) -> None:
+        captured = {}
+        original = model_module._post_json
+
+        def fake_post_json(url, payload, headers, timeout):
+            captured.update(
+                {"url": url, "payload": payload, "headers": headers, "timeout": timeout}
+            )
+            return {
+                "message": {"content": "{}"},
+                "prompt_eval_count": 1,
+                "eval_count": 1,
+            }
+
+        model_module._post_json = fake_post_json
+        try:
+            response = asyncio.run(
+                OllamaNativeModel(
+                    base_url="http://localhost:11434",
+                    model="local",
+                    temperature=0.7,
+                    max_tokens=128,
+                    num_ctx=4096,
+                    think=False,
+                    output_format="json",
+                    timeout_seconds=9,
+                    extra_options={"top_p": 0.8},
+                ).chat([{"role": "user", "content": "json"}])
+            )
+        finally:
+            model_module._post_json = original
+
+        self.assertEqual(response.content, "{}")
+        self.assertEqual(captured["url"], "http://localhost:11434/api/chat")
+        self.assertEqual(captured["timeout"], 9)
+        self.assertEqual(captured["payload"]["format"], "json")
+        self.assertEqual(captured["payload"]["options"]["num_predict"], 128)
+        self.assertEqual(captured["payload"]["options"]["num_ctx"], 4096)
+        self.assertEqual(captured["payload"]["options"]["top_p"], 0.8)
+        self.assertNotIn("format", captured["payload"]["options"])
 
     def test_openai_compatible_model_can_prefill_disabled_thinking(self) -> None:
         captured = {}

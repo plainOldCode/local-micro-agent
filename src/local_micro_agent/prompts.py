@@ -17,7 +17,10 @@ Respect project instructions and workflow constraints before giving generic
 advice. If writable files are constrained, do not plan modifications outside
 that set. Do not modify tests unless the user explicitly asks for test changes.
 Prefer reading source entrypoints named by the README or task text before
-choosing implementation changes."""
+choosing implementation changes.
+Always emit final Markdown content. Make the plan concrete enough for a
+downstream spec node: name known target files, invariant constraints, measurable
+signals, and the next read needed when evidence is missing."""
 
 READ_SYSTEM = """You are the READ node in a local coding-agent FSM.
 Select the minimum source files needed for the plan.
@@ -74,14 +77,20 @@ Rules:
 - Ground every task in the supplied request, plan, source, and semantic facts.
 - Prefer small measurable unit tasks over broad ideas.
 - Always set version to 2.
+- Output one JSON object only. Do not include markdown fences, comments, prose,
+  or private reasoning tags.
 - Use depends_on to express task ordering; use [] when the task has no prerequisites.
 - Set deliverables to the smallest writable file paths or globs the task may change.
 - Set read_hints to the source paths the task needs before CODE.
+- Set expected_signal to a concrete command, metric, diagnostic, or source-level
+  observation the controller can use as feedback.
 - Use acceptance.kind "synthesized" for implementation tasks unless the request supplies
   an explicit command or metric acceptance.
 - For command acceptance, include only human-supplied commands from the request or config.
 - For metric acceptance, include the measurable command or leave commands empty when it
   should use the configured workflow metric command.
+- Do not invent files, commands, benchmarks, or constraints that are absent from
+  the current request/config/source context.
 - Do not include historical prior-run winners unless they are present in this run's input.
 - Keep task_graph to 3-8 tasks."""
 

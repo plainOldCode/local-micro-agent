@@ -28,20 +28,32 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(coder["extra_options"]["top_k"], 20)
         self.assertEqual(coder["extra_options"]["min_p"], 0)
 
-        self.assertEqual(models["plan_deep"], "qwen36_a3b_plan_deep")
+        self.assertEqual(models["planner"], "qwen36_a3b_planner_fast")
+        planner = providers["qwen36_a3b_planner_fast"]
+        self.assertFalse(planner["think"])
+        self.assertEqual(planner["num_ctx"], 64000)
+        self.assertEqual(planner["max_tokens"], 4096)
+        self.assertEqual(planner["temperature"], 0.2)
+        self.assertEqual(planner["extra_options"]["top_p"], 0.8)
+        self.assertEqual(planner["extra_options"]["top_k"], 20)
+        self.assertEqual(planner["extra_options"]["min_p"], 0)
+
+        self.assertEqual(models["plan_final"], "qwen36_a3b_plan_final")
         self.assertEqual(
             workflow["model_role_overrides_by_call_site"]["plan"],
-            "plan_deep",
+            "plan_final",
         )
-        plan_deep = providers["qwen36_a3b_plan_deep"]
-        self.assertTrue(plan_deep["think"])
-        self.assertEqual(plan_deep["num_ctx"], 64000)
-        self.assertEqual(plan_deep["max_tokens"], 16384)
-        self.assertEqual(plan_deep["temperature"], 0.6)
-        self.assertEqual(plan_deep["timeout_seconds"], 900)
-        self.assertEqual(plan_deep["extra_options"]["top_p"], 0.95)
-        self.assertEqual(plan_deep["extra_options"]["top_k"], 20)
-        self.assertEqual(plan_deep["extra_options"]["min_p"], 0)
+        self.assertNotIn("plan", workflow["reasoning_lane_call_sites"])
+        plan_final = providers["qwen36_a3b_plan_final"]
+        self.assertFalse(plan_final["think"])
+        self.assertEqual(plan_final["num_ctx"], 64000)
+        self.assertEqual(plan_final["max_tokens"], 12288)
+        self.assertEqual(plan_final["temperature"], 0.7)
+        self.assertEqual(plan_final["timeout_seconds"], 480)
+        self.assertEqual(plan_final["extra_options"]["top_p"], 0.8)
+        self.assertEqual(plan_final["extra_options"]["top_k"], 20)
+        self.assertEqual(plan_final["extra_options"]["min_p"], 0)
+        self.assertEqual(plan_final["extra_options"]["presence_penalty"], 1.2)
 
         self.assertEqual(models["spec_synth"], "qwen36_a3b_spec_synth")
         self.assertEqual(
@@ -49,13 +61,16 @@ class ConfigFileTests(unittest.TestCase):
             "spec_synth",
         )
         spec_synth = providers["qwen36_a3b_spec_synth"]
-        self.assertTrue(spec_synth["think"])
+        self.assertFalse(spec_synth["think"])
         self.assertEqual(spec_synth["num_ctx"], 64000)
         self.assertEqual(spec_synth["max_tokens"], 16384)
-        self.assertEqual(spec_synth["temperature"], 0.6)
-        self.assertEqual(spec_synth["extra_options"]["top_p"], 0.95)
+        self.assertEqual(spec_synth["temperature"], 0.7)
+        self.assertEqual(spec_synth["format"], "json")
+        self.assertEqual(spec_synth["timeout_seconds"], 480)
+        self.assertEqual(spec_synth["extra_options"]["top_p"], 0.8)
         self.assertEqual(spec_synth["extra_options"]["top_k"], 20)
         self.assertEqual(spec_synth["extra_options"]["min_p"], 0)
+        self.assertEqual(spec_synth["extra_options"]["presence_penalty"], 1.2)
 
 
 if __name__ == "__main__":

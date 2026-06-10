@@ -233,6 +233,7 @@ class OpenAICompatibleModel:
     timeout_seconds: int = 120
     think: bool | None = None
     disable_thinking_with_assistant_prefill: bool = False
+    response_format: dict[str, Any] | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
     extra_options: dict[str, Any] = field(default_factory=dict)
 
@@ -260,6 +261,8 @@ class OpenAICompatibleModel:
             payload["think"] = self.think
             payload["enable_thinking"] = self.think
             payload["enableThinking"] = self.think
+        if self.response_format is not None:
+            payload["response_format"] = self.response_format
         payload = _merge_openai_payload(payload, self.extra_body)
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         if stream_callback is not None:
@@ -311,6 +314,7 @@ class OllamaNativeModel:
     max_tokens: int = 2048
     num_ctx: int | None = None
     think: bool = False
+    output_format: str | dict[str, Any] | None = None
     timeout_seconds: int = 120
     extra_options: dict[str, Any] = field(default_factory=dict)
 
@@ -333,6 +337,8 @@ class OllamaNativeModel:
         }
         if self.num_ctx:
             payload["options"]["num_ctx"] = self.num_ctx
+        if self.output_format is not None:
+            payload["format"] = self.output_format
         url = f"{self.base_url.rstrip('/')}/api/chat"
         if stream_callback is not None:
             return await asyncio.to_thread(
@@ -379,6 +385,7 @@ class ModelManager:
                 disable_thinking_with_assistant_prefill=spec.get(
                     "disable_thinking_with_assistant_prefill", False
                 ),
+                response_format=spec.get("response_format"),
                 extra_body=spec.get("extra_body") or {},
                 extra_options=spec.get("extra_options") or {},
             )
@@ -390,6 +397,7 @@ class ModelManager:
                 max_tokens=spec.get("max_tokens", 2048),
                 num_ctx=spec.get("num_ctx"),
                 think=spec.get("think", False),
+                output_format=spec.get("format"),
                 timeout_seconds=spec.get("timeout_seconds", 120),
                 extra_options=spec.get("extra_options") or {},
             )

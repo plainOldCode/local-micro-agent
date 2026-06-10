@@ -1,8 +1,8 @@
 {
   "models": {
     "default": "qwen36_a3b_ollama",
-    "planner": "qwen36_a3b_deep_reason",
-    "plan_deep": "qwen36_a3b_plan_deep",
+    "planner": "qwen36_a3b_planner_fast",
+    "plan_final": "qwen36_a3b_plan_final",
     "coder": "qwen36_a3b_ollama",
     "brainstorm": "qwen36_a3b_brainstorm_fast",
     "reasoner": "qwen36_a3b_deep_reason",
@@ -41,19 +41,35 @@
         "min_p": 0
       }
     },
-    "qwen36_a3b_plan_deep": {
+    "qwen36_a3b_planner_fast": {
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:35b-a3b-coding-mxfp8",
-      "temperature": 0.6,
-      "max_tokens": 16384,
+      "temperature": 0.2,
+      "max_tokens": 4096,
       "num_ctx": 64000,
-      "think": true,
-      "timeout_seconds": 900,
+      "think": false,
+      "timeout_seconds": 240,
       "extra_options": {
-        "top_p": 0.95,
+        "top_p": 0.8,
         "top_k": 20,
         "min_p": 0
+      }
+    },
+    "qwen36_a3b_plan_final": {
+      "kind": "ollama_native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3.6:35b-a3b-coding-mxfp8",
+      "temperature": 0.7,
+      "max_tokens": 12288,
+      "num_ctx": 64000,
+      "think": false,
+      "timeout_seconds": 480,
+      "extra_options": {
+        "top_p": 0.8,
+        "top_k": 20,
+        "min_p": 0,
+        "presence_penalty": 1.2
       }
     },
     "qwen36_a3b_reflect_fast": {
@@ -90,15 +106,17 @@
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:35b-a3b-coding-mxfp8",
-      "temperature": 0.6,
+      "temperature": 0.7,
       "max_tokens": 16384,
       "num_ctx": 64000,
-      "think": true,
-      "timeout_seconds": 900,
+      "think": false,
+      "format": "json",
+      "timeout_seconds": 480,
       "extra_options": {
-        "top_p": 0.95,
+        "top_p": 0.8,
         "top_k": 20,
-        "min_p": 0
+        "min_p": 0,
+        "presence_penalty": 1.2
       }
     }
   },
@@ -181,7 +199,6 @@
     "reasoning_lane_enabled": true,
     "reasoning_lane_model_role": "reasoner",
     "reasoning_lane_call_sites": [
-      "plan",
       "semantic_analysis"
     ],
     "reasoning_lane_excluded_roles": [
@@ -190,7 +207,7 @@
       "tester"
     ],
     "model_role_overrides_by_call_site": {
-      "plan": "plan_deep",
+      "plan": "plan_final",
       "reflect": "reflector",
       "brainstorm": "brainstorm",
       "spec_synth": "spec_synth"

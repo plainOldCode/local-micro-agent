@@ -127,9 +127,9 @@ deliverables and no acceptance commands are treated as context-only and close
 automatically after `TASK_READ` without consuming budget.
 
 On cold start (no v2 `run_spec.json`), SCHEDULE routes through `SPEC_SYNTH`
-once: the reasoner lane synthesizes the graph from the request, plan, read
-source, and semantic facts, with a fallback model role
-(`spec_synth_fallback_model_role`) after reasoning-only or parse failures.
+once: the configured spec-synthesis role emits the graph from the request,
+plan, read source, and semantic facts, with a fallback model role
+(`spec_synth_fallback_model_role`) after model, validation, or parse failures.
 With `spec_resume=true` (default) an existing v2 graph is resumed instead, so
 interrupted runs skip already-closed tasks.
 
@@ -287,11 +287,11 @@ call sites still applies; exact JSON/patch roles (`coder`, `brainstorm`,
 **Reasoning-only responses are failures.** If a thinking provider returns
 reasoning with empty final content, the call fails and the node takes its
 normal fallback path. Keep iterative output budgets small: the tuned configs
-cap JSON/patch and reflect-escalation lanes at 8K tokens. One-shot spec
-synthesis and PLAN may use larger dedicated lanes, but should stay separated
-from retry/reflect lanes so repeated failures cannot burn long thinking budgets.
-A large `max_tokens` on a short controller call invites a full reasoning-only
-burn (`num_predict` includes thinking tokens on Ollama).
+cap JSON/patch and reflect-escalation lanes at 8K tokens. Artifact-producing
+controller calls such as PLAN Markdown and run-spec JSON should use no-think
+finalizer lanes, not large thinking lanes. A large `max_tokens` on a short
+controller call invites a full reasoning-only burn (`num_predict` includes
+thinking tokens on Ollama).
 
 **A3B MXFP8 Ollama lane split.** The
 `config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json` profile keeps every
@@ -299,10 +299,13 @@ lane at `num_ctx=64000` to avoid runner reloads. Its default coder/tester lane
 uses `think=false`, `max_tokens=8192`, and low sampling (`temperature=0.15`,
 `top_p=0.9`, `top_k=20`, `min_p=0`) to reduce deterministic duplicate variants
 without making JSON/search-replace output too loose. `reflector` and
-`brainstorm` are fast no-think lanes. `plan_deep` and `spec_synth` are separate
-one-shot thinking lanes (`temperature=0.6`, `max_tokens=16384`) routed by
-call-site override, leaving `reasoner` as the protected 8K semantic/deep-reflect
-lane.
+`brainstorm` are fast no-think lanes. PLAN is routed to a no-think
+`plan_final` lane (`temperature=0.7`, `top_p=0.8`, `max_tokens=12288`) so it
+must emit usable Markdown instead of hidden reasoning. `spec_synth` is also a
+no-think finalizer lane (`max_tokens=16384`) and requests Ollama JSON mode
+(`format="json"`) before deterministic schema normalization. `reasoner` remains
+the protected 8K thinking lane for semantic analysis and triggered deep-reflect
+only.
 
 For A3B model-tuning changes, run a short 10-loop smoke before long searches
 and inspect `profile_events.jsonl`: reasoning-only calls should be zero,
@@ -325,6 +328,11 @@ to the request; `extra_body` merges custom fields (useful for LM Studio). For
 servers that ignore per-request thinking flags, set
 `disable_thinking_with_assistant_prefill=true` with `think=false`. Verify with
 a smoke request before trusting thinking-off for benchmarks.
+
+**Ollama structured output.** Native Ollama providers can set top-level
+`format` (for example `"json"` or a JSON schema) to constrain artifact output.
+Use it for strict JSON controller nodes such as spec synthesis, while keeping
+free-form Markdown nodes constrained by prompt contract and validation.
 
 ## Grounding And Context
 
