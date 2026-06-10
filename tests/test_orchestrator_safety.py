@@ -5032,6 +5032,111 @@ value = 'fast'
             self.assertIn("stale address", record["why_invalid"])
             self.assertEqual(extra["failure_memory_path"], ".local_micro_agent/failure_memory.jsonl")
 
+    def test_correct_candidate_persists_last_correct_survivor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 'old'\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "preserve_correct_survivors": True,
+                    "writable_files": ["target.py"],
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "clean",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="keep tests passing",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    )
+                ],
+                "correct but no metric gain",
+                strategy_axis="general_edit",
+            )
+
+            extra = agent._persist_correct_survivor(
+                candidate,
+                status="rejected",
+                metric=147734,
+                patch_text="--- a/target.py\n+++ b/target.py\n@@\n-value = 'old'\n+value = 'new'\n",
+                results=[TestResult("python3 test.py", 0, stdout="ok\n")],
+                observation={
+                    "failure_class": "no_improvement",
+                    "stage_result": "no_improvement",
+                    "summary": "correctness passed without metric gain",
+                },
+            )
+
+            state_path = repo / ".local_micro_agent" / "last_correct_state.json"
+            patch_path = repo / ".local_micro_agent" / "last_correct.patch"
+            self.assertTrue(state_path.exists())
+            self.assertTrue(patch_path.exists())
+            self.assertEqual(extra["last_correct_patch_path"], ".local_micro_agent/last_correct.patch")
+            self.assertEqual(state.scratch["last_correct_metric"], 147734)
+            self.assertIn("+value = 'new'", patch_path.read_text())
+            record = json.loads(state_path.read_text())
+            self.assertEqual(record["candidate_id"], "clean")
+            self.assertEqual(record["failure_class"], "no_improvement")
+
+    def test_candidate_history_restores_episode_failure_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history_dir = repo / ".local_micro_agent"
+            history_dir.mkdir()
+            rows = []
+            for loop in range(3):
+                rows.append(
+                    {
+                        "loop": loop,
+                        "candidate_id": f"c{loop}",
+                        "status": "rejected",
+                        "metric": 147734,
+                        "applied": 1,
+                        "failed": False,
+                        "strategy_axes": ["general_edit"],
+                        "family_aliases": ["call_path_probe"],
+                        "region_keys": ["target.py::build::general_edit+call_path_probe"],
+                        "failure_class": "no_improvement",
+                    }
+                )
+            (history_dir / "candidates.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows)
+            )
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    adaptive_search_memory=True,
+                    candidate_history_path=".local_micro_agent/candidates.jsonl",
+                    adaptive_search_axis_window=8,
+                    adaptive_search_axis_failure_threshold=3,
+                    adaptive_search_axis_cooldown_loops=5,
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.loop_count = 4
+            agent = MicroAgent(config, state)
+
+            memory = agent._adaptive_search_memory_from_history()
+
+            self.assertIsNotNone(memory)
+            assert memory is not None
+            axis = memory["axes"]["general_edit"]
+            self.assertEqual(axis["failure_classes"], {"no_improvement": 3})
+            self.assertEqual(axis["cooldown_until_loop"], 9)
+            self.assertEqual(memory["recent"][-1]["family_aliases"], ["call_path_probe"])
+            formatted = agent._format_adaptive_search_memory()
+            self.assertIn("no_improvement", formatted)
+            self.assertIn("call_path_probe", formatted)
+
     def test_code_prompt_includes_failure_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

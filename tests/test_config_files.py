@@ -79,6 +79,11 @@ class ConfigFileTests(unittest.TestCase):
         self.assertTrue(workflow["spec_relax_failed_dependencies_with_budget"])
         self.assertTrue(workflow["spec_reopen_failed_portfolio_tasks"])
         self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 50)
+        self.assertEqual(
+            workflow["candidate_history_path"],
+            ".local_micro_agent/candidates.jsonl",
+        )
+        self.assertTrue(workflow["preserve_correct_survivors"])
 
 
 if __name__ == "__main__":

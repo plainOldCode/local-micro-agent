@@ -803,6 +803,17 @@ class MicroAgent(
                 repair_parent_id=repair_parent_id,
                 diagnostic_results=diagnostic_results,
             )
+            if not failed and applied > 0:
+                extra.update(
+                    self._persist_correct_survivor(
+                        candidate,
+                        status=status,
+                        metric=metric,
+                        patch_text=patch_text,
+                        results=results,
+                        observation=extra,
+                    )
+                )
             self._append_candidate_history(
                 candidate,
                 status=status,

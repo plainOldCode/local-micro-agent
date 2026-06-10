@@ -944,6 +944,7 @@ class AdaptiveSearchMixin:
                 "attempts": raw_state.get("attempts", 0),
                 "failures": raw_state.get("failures", 0),
                 "successes": raw_state.get("successes", 0),
+                "failure_classes": raw_state.get("failure_classes", {}),
                 "last_status": raw_state.get("last_status"),
                 "last_metric": raw_state.get("last_metric"),
                 "best_metric": raw_state.get("best_metric"),
@@ -966,6 +967,7 @@ class AdaptiveSearchMixin:
                     "attempts": raw_state.get("attempts", 0),
                     "failures": raw_state.get("failures", 0),
                     "successes": raw_state.get("successes", 0),
+                    "failure_classes": raw_state.get("failure_classes", {}),
                     "last_status": raw_state.get("last_status"),
                     "last_metric": raw_state.get("last_metric"),
                 }
@@ -1059,6 +1061,7 @@ class AdaptiveSearchMixin:
             status = str(record.get("status", ""))
             failed = bool(record.get("failed"))
             metric = record.get("metric")
+            failure_class = str(record.get("failure_class") or "")
             recent_record = {
                 "loop": record.get("loop"),
                 "candidate_id": record.get("candidate_id"),
@@ -1068,7 +1071,13 @@ class AdaptiveSearchMixin:
                     for region in record.get("region_keys", [])
                     if str(region)
                 ],
+                "family_aliases": [
+                    str(alias)
+                    for alias in record.get("family_aliases", [])
+                    if str(alias)
+                ],
                 "status": status,
+                "failure_class": failure_class,
                 "metric": metric,
                 "applied": record.get("applied", 0),
                 "failed": failed,
@@ -1085,6 +1094,7 @@ class AdaptiveSearchMixin:
                         "last_status": None,
                         "last_metric": None,
                         "best_metric": None,
+                        "failure_classes": {},
                     },
                 )
                 axis_state["attempts"] += 1
@@ -1099,6 +1109,9 @@ class AdaptiveSearchMixin:
                         axis_state["best_metric"] = metric
                 elif status in failure_statuses or failed:
                     axis_state["failures"] += 1
+                    if failure_class:
+                        classes = axis_state.setdefault("failure_classes", {})
+                        classes[failure_class] = int(classes.get(failure_class, 0)) + 1
             for region_key in recent_record["regions"]:
                 region_state = memory.setdefault("regions", {}).setdefault(
                     region_key,
@@ -1109,6 +1122,7 @@ class AdaptiveSearchMixin:
                         "cooldown_until_loop": None,
                         "last_status": None,
                         "last_metric": None,
+                        "failure_classes": {},
                     },
                 )
                 region_state["attempts"] += 1
@@ -1118,6 +1132,9 @@ class AdaptiveSearchMixin:
                     region_state["successes"] += 1
                 elif status in failure_statuses or failed:
                     region_state["failures"] += 1
+                    if failure_class:
+                        classes = region_state.setdefault("failure_classes", {})
+                        classes[failure_class] = int(classes.get(failure_class, 0)) + 1
         self._apply_history_cooldowns(memory, failure_statuses)
         return memory if memory["axes"] or memory.get("regions") else None
 

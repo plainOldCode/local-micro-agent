@@ -416,7 +416,13 @@ evaluated candidate; outputs feed back into REFLECT/CODE without changing
 pass/fail.
 
 Candidate history (`candidate_history_path`) persists accepted/rejected
-directions as JSONL across runs.
+directions as JSONL across runs. Adaptive search rebuilds domain-neutral
+episode memory from those records: strategy axes, edit regions, tactic
+families, failure classes, metrics, and cooldown signals. Correct candidates
+that do not improve the metric are also preserved when
+`preserve_correct_survivors=true` as `.local_micro_agent/last_correct_state.json`
+and `.local_micro_agent/last_correct.patch`; they remain rollback/learning
+artifacts, not accepted performance wins.
 
 ## Safety And Clean Evaluation
 

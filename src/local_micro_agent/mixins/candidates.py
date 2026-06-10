@@ -54,13 +54,17 @@ class CandidateRecordsMixin:
                 "changes": record.get("changes", []),
             }
             for key in (
+                "failure_class",
                 "no_change_reason",
                 "failure_detail",
+                "recovery_hint",
                 "repair_parent_id",
                 "artifact_id",
                 "patch_path",
                 "test_output_path",
                 "diagnostic_summary",
+                "last_correct_state_path",
+                "last_correct_patch_path",
             ):
                 value = record.get(key)
                 if value:
@@ -934,6 +938,58 @@ class CandidateRecordsMixin:
             if key in metadata:
                 extra[key] = metadata[key]
         return extra
+
+    def _persist_correct_survivor(
+        self,
+        candidate: CodeCandidate,
+        status: str,
+        metric: int | None,
+        patch_text: str,
+        results: list[TestResult],
+        observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("preserve_correct_survivors", True) is False:
+            return {}
+        if not patch_text.strip():
+            return {}
+        state_path = self._workflow_artifact_path(
+            "last_correct_state_path",
+            ".local_micro_agent/last_correct_state.json",
+        )
+        patch_path = self._workflow_artifact_path(
+            "last_correct_patch_path",
+            ".local_micro_agent/last_correct.patch",
+        )
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(patch_text)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "loop": self.state.loop_count,
+            "candidate_id": candidate.candidate_id,
+            "status": status,
+            "metric": metric,
+            "reason": candidate.reason,
+            "strategy_axis": candidate.strategy_axis,
+            "strategy_axes": self._candidate_strategy_axes(candidate),
+            "family_aliases": sorted(self._candidate_reason_family_aliases(candidate)),
+            "region_keys": self._candidate_region_keys(candidate),
+            "changes": self._summarize_changes(candidate.changes),
+            "patch_path": self._repo_relative_path(patch_path),
+            "test_commands": [result.command for result in results],
+            "failure_class": observation.get("failure_class"),
+            "stage_result": observation.get("stage_result"),
+            "summary": observation.get("summary"),
+        }
+        state_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+        self.state.scratch["last_correct_metric"] = metric
+        self.state.scratch["last_correct_patch_path"] = self._repo_relative_path(patch_path)
+        self.state.scratch["last_correct_state_path"] = self._repo_relative_path(state_path)
+        return {
+            "last_correct_state_path": self._repo_relative_path(state_path),
+            "last_correct_patch_path": self._repo_relative_path(patch_path),
+        }
 
     def _format_test_results_for_artifact(
         self, results: list[TestResult], limit: int
