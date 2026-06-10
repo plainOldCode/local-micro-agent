@@ -1211,10 +1211,10 @@ class MicroAgent(
                 )
         else:
             await self._persist_current_best_state()
+        if self._spec_mode_enabled():
+            await self._handle_spec_task_test_result(failed)
+            return
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
-            if self._spec_mode_enabled():
-                await self._handle_spec_task_test_result(failed)
-                return
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
                 self.state.current = self._retry_state_after_failure()

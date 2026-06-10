@@ -291,6 +291,19 @@ class TodoLifecycleMixin:
             self._append_spec_progress_event("done", spec)
             self.state.current = AgentStateName.DONE
             return
+        if self._spec_global_loop_cap_reached():
+            spec["progress"] = self._run_spec_progress(spec)
+            self._persist_run_spec(spec)
+            self.state.notes.append(
+                f"Spec mode reached max_code_test_loops={self.state.max_loops}"
+            )
+            self._append_spec_progress_event(
+                "failed",
+                spec,
+                extra={"reason": "max_code_test_loops"},
+            )
+            self.state.current = AgentStateName.FAILED
+            return
         open_candidates = self._schedulable_spec_tasks(tasks)
         if not open_candidates:
             restored = self._restore_deferred_spec_tasks(tasks)
@@ -299,7 +312,10 @@ class TodoLifecycleMixin:
         if not open_candidates:
             spec["progress"] = self._run_spec_progress(spec)
             self._persist_run_spec(spec)
-            self.state.notes.append("Spec scheduler found no runnable task")
+            self.state.notes.append(
+                "Spec scheduler found no runnable task: "
+                + self._spec_blocked_task_summary(tasks)
+            )
             self._append_spec_progress_event("blocked", spec)
             self.state.current = AgentStateName.FAILED
             return
@@ -323,6 +339,37 @@ class TodoLifecycleMixin:
             self.state.notes.append("Spec mode has no v2 run_spec; attempting SPEC_SYNTH")
             return AgentStateName.SPEC_SYNTH
         return AgentStateName.FAILED
+
+    def _spec_global_loop_cap_reached(self) -> bool:
+        max_loops = self.state.max_loops
+        return isinstance(max_loops, int) and max_loops >= 0 and self.state.loop_count >= max_loops
+
+    @staticmethod
+    def _spec_blocked_task_summary(tasks: list[Any]) -> str:
+        closed = {
+            str(task.get("task_id"))
+            for task in tasks
+            if isinstance(task, dict) and str(task.get("status")) == "closed"
+        }
+        blocked: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status not in {"open", "deferred", "in_progress"}:
+                continue
+            deps = task.get("depends_on")
+            missing = [
+                str(dep)
+                for dep in deps
+                if str(dep) not in closed
+            ] if isinstance(deps, list) else []
+            task_id = str(task.get("task_id") or "<unknown>")
+            if missing:
+                blocked.append(f"{task_id} waiting on {', '.join(missing)}")
+            else:
+                blocked.append(f"{task_id} status={status}")
+        return "; ".join(blocked[:6]) if blocked else "no open/deferred tasks"
 
     def _clear_active_spec_task(self) -> None:
         self.state.scratch.pop("current_spec_task_id", None)
@@ -540,6 +587,12 @@ class TodoLifecycleMixin:
             self.state.current = AgentStateName.CODE
             return
         if task.get("status") == "closed":
+            self._append_spec_progress_event(
+                "closed",
+                spec,
+                task,
+                extra={"acceptance": "red_first_already_green"},
+            )
             self.state.current = AgentStateName.SCHEDULE
             return
         self.state.current = AgentStateName.CODE
@@ -860,7 +913,10 @@ class TodoLifecycleMixin:
             self.state.current = AgentStateName.FAILED
             return
         budget = task.setdefault("budget", {})
-        attempts_used = int(budget.get("attempts_used", task.get("attempts", 0)) or 0) + 1
+        budget_counted = self._spec_current_attempt_counts_toward_budget(failed)
+        attempts_used = int(budget.get("attempts_used", task.get("attempts", 0)) or 0)
+        if budget_counted:
+            attempts_used += 1
         attempts_max = int(
             budget.get(
                 "attempts_max",
@@ -873,6 +929,7 @@ class TodoLifecycleMixin:
         task["last_observation"] = {
             "loop": self.state.loop_count,
             "failed": failed,
+            "budget_counted": budget_counted,
             "summary": self.state.latest_test_summary(),
         }
         if not failed:
@@ -900,8 +957,41 @@ class TodoLifecycleMixin:
             return
         self.state.loop_count += 1
         self._persist_run_spec(spec)
-        self._append_spec_progress_event("retry", spec, task)
+        self._append_spec_progress_event(
+            "retry",
+            spec,
+            task,
+            extra={"budget_counted": budget_counted},
+        )
+        if self._spec_global_loop_cap_reached():
+            self.state.notes.append(
+                f"Spec mode reached max_code_test_loops={self.state.max_loops}"
+            )
+            self._append_spec_progress_event(
+                "failed",
+                spec,
+                task,
+                extra={"reason": "max_code_test_loops"},
+            )
+            self.state.current = AgentStateName.FAILED
+            return
         self.state.current = self._retry_state_after_failure()
+
+    def _spec_current_attempt_counts_toward_budget(self, failed: bool) -> bool:
+        if not failed:
+            return True
+        active = self.state.scratch.get("active_todo")
+        if not isinstance(active, dict):
+            return True
+        for key in ("last_non_budget_attempt", "last_attempt"):
+            attempt = active.get(key)
+            if not isinstance(attempt, dict):
+                continue
+            if int(attempt.get("loop", -1)) != self.state.loop_count:
+                continue
+            if attempt.get("budget_counted") is False:
+                return False
+        return True
 
     def _persist_spec_report(self) -> None:
         if not self._spec_mode_enabled():

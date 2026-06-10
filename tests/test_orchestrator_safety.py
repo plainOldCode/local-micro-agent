@@ -1953,6 +1953,165 @@ Background / non-constraints
             self.assertEqual(spec["task_graph"][0]["status"], "failed")
             self.assertEqual(spec["progress"], {"total": 1, "closed": 0, "deferred": 0, "failed": 1})
 
+    def test_spec_mode_does_not_count_patch_miss_against_task_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            task = {
+                "task_id": "task-001",
+                "title": "patch target",
+                "status": "in_progress",
+                "deliverables": ["target.py"],
+                "acceptance": {"kind": "command", "commands": []},
+                "budget": {"attempts_max": 1, "attempts_used": 0},
+            }
+            spec = {
+                "version": 2,
+                "spec_id": "patch-miss",
+                "task_graph": [task],
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=3),
+            )
+            agent.state.scratch["run_spec"] = spec
+            agent.state.scratch["current_spec_task"] = task
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "last_non_budget_attempt": {
+                    "loop": 0,
+                    "budget_counted": False,
+                    "failure_class": "patch_miss",
+                },
+            }
+            agent.state.test_results = [
+                TestResult(command="preflight", exit_code=1, stderr="No code changes were applied")
+            ]
+
+            asyncio.run(agent._handle_spec_task_test_result(failed=True))
+
+            self.assertEqual(task["budget"]["attempts_used"], 0)
+            self.assertEqual(task["status"], "in_progress")
+            self.assertEqual(agent.state.loop_count, 1)
+            self.assertNotEqual(agent.state.current, AgentStateName.SCHEDULE)
+
+    def test_spec_mode_forces_deterministic_task_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "deterministic",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "write target",
+                                "deliverables": ["target.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('target.txt').read_text() == 'done'\""
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "deterministic_test_decision": False,
+                    "max_code_test_loops": 2,
+                    "writable_files": ["target.txt"],
+                    "seed_files": [],
+                    "seed_changes": [{"path": "target.txt", "content": "done"}],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(spec["task_graph"][0]["status"], "closed")
+
+    def test_spec_mode_global_loop_cap_blocks_remaining_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "loop-cap",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "write a",
+                                "deliverables": ["a.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('a.txt').read_text() == 'done-a'\""
+                                    ],
+                                },
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "write b",
+                                "depends_on": ["task-001"],
+                                "deliverables": ["b.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('b.txt').read_text() == 'done-b'\""
+                                    ],
+                                },
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 1,
+                    "writable_files": ["*.txt"],
+                    "seed_files": [],
+                    "seed_changes": [
+                        {"path": "a.txt", "content": "done-a"},
+                        {"path": "b.txt", "content": "done-b"},
+                    ],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertIn("max_code_test_loops=1", "\n".join(result.notes))
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual([task["status"] for task in spec["task_graph"]], ["closed", "open"])
+
     def test_spec_mode_synthesizes_and_freezes_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
