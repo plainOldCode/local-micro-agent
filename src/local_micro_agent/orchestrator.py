@@ -325,6 +325,16 @@ class MicroAgent(
                         "include them in target/search/replace text.\n"
                         f"{current_source_context}"
                     )
+                symbol_source_context = await self._format_symbol_source_context()
+                if symbol_source_context:
+                    add_runtime_context(
+                        "Exact writable symbol spans follow. These spans were "
+                        "extracted from the current source immediately before CODE "
+                        "because the active task names these symbols. Prefer copying "
+                        "target/search text verbatim from these unnumbered blocks "
+                        "when editing the named symbol; do not include fence lines.\n"
+                        f"{symbol_source_context}"
+                    )
                 exact_refresh = self.state.scratch.pop("exact_context_refresh", "")
                 if exact_refresh:
                     add_runtime_context(
@@ -1495,8 +1505,17 @@ class MicroAgent(
             return False
         original = await self.mcp.read_file(str(abs_path))
         if target not in original:
-            self.state.notes.append(f"Replacement target not found: {path}")
-            return False
+            retargeted = self._unique_stripped_line_match(original, target)
+            if retargeted is None:
+                self.state.notes.append(f"Replacement target not found: {path}")
+                return False
+            target = retargeted
+            if retargeted.endswith("\n") and not replacement.endswith("\n"):
+                replacement += "\n"
+            self.state.notes.append(
+                "Retargeted replacement target to exact current source whitespace "
+                f"in {path}"
+            )
         if original.count(target) != 1:
             self.state.notes.append(f"Replacement target is ambiguous: {path}")
             return False

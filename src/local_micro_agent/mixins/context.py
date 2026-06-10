@@ -372,6 +372,84 @@ class PromptContextMixin:
             blocks.append(f"### {rel_path}\n```text\n{numbered}\n```")
         return self._slice_text("\n\n".join(blocks), limit)
 
+    async def _format_symbol_source_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("symbol_source_context_before_code", True) is False:
+            return ""
+        symbols = self._code_symbol_context_symbols()
+        if not symbols:
+            return ""
+        paths = sorted(self._writable_files())
+        if not paths:
+            return ""
+        limit = int(workflow.get("symbol_source_context_char_limit", 8000) or 8000)
+        blocks: list[str] = []
+        for rel_path in paths:
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / rel_path))
+            except FileNotFoundError:
+                continue
+            present = self._python_symbols_present(content, symbols)
+            if not present:
+                continue
+            excerpt = self._extract_python_symbols(content, present)
+            if not excerpt:
+                continue
+            blocks.append(
+                f"### {rel_path}\n"
+                f"Symbols: {', '.join(present)}\n"
+                "```python\n"
+                f"{excerpt}\n"
+                "```"
+            )
+        return self._slice_text("\n\n".join(blocks), limit) if blocks else ""
+
+    def _code_symbol_context_symbols(self) -> list[str]:
+        text_parts = [
+            self.state.user_request,
+            self.state.plan_markdown,
+        ]
+        task = self._current_spec_task()
+        if task:
+            text_parts.append(json.dumps(task, ensure_ascii=False))
+        active_todo = self.state.scratch.get("active_todo")
+        if isinstance(active_todo, dict):
+            text_parts.append(json.dumps(active_todo, ensure_ascii=False))
+        run_spec = self.state.scratch.get("run_spec")
+        if isinstance(run_spec, dict):
+            for key in ("objective", "active_task_id", "last_stop_reason"):
+                value = run_spec.get(key)
+                if value:
+                    text_parts.append(str(value))
+        reflection = self.state.scratch.get("reflection")
+        if isinstance(reflection, str):
+            text_parts.append(reflection)
+        text = "\n".join(part for part in text_parts if part)
+        raw_symbols = re.findall(
+            r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b",
+            text,
+        )
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for symbol in raw_symbols:
+            if symbol.endswith(".py") or symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
+        return symbols
+
+    @staticmethod
+    def _python_symbols_present(content: str, symbols: list[str]) -> list[str]:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return []
+        present: list[str] = []
+        for symbol in symbols:
+            if PromptContextMixin._find_symbol_node(tree, symbol) is not None:
+                present.append(symbol)
+        return present
+
     @classmethod
     def _curate_semantic_analysis(cls, text: str, limit: int) -> str:
         """Keep only semantic context that is safe to feed into CODE attempts."""

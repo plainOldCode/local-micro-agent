@@ -4002,6 +4002,42 @@ value = 'fast'
             self.assertIn("1: alpha = 1", context)
             self.assertIn("2: beta = 2", context)
 
+    def test_symbol_source_context_extracts_named_method_span(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "class Builder:\n"
+                "    def build(self):\n"
+                "        return []\n"
+                "\n"
+                "    def add(self):\n"
+                "        return None\n"
+            )
+            state = AgentState(repo_root=repo, user_request="Replace Builder.build")
+            state.plan_markdown = "Implement Builder.build only."
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"writable_files": ["target.py"]},
+            }
+            agent = MicroAgent(config, state)
+
+            async def format_context() -> str:
+                await agent.mcp.start()
+                try:
+                    return await agent._format_symbol_source_context()
+                finally:
+                    await agent.mcp.close()
+
+            context = asyncio.run(format_context())
+
+            self.assertIn("Symbols: Builder.build", context)
+            self.assertIn("    def build(self):", context)
+            self.assertIn("        return []", context)
+            self.assertNotIn("    def add(self):", context)
+
     def test_target_not_found_repair_context_anchors_near_stale_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -4226,6 +4262,51 @@ value = 'fast'
             ]
             self.assertEqual(rows[0]["candidate_id"], "miss-repair1")
             self.assertEqual(rows[0]["status"], "improved")
+
+    def test_apply_replacement_retargets_unique_whitespace_miss_without_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "class Builder:\n"
+                "    def build(self):\n"
+                "        # Simple slot packing\n"
+                "        return []\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                reason="replace build method",
+                target=(
+                    "    def build(self):\n"
+                    "         # Simple slot packing\n"
+                    "        return []\n"
+                ),
+                replacement=(
+                    "    def build(self):\n"
+                    "        # Simple slot packing\n"
+                    "        return [1]\n"
+                ),
+            )
+
+            async def apply_once() -> int:
+                await agent.mcp.start()
+                try:
+                    return await agent._apply_changes([change], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            applied = asyncio.run(apply_once())
+
+            self.assertEqual(applied, 1)
+            self.assertIn("return [1]", target.read_text())
+            self.assertIn(
+                "Retargeted replacement target to exact current source whitespace",
+                "\n".join(agent.state.notes),
+            )
 
     def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6163,6 +6244,68 @@ value = 'fast'
             self.assertIn("value = 'current'", dynamic_content)
             self.assertNotIn("value = 'stale'", dynamic_content)
             self.assertEqual(target.read_text(), "value = 'new'\n")
+
+    def test_code_attempt_includes_exact_symbol_span_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "class Builder:\n"
+                "    def build(self):\n"
+                "        value = 'current'\n"
+                "        return value\n"
+                "\n"
+                "    def add(self):\n"
+                "        return None\n"
+            )
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "Replace Builder.build.",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "prompt_cache_friendly_layout": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="Optimize Builder.build",
+                current=AgentStateName.CODE,
+                max_loops=1,
+            )
+            state.plan_markdown = "Replace Builder.build."
+            state.planned_files = ["target.py"]
+            state.file_context = [FileSnapshot("target.py", "class Builder:\n    pass\n")]
+            models = _RoleModelManager(
+                {
+                    "coder": (
+                        '{"changes":[{"path":"target.py",'
+                        '"target":"        value = \'current\'\\n",'
+                        '"replacement":"        value = \'new\'\\n",'
+                        '"reason":"edit symbol"}]}'
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            async def code_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_once())
+
+            dynamic_content = models.seen["coder"][0][-1]["content"]
+            self.assertIn("Exact writable symbol spans follow", dynamic_content)
+            self.assertIn("Symbols: Builder.build", dynamic_content)
+            self.assertIn("    def build(self):", dynamic_content)
+            self.assertIn("        value = 'current'", dynamic_content)
+            self.assertEqual(target.read_text().count("value = 'new'"), 1)
 
     def test_continue_after_improvement_persists_best_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

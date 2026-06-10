@@ -338,7 +338,11 @@ prompts; local source and tests stay authoritative. Bound with
 `external_context_char_limit` / `external_context_item_char_limit`.
 
 **Focused symbols.** `context_symbols` replaces full-file CODE context with
-exact function/class excerpts for narrow Python edits.
+exact function/class excerpts for narrow Python edits. Separately,
+`symbol_source_context_before_code=true` (default) scans the request, plan,
+active spec task, active todo, and reflection for dotted Python symbols such as
+`KernelBuilder.build`, then injects the current exact unnumbered source span
+before CODE so search/target blocks can be copied from the live method body.
 
 **Prompt-cache friendly layout.** `prompt_cache_friendly_layout=true` keeps a
 stable prefix (system instruction, request, plan, source) and merges all
@@ -363,7 +367,8 @@ the missed region into the next CODE attempt, and
 quotes the stale search text next to the best-matching current-source region
 (`repair_anchor_context_lines`, default 18), and repaired candidates are
 preflighted for existence and uniqueness before evaluation. Whitespace-only
-misses are retargeted automatically.
+misses with a single stripped-line match are retargeted automatically even in
+single-candidate mode.
 
 **Output format.** For models that struggle to JSON-escape multi-line code,
 `code_output_format="xml"` switches CODE to raw `<search>`/`<replace>` blocks.
