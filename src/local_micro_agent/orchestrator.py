@@ -330,9 +330,36 @@ class MicroAgent:
                 f"prompt_tokens={'~' if estimated else ''}{int(prompt_tokens)} "
                 f"budget={input_budget} ratio={ratio:.2f}"
             )
-            self.state.notes.append(note)
+            self._record_prompt_budget_warning("pressure", note)
             self._log(note)
         return fields
+
+    def _record_prompt_budget_warning(self, kind: str, note: str) -> None:
+        warnings = self.state.scratch.setdefault("prompt_token_budget_warnings", [])
+        if isinstance(warnings, list):
+            warnings.append(
+                {
+                    "loop": self.state.loop_count,
+                    "kind": kind,
+                    "note": note,
+                }
+            )
+        else:
+            self.state.scratch["prompt_token_budget_warnings"] = [
+                {
+                    "loop": self.state.loop_count,
+                    "kind": kind,
+                    "note": note,
+                }
+            ]
+        note_keys = self.state.scratch.setdefault("prompt_token_budget_note_keys", [])
+        if not isinstance(note_keys, list):
+            note_keys = []
+            self.state.scratch["prompt_token_budget_note_keys"] = note_keys
+        key = f"{self.state.loop_count}:{kind}"
+        if key not in note_keys:
+            self.state.notes.append(note)
+            note_keys.append(key)
 
     def _shrink_dynamic_suffix_blocks(
         self,
@@ -358,9 +385,10 @@ class MicroAgent:
         if dynamic_budget <= 0 or dynamic_chars <= dynamic_budget:
             return dynamic_blocks
         per_block = max(500, dynamic_budget // max(len(dynamic_blocks), 1))
-        self.state.notes.append(
+        self._record_prompt_budget_warning(
+            "shrink",
             "Shrank dynamic CODE context for prompt budget: "
-            f"dynamic_chars={dynamic_chars} budget={dynamic_budget}"
+            f"dynamic_chars={dynamic_chars} budget={dynamic_budget}",
         )
         return [self._slice_text(block, per_block) for block in dynamic_blocks]
 
@@ -1863,7 +1891,9 @@ class MicroAgent:
                         "Current writable source context follows. This is reread "
                         "immediately before this CODE attempt and supersedes the "
                         "stable Source files block above when they differ. Copy "
-                        "target/search text from this current context.\n"
+                        "target/search text from this current context. Line numbers "
+                        "and the 'N: ' prefix are not part of the file content; never "
+                        "include them in target/search/replace text.\n"
                         f"{current_source_context}"
                     )
                 if self.config.get("workflow", {}).get("candidate_queue"):
@@ -4024,6 +4054,7 @@ class MicroAgent:
                     f"{failure_class} count={count}/{threshold}"
                 )
                 return False
+            counts[failure_class] = 0
         return True
 
     def _retry_failure_class(self, retry_focus: str = "") -> str:

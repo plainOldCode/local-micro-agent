@@ -540,6 +540,21 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(fields["input_token_budget"], 80)
             self.assertTrue(fields["input_token_budget_warning"])
             self.assertIn("Prompt token budget pressure", "\n".join(state.notes))
+            self.assertEqual(len(state.scratch["prompt_token_budget_warnings"]), 1)
+
+            agent._model_token_budget_fields(
+                {"num_ctx": 100, "max_tokens": 20},
+                {"prompt_tokens": 76},
+                prompt_chars=0,
+                role="coder",
+                call_site="json_call",
+            )
+
+            self.assertEqual(
+                "\n".join(state.notes).count("Prompt token budget pressure"),
+                1,
+            )
+            self.assertEqual(len(state.scratch["prompt_token_budget_warnings"]), 2)
 
     def test_dynamic_suffix_blocks_shrink_to_input_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -570,6 +585,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertLess(sum(len(block) for block in shrunk), sum(len(block) for block in blocks))
             self.assertIn("Shrank dynamic CODE context", "\n".join(state.notes))
+            self.assertEqual(len(state.scratch["prompt_token_budget_warnings"]), 1)
 
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
@@ -2102,6 +2118,7 @@ Background / non-constraints
             self.assertFalse(agent._should_reflect_after_failure())
             self.assertFalse(agent._should_reflect_after_failure())
             self.assertTrue(agent._should_reflect_after_failure())
+            self.assertFalse(agent._should_reflect_after_failure())
             self.assertIn("Skipping REFLECT for structured retry failure patch_miss", "\n".join(state.notes))
 
     def test_reflect_conditionally_false_preserves_legacy_reflect_behavior(self) -> None:
@@ -4834,6 +4851,7 @@ value = 'fast'
             coder_messages = models.seen["coder"][0]
             dynamic_content = coder_messages[-1]["content"]
             self.assertIn("Current writable source context follows", dynamic_content)
+            self.assertIn("never include them in target/search/replace text", dynamic_content)
             self.assertIn("value = 'current'", dynamic_content)
             self.assertNotIn("value = 'stale'", dynamic_content)
             self.assertEqual(target.read_text(), "value = 'new'\n")
