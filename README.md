@@ -75,6 +75,24 @@ their configured providers unless you explicitly change the call-site and
 excluded-role lists. This keeps planner-style reasoning separate from strict
 patch generation and JSON repair paths.
 
+Thinking providers are expected to return final content, not only hidden or
+side-channel reasoning. Ollama native and OpenAI-compatible backends normalize
+provider reasoning fields into model usage metadata. If a response contains
+reasoning but its final content is empty or only whitespace, the controller
+treats it as a failed model call by default. `PLAN`, `READ`, `CODE`, `TEST`,
+`REFLECT`, and `BRAINSTORM` then use their normal failure or fallback path
+instead of silently accepting an empty plan, JSON object, or retry analysis. Use
+`workflow.allow_reasoning_only_response=true` only for diagnostics, or
+`workflow.reasoning_only_allowed_call_sites` to allow a specific experimental
+call site.
+
+Keep iterative thinking budgets small. The tuned local configs cap exact
+JSON/patch lanes at 8K tokens, reasoning lanes at 8K tokens, and exploration
+lanes at 16K tokens, with non-greedy sampling for `think=true` roles. Larger
+context windows are useful for source grounding, but large generation budgets on
+short controller calls can turn a retry into a full reasoning-only burn with no
+actionable final content.
+
 For long exploratory runs that otherwise drift between unrelated brainstorm
 ideas, enable `workflow.run_spec_after_read=true`. After `PLAN` and `READ`, the
 agent asks the model to synthesize a run-local spec from the current request,
@@ -227,6 +245,14 @@ candidate improves the metric, the agent persists `.local_micro_agent/best_state
 and `.local_micro_agent/best.patch`, updates the in-memory best metric, and
 continues to the next `CODE` loop until `max_code_test_loops` is reached.
 
+Set `workflow.deterministic_test_decision=true` when configured shell commands
+and metric rules should be the source of truth. In this mode `TEST` does not ask
+a model to reinterpret the command result, so passing tests cannot be rejected by
+tester hallucination and failing commands do not spend another model call. Pair
+it with `workflow.retry_rejected_candidates=true` when `max_code_test_loops`
+should allow repair attempts after a failing command, metric miss, or no-op CODE
+attempt. The shipped local-model configs enable both flags together.
+
 For local models that struggle to JSON-escape multi-line code snippets, set
 `workflow.code_output_format="xml"`. In XML mode the CODE node emits raw
 `<search>` and `<replace>` blocks inside `<candidates>` instead of putting
@@ -297,10 +323,13 @@ wall time only.
 When profiling is enabled, providers with native streaming support may also
 stream model output into `.local_micro_agent/model_streams/*.txt`; model-call
 profile records include `stream_path`, `stream_chunks`, and `stream_chars`.
-Ollama native and OpenAI-compatible providers support this path. Set
-`workflow.profile_model_stream=false` to disable streaming artifacts, or tune
-`workflow.profile_model_stream_log_interval_chars` to control the compact
-progress lines written to `agent.log`.
+Reasoning chunks are written separately to matching `.reasoning.txt` artifacts
+and recorded with `reasoning_stream_path`, `reasoning_stream_chunks`,
+`reasoning_content_chars`, and `reasoning_only_response` fields when the
+provider exposes that metadata. Ollama native and OpenAI-compatible providers
+support this path. Set `workflow.profile_model_stream=false` to disable
+streaming artifacts, or tune `workflow.profile_model_stream_log_interval_chars`
+to control the compact progress lines written to `agent.log`.
 
 OpenAI-compatible providers also accept optional request passthrough fields:
 `think` adds common thinking-control keys (`think`, `enable_thinking`, and

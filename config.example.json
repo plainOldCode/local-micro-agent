@@ -14,7 +14,7 @@
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:27b",
       "temperature": 0.0,
-      "max_tokens": 32768,
+      "max_tokens": 8192,
       "num_ctx": 64000,
       "think": false,
       "timeout_seconds": 240
@@ -23,21 +23,27 @@
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:27b",
-      "temperature": 0.0,
-      "max_tokens": 32768,
+      "temperature": 0.6,
+      "max_tokens": 8192,
       "num_ctx": 64000,
       "think": true,
-      "timeout_seconds": 300
+      "timeout_seconds": 300,
+      "extra_options": {
+        "top_p": 0.95
+      }
     },
     "qwen_explore": {
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:27b",
       "temperature": 0.75,
-      "max_tokens": 32768,
+      "max_tokens": 16384,
       "num_ctx": 64000,
       "think": true,
-      "timeout_seconds": 300
+      "timeout_seconds": 300,
+      "extra_options": {
+        "top_p": 0.95
+      }
     },
     "fast_planner": {
       "kind": "openai_compatible",
@@ -45,9 +51,10 @@
       "api_key_env": "OLLAMA_API_KEY",
       "model": "qwen3.6:27b",
       "temperature": 0.0,
-      "max_tokens": 32768,
+      "max_tokens": 8192,
       "think": false,
       "disable_thinking_with_assistant_prefill": false,
+      "extra_options": {},
       "extra_body": {},
       "timeout_seconds": 120
     }
@@ -73,7 +80,7 @@
     "baseline_metric": null,
     "require_metric": false,
     "accept_if_improved": false,
-    "retry_rejected_candidates": false,
+    "retry_rejected_candidates": true,
     "reflect_before_retry": false,
     "code_output_format": "json",
     "prompt_cache_friendly_layout": true,
@@ -82,9 +89,9 @@
     "log_raw_model_outputs": false,
     "raw_model_output_dir": ".local_micro_agent/raw_model_outputs",
     "candidate_queue": false,
-    "candidate_novelty_gate": false,
-    "adaptive_search_memory": false,
-    "adaptive_search_reject_cooled_axes": false,
+    "candidate_novelty_gate": true,
+    "adaptive_search_memory": true,
+    "adaptive_search_reject_cooled_axes": true,
     "adaptive_search_force_strategy_axis": false,
     "adaptive_search_strict_axis_pool": false,
     "adaptive_search_axis_pool": [],
@@ -92,7 +99,7 @@
     "adaptive_search_axis_guidance": {},
     "adaptive_search_axis_window": 8,
     "adaptive_search_axis_failure_threshold": 3,
-    "adaptive_search_axis_cooldown_loops": 3,
+    "adaptive_search_axis_cooldown_loops": 5,
     "adaptive_search_recent_limit": 20,
     "brainstorm_after_rejections": 0,
     "pre_improvement_todo_blocks_brainstorm": true,
@@ -111,7 +118,7 @@
     "todo_ledger_summary_limit": 8,
     "failed_tactic_signature_limit": 16,
     "failed_tactic_family_limit": 24,
-    "failed_tactic_similarity_threshold": 0.45,
+    "failed_tactic_similarity_threshold": 0.35,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
     "record_candidate_artifacts": false,
@@ -140,8 +147,12 @@
     "semantic_analysis_focus": "",
     "semantic_analysis_model_role": "planner",
     "semantic_analysis_char_limit": 8000,
-    "repair_target_not_found": false,
+    "repair_target_not_found": true,
     "repair_source_context_char_limit": 20000,
-    "feedback_notes_limit": 12
+    "feedback_notes_limit": 12,
+    "deterministic_test_decision": true,
+    "profile_agent": true,
+    "profile_model_stream": true,
+    "adaptive_gate_min_family_attempts_for_hard": 2
   }
 }
