@@ -188,6 +188,14 @@ class MicroAgent:
             raise
         output, usage = self._normalize_model_response(response)
         elapsed_seconds = max(time.perf_counter() - start["perf"], 0.0)
+        usage_fields = self._profile_model_usage_fields(usage, elapsed_seconds)
+        budget_fields = self._model_token_budget_fields(
+            provider,
+            usage,
+            prompt_chars=prompt_chars,
+            role=role,
+            call_site=call_site,
+        )
         self._record_profile_span(
             "model_call",
             start,
@@ -203,7 +211,8 @@ class MicroAgent:
                 "output_chars": len(output),
                 "success": True,
                 **stream_stats,
-                **self._profile_model_usage_fields(usage, elapsed_seconds),
+                **usage_fields,
+                **budget_fields,
             },
         )
         if self._reject_reasoning_only_response(output, usage, role=role, call_site=call_site):
@@ -262,6 +271,126 @@ class MicroAgent:
         if reasoning_role not in self.config.get("models", {}):
             return role
         return reasoning_role
+
+    def _provider_for_role(self, role: str) -> dict[str, Any]:
+        model_name = self.config.get("models", {}).get(role) or self.config.get(
+            "models", {}
+        ).get("default")
+        provider = self.config.get("providers", {}).get(str(model_name), {})
+        return provider if isinstance(provider, dict) else {}
+
+    def _input_token_budget(self, provider: dict[str, Any]) -> int | None:
+        num_ctx = provider.get("num_ctx")
+        max_tokens = provider.get("max_tokens")
+        if not isinstance(num_ctx, int) or num_ctx <= 0:
+            return None
+        if not isinstance(max_tokens, int) or max_tokens < 0:
+            max_tokens = 0
+        return max(num_ctx - max_tokens, 1)
+
+    def _prompt_chars_per_token(self) -> float:
+        return float(
+            self.config.get("workflow", {}).get("prompt_chars_per_token_estimate", 3.5)
+            or 3.5
+        )
+
+    def _model_token_budget_fields(
+        self,
+        provider: dict[str, Any],
+        usage: dict[str, Any],
+        *,
+        prompt_chars: int,
+        role: str,
+        call_site: str,
+    ) -> dict[str, Any]:
+        input_budget = self._input_token_budget(provider)
+        if input_budget is None:
+            return {}
+        prompt_tokens = usage.get("prompt_tokens")
+        estimated = False
+        if not isinstance(prompt_tokens, (int, float)) or prompt_tokens < 0:
+            prompt_tokens = prompt_chars / self._prompt_chars_per_token()
+            estimated = True
+        ratio = float(prompt_tokens) / float(input_budget)
+        fields: dict[str, Any] = {
+            "input_token_budget": input_budget,
+            "input_token_budget_used_ratio": round(ratio, 4),
+        }
+        if estimated:
+            fields["prompt_tokens_estimated"] = int(prompt_tokens)
+        warn_ratio = float(
+            self.config.get("workflow", {}).get("prompt_token_budget_warn_ratio", 0.9)
+            or 0.9
+        )
+        if ratio >= warn_ratio:
+            fields["input_token_budget_warning"] = True
+            note = (
+                "Prompt token budget pressure: "
+                f"role={role} call_site={call_site or 'chat'} "
+                f"prompt_tokens={'~' if estimated else ''}{int(prompt_tokens)} "
+                f"budget={input_budget} ratio={ratio:.2f}"
+            )
+            self._record_prompt_budget_warning("pressure", note)
+            self._log(note)
+        return fields
+
+    def _record_prompt_budget_warning(self, kind: str, note: str) -> None:
+        warnings = self.state.scratch.setdefault("prompt_token_budget_warnings", [])
+        if isinstance(warnings, list):
+            warnings.append(
+                {
+                    "loop": self.state.loop_count,
+                    "kind": kind,
+                    "note": note,
+                }
+            )
+        else:
+            self.state.scratch["prompt_token_budget_warnings"] = [
+                {
+                    "loop": self.state.loop_count,
+                    "kind": kind,
+                    "note": note,
+                }
+            ]
+        note_keys = self.state.scratch.setdefault("prompt_token_budget_note_keys", [])
+        if not isinstance(note_keys, list):
+            note_keys = []
+            self.state.scratch["prompt_token_budget_note_keys"] = note_keys
+        key = f"{self.state.loop_count}:{kind}"
+        if key not in note_keys:
+            self.state.notes.append(note)
+            note_keys.append(key)
+
+    def _shrink_dynamic_suffix_blocks(
+        self,
+        stable_messages: list[dict[str, str]],
+        dynamic_blocks: list[str],
+        *,
+        role: str,
+    ) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("auto_shrink_dynamic_context", True) is False:
+            return dynamic_blocks
+        if not dynamic_blocks:
+            return dynamic_blocks
+        provider = self._provider_for_role(role)
+        input_budget = self._input_token_budget(provider)
+        if input_budget is None:
+            return dynamic_blocks
+        target_ratio = float(workflow.get("prompt_token_budget_target_ratio", 0.85) or 0.85)
+        char_budget = int(input_budget * self._prompt_chars_per_token() * target_ratio)
+        stable_chars = sum(len(str(message.get("content", ""))) for message in stable_messages)
+        dynamic_budget = char_budget - stable_chars
+        dynamic_chars = sum(len(block) for block in dynamic_blocks)
+        if dynamic_budget <= 0 or dynamic_chars <= dynamic_budget:
+            return dynamic_blocks
+        per_block = max(500, dynamic_budget // max(len(dynamic_blocks), 1))
+        self._record_prompt_budget_warning(
+            "shrink",
+            "Shrank dynamic CODE context for prompt budget: "
+            f"dynamic_chars={dynamic_chars} budget={dynamic_budget}",
+        )
+        return [self._slice_text(block, per_block) for block in dynamic_blocks]
 
     @staticmethod
     def _normalize_model_response(response: Any) -> tuple[str, dict[str, Any]]:
@@ -1762,7 +1891,9 @@ class MicroAgent:
                         "Current writable source context follows. This is reread "
                         "immediately before this CODE attempt and supersedes the "
                         "stable Source files block above when they differ. Copy "
-                        "target/search text from this current context.\n"
+                        "target/search text from this current context. Line numbers "
+                        "and the 'N: ' prefix are not part of the file content; never "
+                        "include them in target/search/replace text.\n"
                         f"{current_source_context}"
                     )
                 if self.config.get("workflow", {}).get("candidate_queue"):
@@ -1854,6 +1985,11 @@ class MicroAgent:
                         f"{history}"
                     )
                 if dynamic_suffix_blocks:
+                    dynamic_suffix_blocks = self._shrink_dynamic_suffix_blocks(
+                        messages,
+                        dynamic_suffix_blocks,
+                        role="coder",
+                    )
                     messages = [
                         *messages,
                         {
@@ -2062,6 +2198,35 @@ class MicroAgent:
                 )
                 continue
 
+            cooled_regions = self._cooled_candidate_regions(candidate)
+            if cooled_regions:
+                self.state.notes.append(
+                    "Candidate "
+                    f"{candidate.candidate_id} rejected: cooled edit regions "
+                    f"{', '.join(cooled_regions)}"
+                )
+                extra = self._candidate_rejection_extra(
+                    candidate,
+                    "rejected_cooled_region",
+                    f"cooled edit regions {', '.join(cooled_regions)}",
+                )
+                self._append_candidate_history(
+                    candidate,
+                    status="rejected_cooled_region",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    extra=extra,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status="rejected_cooled_region",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             await self._restore_snapshot(baseline_snapshot)
             candidate_for_record = candidate
             repair_parent_id = ""
@@ -2249,6 +2414,14 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("adaptive_search_reject_cooled_axes")) and (
             self._adaptive_search_memory_enabled()
+        )
+
+    def _adaptive_search_reject_cooled_regions_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return (
+            workflow.get("adaptive_search_reject_cooled_regions", True) is not False
+            and self._adaptive_search_memory_enabled()
+            and self._adaptive_search_reject_cooled_axes_enabled()
         )
 
     def _rejected_candidate_fingerprint(self, candidate: CodeCandidate) -> str | None:
@@ -2829,6 +3002,106 @@ class MicroAgent:
                 cooled.append(axis)
         return cooled
 
+    def _cooled_candidate_regions(self, candidate: CodeCandidate) -> list[str]:
+        if not self._adaptive_search_reject_cooled_regions_enabled():
+            return []
+        if self._candidate_matches_selected_tactic(candidate):
+            return []
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            memory = self._adaptive_search_memory_from_history()
+            if memory:
+                self.state.scratch["adaptive_search_memory"] = memory
+        if not isinstance(memory, dict):
+            return []
+        regions_state = memory.get("regions")
+        if not isinstance(regions_state, dict):
+            return []
+        current_loop = self.state.loop_count
+        cooled: list[str] = []
+        for region_key in self._candidate_region_keys(candidate):
+            region_state = regions_state.get(region_key)
+            if not isinstance(region_state, dict):
+                continue
+            cooldown_until = region_state.get("cooldown_until_loop")
+            if isinstance(cooldown_until, int) and cooldown_until > current_loop:
+                cooled.append(region_key)
+        return sorted(cooled)
+
+    def _candidate_region_keys(self, candidate: CodeCandidate) -> list[str]:
+        axes = self._candidate_strategy_axes(candidate)
+        families = sorted(self._candidate_reason_family_aliases(candidate))
+        family = families[0] if families else ""
+        keys: list[str] = []
+        for change in candidate.changes:
+            region = self._change_region_key(change)
+            for axis in axes:
+                suffix = axis if not family else f"{axis}+{family}"
+                keys.append(f"{region}::{suffix}")
+        return sorted(set(keys))
+
+    def _change_region_key(self, change: CodeChange) -> str:
+        path = change.path
+        content = self._current_source_for_region(path)
+        if not content:
+            return f"{path}::file"
+        anchor = change.target or change.patch or change.content or change.reason
+        line_no = self._best_anchor_line_number(content, anchor)
+        symbol = self._python_symbol_at_line(content, line_no)
+        if symbol:
+            return f"{path}::{symbol}"
+        bucket = max(1, ((max(line_no, 1) - 1) // 50) + 1)
+        return f"{path}::lines_{bucket * 50 - 49}_{bucket * 50}"
+
+    def _current_source_for_region(self, path: str) -> str:
+        snapshot = self.state.scratch.get("pre_code_snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get(path), str):
+            return str(snapshot[path])
+        abs_path = self.state.repo_root / path
+        try:
+            return abs_path.read_text(errors="replace")
+        except OSError:
+            return ""
+
+    def _best_anchor_line_number(self, content: str, anchor: str) -> int:
+        if not anchor:
+            return 1
+        index = content.find(anchor)
+        if index >= 0:
+            return content[:index].count("\n") + 1
+        lines = content.splitlines()
+        tokens = self._anchor_tokens(anchor)
+        best_index = 0
+        best_score = -1
+        if tokens:
+            for line_index, line in enumerate(lines):
+                score = len(tokens & self._anchor_tokens(line))
+                if score > best_score:
+                    best_index = line_index
+                    best_score = score
+        return best_index + 1
+
+    @staticmethod
+    def _python_symbol_at_line(content: str, line_no: int) -> str:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return ""
+        best: tuple[int, str] | None = None
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            start = getattr(node, "lineno", None)
+            end = getattr(node, "end_lineno", None)
+            if not isinstance(start, int) or not isinstance(end, int):
+                continue
+            if start <= line_no <= end:
+                span = end - start
+                name = node.name
+                if best is None or span < best[0]:
+                    best = (span, name)
+        return best[1] if best else ""
+
     def _candidate_matches_selected_tactic(self, candidate: CodeCandidate) -> bool:
         selected_axis = self._selected_tactic_axis_for_current_loop()
         if not selected_axis:
@@ -2871,6 +3144,7 @@ class MicroAgent:
             memory = {"axes": {}, "recent": []}
             self.state.scratch["adaptive_search_memory"] = memory
         axes_state = memory.setdefault("axes", {})
+        regions_state = memory.setdefault("regions", {})
         recent = memory.setdefault("recent", [])
         improved = status in {"improved", "accepted"} and not failed
         for axis in axes:
@@ -2906,11 +3180,43 @@ class MicroAgent:
                         )
                     )
                     axis_state["cooldown_until_loop"] = self.state.loop_count + cooldown
+        region_keys = self._candidate_region_keys(candidate)
+        for region_key in region_keys:
+            region_state = regions_state.setdefault(
+                region_key,
+                {
+                    "attempts": 0,
+                    "failures": 0,
+                    "successes": 0,
+                    "cooldown_until_loop": None,
+                    "last_status": None,
+                    "last_metric": None,
+                },
+            )
+            region_state["attempts"] = int(region_state.get("attempts", 0)) + 1
+            region_state["last_status"] = status
+            region_state["last_metric"] = metric
+            if improved:
+                region_state["successes"] = int(region_state.get("successes", 0)) + 1
+                region_state["cooldown_until_loop"] = None
+            else:
+                region_state["failures"] = int(region_state.get("failures", 0)) + 1
+                if self._region_should_cool_down(region_key, status):
+                    cooldown = int(
+                        self.config.get("workflow", {}).get(
+                            "adaptive_search_region_cooldown_loops",
+                            self.config.get("workflow", {}).get(
+                                "adaptive_search_axis_cooldown_loops", 3
+                            ),
+                        )
+                    )
+                    region_state["cooldown_until_loop"] = self.state.loop_count + cooldown
         recent.append(
             {
                 "loop": self.state.loop_count,
                 "candidate_id": candidate.candidate_id,
                 "axes": axes,
+                "regions": region_keys,
                 "status": status,
                 "metric": metric,
                 "applied": applied,
@@ -2932,9 +3238,53 @@ class MicroAgent:
         threshold = int(
             self.config.get("workflow", {}).get("adaptive_search_axis_failure_threshold", 3)
         )
-        failure_statuses = {
+        failure_statuses = self._adaptive_search_failure_statuses()
+        if status not in failure_statuses:
+            return False
+        recent_failures = 1
+        for record in reversed(recent[-window:]):
+            if axis not in record.get("axes", []):
+                continue
+            if record.get("status") in failure_statuses or record.get("failed") is True:
+                recent_failures += 1
+        return recent_failures >= threshold
+
+    def _region_should_cool_down(self, region_key: str, status: str) -> bool:
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            return False
+        recent = memory.get("recent")
+        if not isinstance(recent, list):
+            return False
+        window = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_window",
+                self.config.get("workflow", {}).get("adaptive_search_axis_window", 8),
+            )
+        )
+        threshold = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_failure_threshold",
+                self.config.get("workflow", {}).get("adaptive_search_axis_failure_threshold", 3),
+            )
+        )
+        failure_statuses = self._adaptive_search_failure_statuses()
+        if status not in failure_statuses:
+            return False
+        recent_failures = 1
+        for record in reversed(recent[-window:]):
+            if region_key not in record.get("regions", []):
+                continue
+            if record.get("status") in failure_statuses or record.get("failed") is True:
+                recent_failures += 1
+        return recent_failures >= threshold
+
+    @staticmethod
+    def _adaptive_search_failure_statuses() -> set[str]:
+        return {
             "rejected",
             "rejected_cooled_axis",
+            "rejected_cooled_region",
             "rejected_missing_axis",
             "rejected_family_drift",
             "rejected_no_changes",
@@ -2945,15 +3295,6 @@ class MicroAgent:
             "rejected_wrong_axis",
             "rejected_no_metric",
         }
-        if status not in failure_statuses:
-            return False
-        recent_failures = 1
-        for record in reversed(recent[-window:]):
-            if axis not in record.get("axes", []):
-                continue
-            if record.get("status") in failure_statuses or record.get("failed") is True:
-                recent_failures += 1
-        return recent_failures >= threshold
 
     def _format_adaptive_search_memory(self) -> str:
         if not self._adaptive_search_memory_enabled():
@@ -2989,12 +3330,35 @@ class MicroAgent:
                 item["cooldown_until_loop"] = cooldown_until
                 cooled_down.append(axis)
             axes.append(item)
+        regions_state = memory.get("regions")
+        regions = []
+        cooled_regions = []
+        if isinstance(regions_state, dict):
+            for region_key, raw_state in sorted(regions_state.items()):
+                if not isinstance(raw_state, dict):
+                    continue
+                cooldown_until = raw_state.get("cooldown_until_loop")
+                is_cooled = isinstance(cooldown_until, int) and cooldown_until > current_loop
+                item = {
+                    "region": region_key,
+                    "attempts": raw_state.get("attempts", 0),
+                    "failures": raw_state.get("failures", 0),
+                    "successes": raw_state.get("successes", 0),
+                    "last_status": raw_state.get("last_status"),
+                    "last_metric": raw_state.get("last_metric"),
+                }
+                if is_cooled:
+                    item["cooldown_until_loop"] = cooldown_until
+                    cooled_regions.append(region_key)
+                regions.append(item)
         recent = memory.get("recent") if isinstance(memory.get("recent"), list) else []
         payload = {
             "current_loop": current_loop,
             "cooled_down_axes": cooled_down,
+            "cooled_down_regions": cooled_regions,
             "gate_controller": self._adaptive_gate_controller_summary(),
             "axes": axes,
+            "regions": regions[-8:],
             "recent": recent[-5:],
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -3061,16 +3425,7 @@ class MicroAgent:
         limit = int(self.config.get("workflow", {}).get("candidate_history_limit", 20))
         lines = path.read_text(errors="replace").splitlines()[-limit:]
         memory: dict[str, Any] = {"axes": {}, "recent": []}
-        failure_statuses = {
-            "rejected",
-            "rejected_cooled_axis",
-            "rejected_missing_axis",
-            "rejected_no_changes",
-            "rejected_repeated_pattern",
-            "rejected_unknown_axis",
-            "rejected_wrong_axis",
-            "rejected_no_metric",
-        }
+        failure_statuses = self._adaptive_search_failure_statuses()
         for line in lines:
             try:
                 record = json.loads(line)
@@ -3086,6 +3441,11 @@ class MicroAgent:
                 "loop": record.get("loop"),
                 "candidate_id": record.get("candidate_id"),
                 "axes": [str(axis) for axis in axes],
+                "regions": [
+                    str(region)
+                    for region in record.get("region_keys", [])
+                    if str(region)
+                ],
                 "status": status,
                 "metric": metric,
                 "applied": record.get("applied", 0),
@@ -3117,8 +3477,27 @@ class MicroAgent:
                         axis_state["best_metric"] = metric
                 elif status in failure_statuses or failed:
                     axis_state["failures"] += 1
+            for region_key in recent_record["regions"]:
+                region_state = memory.setdefault("regions", {}).setdefault(
+                    region_key,
+                    {
+                        "attempts": 0,
+                        "failures": 0,
+                        "successes": 0,
+                        "cooldown_until_loop": None,
+                        "last_status": None,
+                        "last_metric": None,
+                    },
+                )
+                region_state["attempts"] += 1
+                region_state["last_status"] = status
+                region_state["last_metric"] = metric
+                if status in {"improved", "accepted"} and not failed:
+                    region_state["successes"] += 1
+                elif status in failure_statuses or failed:
+                    region_state["failures"] += 1
         self._apply_history_cooldowns(memory, failure_statuses)
-        return memory if memory["axes"] else None
+        return memory if memory["axes"] or memory.get("regions") else None
 
     def _failure_memory_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -3253,6 +3632,30 @@ class MicroAgent:
                     recent_failures += 1
             if recent_failures >= threshold:
                 axis_state["cooldown_until_loop"] = self.state.loop_count + cooldown
+        regions_state = memory.get("regions")
+        if not isinstance(regions_state, dict):
+            return
+        region_threshold = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_failure_threshold", threshold
+            )
+        )
+        region_cooldown = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_cooldown_loops", cooldown
+            )
+        )
+        for region_key, region_state in regions_state.items():
+            recent_failures = 0
+            for record in reversed(recent[-window:]):
+                if region_key not in record.get("regions", []):
+                    continue
+                if record.get("status") in failure_statuses or record.get("failed") is True:
+                    recent_failures += 1
+            if recent_failures >= region_threshold:
+                region_state["cooldown_until_loop"] = (
+                    self.state.loop_count + region_cooldown
+                )
 
     @staticmethod
     def _normalize_fingerprint_text(text: str) -> str:
@@ -3484,11 +3887,7 @@ class MicroAgent:
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
-                self.state.current = (
-                    AgentStateName.REFLECT
-                    if self.config.get("workflow", {}).get("reflect_before_retry")
-                    else AgentStateName.CODE
-                )
+                self.state.current = self._retry_state_after_failure()
                 return
             if not failed and self._should_continue_after_improvement():
                 self._create_validated_pattern_followup_todo()
@@ -3531,10 +3930,8 @@ class MicroAgent:
             return
 
         self.state.notes.append(f"Retry focus: {decision.next_focus or decision.reason}")
-        self.state.current = (
-            AgentStateName.REFLECT
-            if self.config.get("workflow", {}).get("reflect_before_retry")
-            else AgentStateName.CODE
+        self.state.current = self._retry_state_after_failure(
+            decision.next_focus or decision.reason
         )
 
     def _writable_files(self) -> set[str]:
@@ -3619,6 +4016,58 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("retry_rejected_candidates")) and (
             self.state.loop_count + 1 < self.state.max_loops
+        )
+
+    def _retry_state_after_failure(self, retry_focus: str = "") -> AgentStateName:
+        if self._should_reflect_after_failure(retry_focus):
+            return AgentStateName.REFLECT
+        return AgentStateName.CODE
+
+    def _should_reflect_after_failure(self, retry_focus: str = "") -> bool:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("reflect_before_retry"):
+            return False
+        if workflow.get("reflect_conditionally", True) is False:
+            return True
+        failure_class = self._retry_failure_class(retry_focus)
+        counts = self.state.scratch.setdefault("retry_failure_class_counts", {})
+        if not isinstance(counts, dict):
+            counts = {}
+            self.state.scratch["retry_failure_class_counts"] = counts
+        count = int(counts.get(failure_class, 0) or 0) + 1
+        counts[failure_class] = count
+
+        simple_failures = {
+            "patch_miss",
+            "duplicate_variant",
+            "axis_mismatch",
+            "family_mismatch",
+            "contract_mismatch",
+        }
+        if failure_class in simple_failures:
+            threshold = int(
+                workflow.get("reflect_after_repeated_failure_class", 3) or 3
+            )
+            if count < threshold:
+                self.state.notes.append(
+                    "Skipping REFLECT for structured retry failure "
+                    f"{failure_class} count={count}/{threshold}"
+                )
+                return False
+            counts[failure_class] = 0
+        return True
+
+    def _retry_failure_class(self, retry_focus: str = "") -> str:
+        recent_notes = " | ".join(self.state.notes[-8:])
+        detail = " | ".join(part for part in (recent_notes, retry_focus) if part)
+        return self._candidate_failure_class(
+            status="rejected",
+            metric=self.state.scratch.get("last_metric"),
+            applied=int(self.state.scratch.get("applied_changes", 0) or 0),
+            failed=True,
+            results=self.state.test_results,
+            failure_detail=detail,
+            no_change_reason=detail if self.state.scratch.get("applied_changes", 0) == 0 else "",
         )
 
     def _should_continue_after_improvement(self) -> bool:
@@ -4459,6 +4908,60 @@ class MicroAgent:
         tail = limit - head
         return text[:head] + "\n[...truncated...]\n" + text[-tail:]
 
+    @staticmethod
+    def _line_numbered_text(text: str, start_line: int = 1) -> str:
+        lines = text.splitlines()
+        if not lines:
+            return ""
+        width = len(str(start_line + len(lines) - 1))
+        return "\n".join(
+            f"{line_no:>{width}}: {line}"
+            for line_no, line in enumerate(lines, start=start_line)
+        )
+
+    @staticmethod
+    def _anchor_tokens(text: str) -> set[str]:
+        return {
+            token.lower()
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
+            if len(token) >= 3
+        }
+
+    def _line_numbered_context(self, text: str, limit: int) -> str:
+        sliced = self._slice_text(text, limit)
+        return self._line_numbered_text(sliced)
+
+    def _best_anchor_excerpt(
+        self,
+        content: str,
+        anchor: str,
+        *,
+        context_lines: int,
+        limit: int,
+    ) -> str:
+        lines = content.splitlines()
+        if not lines:
+            return ""
+        tokens = self._anchor_tokens(anchor)
+        best_index = 0
+        best_score = -1
+        if tokens:
+            for index, line in enumerate(lines):
+                line_tokens = self._anchor_tokens(line)
+                score = len(tokens & line_tokens)
+                if score > best_score:
+                    best_index = index
+                    best_score = score
+        start = max(0, best_index - context_lines)
+        end = min(len(lines), best_index + context_lines + 1)
+        excerpt = "\n".join(lines[start:end])
+        if len(excerpt) > limit:
+            excerpt = self._slice_text(excerpt, limit)
+            start_line = 1
+        else:
+            start_line = start + 1
+        return self._line_numbered_text(excerpt, start_line=start_line)
+
     async def _format_current_source_context(self) -> str:
         workflow = self.config.get("workflow", {})
         if not workflow.get("current_source_context_before_code", True):
@@ -4476,9 +4979,8 @@ class MicroAgent:
                 blocks.append(f"### {rel_path}\n<missing>")
                 continue
             content = self._context_for_file(rel_path, content, record_note=False)
-            blocks.append(
-                f"### {rel_path}\n```text\n{self._slice_text(content, per_file_limit)}\n```"
-            )
+            numbered = self._line_numbered_context(content, per_file_limit)
+            blocks.append(f"### {rel_path}\n```text\n{numbered}\n```")
         return self._slice_text("\n\n".join(blocks), limit)
 
     @classmethod
@@ -4645,6 +5147,7 @@ class MicroAgent:
                 "failed": record.get("failed"),
                 "strategy_axis": record.get("strategy_axis", ""),
                 "strategy_axes": record.get("strategy_axes", []),
+                "region_keys": record.get("region_keys", []),
                 "tactic_stage": record.get("tactic_stage", ""),
                 "stage_result": record.get("stage_result", ""),
                 "changes": record.get("changes", []),
@@ -5137,7 +5640,32 @@ class MicroAgent:
                 f"Candidate {candidate.candidate_id} target-not-found repair rejected: {note}"
             )
             return None
+        target_miss = await self._candidate_current_target_miss(repaired, allowed)
+        if target_miss:
+            self.state.notes.append(
+                "Candidate "
+                f"{candidate.candidate_id} target-not-found repair rejected: {target_miss}"
+            )
+            return None
         return repaired
+
+    async def _candidate_current_target_miss(
+        self, candidate: CodeCandidate, allowed: set[str]
+    ) -> str:
+        for change in candidate.changes:
+            if change.target is None or change.replacement is None:
+                continue
+            if change.path not in allowed:
+                return f"repaired change touches out-of-plan file {change.path}"
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / change.path))
+            except FileNotFoundError:
+                return f"repaired change targets missing file {change.path}"
+            if change.target not in content:
+                return f"repaired target still not found in {change.path}"
+            if content.count(change.target) != 1:
+                return f"repaired target is ambiguous in {change.path}"
+        return ""
 
     async def _target_not_found_repair_prompt(
         self,
@@ -5206,6 +5734,9 @@ class MicroAgent:
         limit = int(
             self.config.get("workflow", {}).get("repair_source_context_char_limit", 20000)
         )
+        context_lines = int(
+            self.config.get("workflow", {}).get("repair_anchor_context_lines", 18) or 18
+        )
         blocks = []
         seen = set()
         for change in candidate.changes:
@@ -5217,8 +5748,34 @@ class MicroAgent:
             except FileNotFoundError:
                 blocks.append(f"### {change.path}\n<missing>")
                 continue
+            anchor_excerpt = ""
+            if change.target:
+                anchor_limit = min(limit, 6000)
+                anchor_excerpt = self._best_anchor_excerpt(
+                    content,
+                    change.target,
+                    context_lines=context_lines,
+                    limit=anchor_limit,
+                )
+            if anchor_excerpt:
+                blocks.append(
+                    "### "
+                    f"{change.path}\n"
+                    "Original missing target/search text follows; it did not match the "
+                    "file exactly. Use it only to find the intended nearby region.\n"
+                    "```text\n"
+                    f"{self._truncate_text(change.target or '', 3000)}\n"
+                    "```\n"
+                    "Best current-source excerpt for that region follows with line numbers. "
+                    "Copy the repaired target/search text verbatim from these current lines, "
+                    "without the line-number prefixes.\n"
+                    "```text\n"
+                    f"{anchor_excerpt}\n"
+                    "```"
+                )
+                continue
             blocks.append(
-                f"### {change.path}\n```text\n{self._slice_text(content, limit)}\n```"
+                f"### {change.path}\n```text\n{self._line_numbered_context(content, limit)}\n```"
             )
         return "\n\n".join(blocks) if blocks else "No writable source context available."
 
@@ -5520,6 +6077,7 @@ class MicroAgent:
             "strategy_axis": candidate.strategy_axis,
             "strategy_axes": self._candidate_strategy_axes(candidate),
             "family_aliases": sorted(self._candidate_reason_family_aliases(candidate)),
+            "region_keys": self._candidate_region_keys(candidate),
             "changes": self._summarize_changes(candidate.changes),
             "todo_id": self._active_todo_id(),
             "spec_task_id": self._active_todo_spec_task_id(),

@@ -518,6 +518,75 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual(response.content, " \n")
         self.assertTrue(response.usage["reasoning_only_response"])
 
+    def test_model_token_budget_fields_warn_near_input_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"prompt_token_budget_warn_ratio": 0.9},
+            }
+            agent = MicroAgent(config, state)
+
+            fields = agent._model_token_budget_fields(
+                {"num_ctx": 100, "max_tokens": 20},
+                {"prompt_tokens": 75},
+                prompt_chars=0,
+                role="coder",
+                call_site="json_call",
+            )
+
+            self.assertEqual(fields["input_token_budget"], 80)
+            self.assertTrue(fields["input_token_budget_warning"])
+            self.assertIn("Prompt token budget pressure", "\n".join(state.notes))
+            self.assertEqual(len(state.scratch["prompt_token_budget_warnings"]), 1)
+
+            agent._model_token_budget_fields(
+                {"num_ctx": 100, "max_tokens": 20},
+                {"prompt_tokens": 76},
+                prompt_chars=0,
+                role="coder",
+                call_site="json_call",
+            )
+
+            self.assertEqual(
+                "\n".join(state.notes).count("Prompt token budget pressure"),
+                1,
+            )
+            self.assertEqual(len(state.scratch["prompt_token_budget_warnings"]), 2)
+
+    def test_dynamic_suffix_blocks_shrink_to_input_token_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {"coder": "local"},
+                "providers": {
+                    "local": {
+                        "kind": "ollama_native",
+                        "num_ctx": 100,
+                        "max_tokens": 20,
+                    }
+                },
+                "mcp_servers": {},
+                "workflow": {
+                    "prompt_chars_per_token_estimate": 1,
+                    "prompt_token_budget_target_ratio": 0.5,
+                },
+            }
+            agent = MicroAgent(config, state)
+            blocks = ["a" * 1000, "b" * 1000]
+
+            shrunk = agent._shrink_dynamic_suffix_blocks(
+                [{"role": "system", "content": "stable"}],
+                blocks,
+                role="coder",
+            )
+
+            self.assertLess(sum(len(block) for block in shrunk), sum(len(block) for block in blocks))
+            self.assertIn("Shrank dynamic CODE context", "\n".join(state.notes))
+            self.assertEqual(len(state.scratch["prompt_token_budget_warnings"]), 1)
+
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
             "model": "local",
@@ -2030,6 +2099,45 @@ Background / non-constraints
             self.assertEqual(result.loop_count, 1)
             self.assertEqual(target.read_text(), "value = 'old'\n")
 
+    def test_reflect_before_retry_skips_structured_patch_miss_until_repeated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.notes.append("Replacement target not found: target.py")
+            state.scratch["applied_changes"] = 0
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reflect_before_retry": True,
+                    "reflect_after_repeated_failure_class": 3,
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            self.assertFalse(agent._should_reflect_after_failure())
+            self.assertFalse(agent._should_reflect_after_failure())
+            self.assertTrue(agent._should_reflect_after_failure())
+            self.assertFalse(agent._should_reflect_after_failure())
+            self.assertIn("Skipping REFLECT for structured retry failure patch_miss", "\n".join(state.notes))
+
+    def test_reflect_conditionally_false_preserves_legacy_reflect_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.notes.append("Replacement target not found: target.py")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reflect_before_retry": True,
+                    "reflect_conditionally": False,
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            self.assertTrue(agent._should_reflect_after_failure())
+
     def test_shipped_deterministic_configs_enable_rejected_candidate_retries(self) -> None:
         for config_path in Path("config").glob("*.json"):
             with self.subTest(config=str(config_path)):
@@ -2658,6 +2766,84 @@ value = 'fast'
             self.assertEqual(rows[0]["metric"], 80)
             self.assertEqual(rows[1]["status"], "accepted")
 
+    def test_current_source_context_uses_line_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("alpha = 1\nbeta = 2\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"writable_files": ["target.py"]},
+            }
+            agent = MicroAgent(config, state)
+
+            async def format_context() -> str:
+                await agent.mcp.start()
+                try:
+                    return await agent._format_current_source_context()
+                finally:
+                    await agent.mcp.close()
+
+            context = asyncio.run(format_context())
+
+            self.assertIn("1: alpha = 1", context)
+            self.assertIn("2: beta = 2", context)
+
+    def test_target_not_found_repair_context_anchors_near_stale_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def unrelated():\n"
+                "    return 0\n\n"
+                "def hot_path():\n"
+                "    value = 'old'\n"
+                "    return value\n"
+            )
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "repair_source_context_char_limit": 12000,
+                    "repair_anchor_context_lines": 2,
+                },
+            }
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="edit hot path",
+                        target="def hot_path():\n    value = 'missing'\n",
+                        replacement="def hot_path():\n    value = 'fast'\n",
+                    )
+                ],
+                "edit hot path",
+            )
+
+            async def repair_context() -> str:
+                await agent.mcp.start()
+                try:
+                    return await agent._candidate_repair_source_context(
+                        candidate, {"target.py"}
+                    )
+                finally:
+                    await agent.mcp.close()
+
+            context = asyncio.run(repair_context())
+
+            self.assertIn("Original missing target/search text follows", context)
+            self.assertIn("Best current-source excerpt", context)
+            self.assertIn("4: def hot_path():", context)
+            self.assertIn("5:     value = 'old'", context)
+
     def test_target_not_found_repair_failure_records_repair_parent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2725,10 +2911,13 @@ value = 'fast'
                 .read_text()
                 .splitlines()[0]
             )
-            self.assertEqual(record["candidate_id"], "miss-repair1")
+            self.assertEqual(record["candidate_id"], "miss")
             self.assertEqual(record["status"], "rejected_no_changes")
-            self.assertEqual(record["repair_parent_id"], "miss")
             self.assertIn("Replacement target not found", record["failure_detail"])
+            self.assertIn(
+                "target-not-found repair rejected: repaired target still not found",
+                "\n".join(state.notes),
+            )
 
     def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2923,6 +3112,59 @@ value = 'fast'
             self.assertIn('"cooled_down_axes": [\n    "phase_interleave"\n  ]', memory_text)
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"strategy_axes": ["phase_interleave"]', history)
+
+    def test_adaptive_search_memory_cools_down_repeated_failed_region_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def hot_path():\n"
+                "    value = 'old'\n"
+                "    return value\n"
+            )
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    adaptive_search_memory=True,
+                    adaptive_search_reject_cooled_axes=True,
+                    adaptive_search_axis_failure_threshold=99,
+                    adaptive_search_region_failure_threshold=3,
+                    adaptive_search_region_cooldown_loops=4,
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "hot",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="hot path tweak",
+                        target="    value = 'old'\n",
+                        replacement="    value = 'slow'\n",
+                    )
+                ],
+                "hot path tweak",
+                strategy_axis="performance",
+            )
+
+            for _ in range(3):
+                agent._record_strategy_attempt(
+                    candidate,
+                    status="rejected",
+                    metric=120,
+                    applied=1,
+                    failed=True,
+                )
+
+            cooled = agent._cooled_candidate_regions(candidate)
+            self.assertEqual(cooled, ["target.py::hot_path::performance"])
+            memory = agent._format_adaptive_search_memory()
+            self.assertIn("target.py::hot_path::performance", memory)
 
     def test_code_prompt_includes_adaptive_search_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4609,6 +4851,7 @@ value = 'fast'
             coder_messages = models.seen["coder"][0]
             dynamic_content = coder_messages[-1]["content"]
             self.assertIn("Current writable source context follows", dynamic_content)
+            self.assertIn("never include them in target/search/replace text", dynamic_content)
             self.assertIn("value = 'current'", dynamic_content)
             self.assertNotIn("value = 'stale'", dynamic_content)
             self.assertEqual(target.read_text(), "value = 'new'\n")
