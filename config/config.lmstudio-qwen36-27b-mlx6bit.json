@@ -14,7 +14,7 @@
       "base_url": "http://127.0.0.1:1234/v1",
       "model": "qwen36-27b-mlx-6bit",
       "temperature": 0.0,
-      "max_tokens": 32768,
+      "max_tokens": 8192,
       "timeout_seconds": 1800,
       "think": false,
       "extra_body": {
@@ -28,28 +28,34 @@
       "base_url": "http://127.0.0.1:1234/v1",
       "model": "qwen36-27b-mlx-6bit",
       "temperature": 0.75,
-      "max_tokens": 32768,
+      "max_tokens": 16384,
       "timeout_seconds": 1800,
       "think": true,
       "extra_body": {
         "enableThinking": true,
         "enable_thinking": true
       },
-      "disable_thinking_with_assistant_prefill": false
+      "disable_thinking_with_assistant_prefill": false,
+      "extra_options": {
+        "top_p": 0.95
+      }
     },
     "qwen_reason": {
       "kind": "openai_compatible",
       "base_url": "http://127.0.0.1:1234/v1",
       "model": "qwen36-27b-mlx-6bit",
-      "temperature": 0.0,
-      "max_tokens": 32768,
+      "temperature": 0.6,
+      "max_tokens": 8192,
       "timeout_seconds": 1800,
       "think": true,
       "extra_body": {
         "enableThinking": true,
         "enable_thinking": true
       },
-      "disable_thinking_with_assistant_prefill": false
+      "disable_thinking_with_assistant_prefill": false,
+      "extra_options": {
+        "top_p": 0.95
+      }
     }
   },
   "mcp_servers": {},
@@ -64,10 +70,16 @@
     "external_context_paths": [],
     "external_context_char_limit": 12000,
     "external_context_item_char_limit": 6000,
-    "allowed_file_globs": ["src/**/*.py", "tests/**/*.py", "*.py"],
+    "allowed_file_globs": [
+      "src/**/*.py",
+      "tests/**/*.py",
+      "*.py"
+    ],
     "writable_files": [],
     "context_symbols": {},
-    "test_commands": ["python3 -m pytest -q"],
+    "test_commands": [
+      "python3 -m pytest -q"
+    ],
     "metric_regex": null,
     "metric_goal": "minimize",
     "baseline_metric": null,
@@ -124,8 +136,16 @@
     "todo_observation_chain_attempt_limit": 5,
     "reasoning_lane_enabled": true,
     "reasoning_lane_model_role": "reasoner",
-    "reasoning_lane_call_sites": ["plan", "semantic_analysis", "reflect"],
-    "reasoning_lane_excluded_roles": ["coder", "brainstorm", "tester"],
+    "reasoning_lane_call_sites": [
+      "plan",
+      "semantic_analysis",
+      "reflect"
+    ],
+    "reasoning_lane_excluded_roles": [
+      "coder",
+      "brainstorm",
+      "tester"
+    ],
     "structural_tactic_lifecycle": true,
     "structural_tactic_soft_failures": 2,
     "structural_state_checkpoint": true,
@@ -140,8 +160,11 @@
     "semantic_analysis_focus": "",
     "semantic_analysis_model_role": "planner",
     "semantic_analysis_char_limit": 8000,
-    "repair_target_not_found": false,
+    "repair_target_not_found": true,
     "repair_source_context_char_limit": 20000,
-    "feedback_notes_limit": 12
+    "feedback_notes_limit": 12,
+    "deterministic_test_decision": true,
+    "profile_agent": true,
+    "profile_model_stream": true
   }
 }

@@ -231,6 +231,7 @@ class OpenAICompatibleModel:
     think: bool | None = None
     disable_thinking_with_assistant_prefill: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
+    extra_options: dict[str, Any] = field(default_factory=dict)
 
     async def chat(
         self,
@@ -249,6 +250,7 @@ class OpenAICompatibleModel:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        payload.update(self.extra_options)
         if self.think is not None:
             payload["think"] = self.think
             payload["enable_thinking"] = self.think
@@ -286,21 +288,24 @@ class OllamaNativeModel:
     num_ctx: int | None = None
     think: bool = False
     timeout_seconds: int = 120
+    extra_options: dict[str, Any] = field(default_factory=dict)
 
     async def chat(
         self,
         messages: list[dict[str, str]],
         stream_callback: StreamCallback | None = None,
     ) -> ModelResponse:
+        options = {
+            "temperature": self.temperature,
+            "num_predict": self.max_tokens,
+            **self.extra_options,
+        }
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": stream_callback is not None,
             "think": self.think,
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.max_tokens,
-            },
+            "options": options,
         }
         if self.num_ctx:
             payload["options"]["num_ctx"] = self.num_ctx
@@ -351,6 +356,7 @@ class ModelManager:
                     "disable_thinking_with_assistant_prefill", False
                 ),
                 extra_body=spec.get("extra_body") or {},
+                extra_options=spec.get("extra_options") or {},
             )
         if spec["kind"] == "ollama_native":
             return OllamaNativeModel(
@@ -361,5 +367,6 @@ class ModelManager:
                 num_ctx=spec.get("num_ctx"),
                 think=spec.get("think", False),
                 timeout_seconds=spec.get("timeout_seconds", 120),
+                extra_options=spec.get("extra_options") or {},
             )
         raise ValueError(f"Unsupported provider kind: {spec['kind']}")
