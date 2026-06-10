@@ -30,6 +30,7 @@ from .state import (
     TestResult,
 )
 from .validators import JsonValidationError
+from .presets import apply_workflow_preset
 from .telemetry import TelemetryMixin
 from .model_runtime import ModelRuntimeMixin
 from .tactics import BrainstormTacticsMixin
@@ -49,13 +50,13 @@ class MicroAgent(
     CandidateRecordsMixin,
 ):
     def __init__(self, config: dict[str, Any], state: AgentState):
-        self.config = config
+        self.config = apply_workflow_preset(config)
         self.state = state
-        self.models = ModelManager(config)
+        self.models = ModelManager(self.config)
         self.mcp = McpToolClient(
             {
                 name: McpServerSpec(command=spec["command"], args=spec.get("args", []))
-                for name, spec in config.get("mcp_servers", {}).items()
+                for name, spec in self.config.get("mcp_servers", {}).items()
             }
         )
 
