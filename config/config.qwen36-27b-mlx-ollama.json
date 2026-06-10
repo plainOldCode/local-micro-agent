@@ -82,9 +82,9 @@
     "log_raw_model_outputs": false,
     "raw_model_output_dir": ".local_micro_agent/raw_model_outputs",
     "candidate_queue": false,
-    "candidate_novelty_gate": false,
-    "adaptive_search_memory": false,
-    "adaptive_search_reject_cooled_axes": false,
+    "candidate_novelty_gate": true,
+    "adaptive_search_memory": true,
+    "adaptive_search_reject_cooled_axes": true,
     "adaptive_search_force_strategy_axis": false,
     "adaptive_search_strict_axis_pool": false,
     "adaptive_search_axis_pool": [],
@@ -92,7 +92,7 @@
     "adaptive_search_axis_guidance": {},
     "adaptive_search_axis_window": 8,
     "adaptive_search_axis_failure_threshold": 3,
-    "adaptive_search_axis_cooldown_loops": 3,
+    "adaptive_search_axis_cooldown_loops": 5,
     "adaptive_search_recent_limit": 20,
     "brainstorm_after_rejections": 0,
     "pre_improvement_todo_blocks_brainstorm": true,
@@ -111,7 +111,7 @@
     "todo_ledger_summary_limit": 8,
     "failed_tactic_signature_limit": 16,
     "failed_tactic_family_limit": 24,
-    "failed_tactic_similarity_threshold": 0.45,
+    "failed_tactic_similarity_threshold": 0.35,
     "candidate_history_path": null,
     "candidate_history_limit": 20,
     "record_candidate_artifacts": false,
@@ -153,6 +153,7 @@
     "feedback_notes_limit": 12,
     "deterministic_test_decision": true,
     "profile_agent": true,
-    "profile_model_stream": true
+    "profile_model_stream": true,
+    "adaptive_gate_min_family_attempts_for_hard": 2
   }
 }
