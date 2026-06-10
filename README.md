@@ -35,6 +35,16 @@ The default path is project-instructions-first, then README:
    rejects, or retries. If `workflow.reflect_before_retry=true`, rejected
    retries pass through `REFLECT` before returning to `CODE`.
 
+With reflect enabled, `workflow.reflect_conditionally=true` (default) keeps
+REFLECT off the hot path for structured simple failures. Retries classified as
+`patch_miss`, `duplicate_variant`, or axis/family/contract mismatches go
+straight back to `CODE` with their structured failure notes; REFLECT only runs
+once the same failure class has repeated
+`workflow.reflect_after_repeated_failure_class` times (default 3), and the
+per-class counter resets after each reflect, so long runs reflect once per N
+repeats instead of on every retry. Set `reflect_conditionally=false` to restore
+reflect-on-every-retry.
+
 Each retry carries compact feedback forward. Recent agent notes such as
 `target not found`, `no-op`, `comment-only`, failed metrics, and restore events
 are added to the next `CODE` prompt. `REFLECT` adds a short no-code failure
@@ -134,6 +144,17 @@ injects it into the prompt, and rejects candidates with missing, cooled, or
 wrong declared `strategy_axis` values before applying edits. Set
 `workflow.adaptive_search_strict_axis_pool=true` only when you intentionally
 want to reject explicit axes that are not in `adaptive_search_axis_pool`.
+
+Cooldowns are also tracked per edit region. Each candidate change is keyed by
+`file::symbol` (AST function/class lookup, 50-line buckets as fallback)
+combined with its strategy axis and family, so repeated failures of one
+semantic family inside one function cool that specific region without
+blocking the same axis elsewhere. `workflow.adaptive_search_reject_cooled_regions`
+(default true when axis rejection is enabled) turns region cooldowns into a
+pre-test gate that rejects candidates as `rejected_cooled_region`. Tune with
+`adaptive_search_region_window`, `adaptive_search_region_failure_threshold`,
+and `adaptive_search_region_cooldown_loops`; each falls back to the matching
+axis-level setting when unset.
 
 The built-in axis set is intentionally domain-neutral. If a benchmark or
 project needs specialized axes or tactic families, put that domain vocabulary in
@@ -276,8 +297,20 @@ By default, `workflow.current_source_context_before_code=true` rereads writable
 files immediately before each CODE attempt and appends the current source excerpt
 to the dynamic suffix. This keeps the stable prefix cache-friendly while giving
 the model fresh target/search text after accepted candidates have changed the
-repo. Use `workflow.current_source_context_char_limit` to bound that refreshed
-context.
+repo. The excerpt is line-numbered, and the prompt tells the model the `N: `
+prefixes are not part of the file content. Use
+`workflow.current_source_context_char_limit` to bound that refreshed context.
+
+The controller also watches the input token budget. For providers that declare
+`num_ctx`, the usable input budget is `num_ctx - max_tokens`; when a call's
+`prompt_tokens` (or a character-based estimate using
+`workflow.prompt_chars_per_token_estimate`, default 3.5) reaches
+`workflow.prompt_token_budget_warn_ratio` (default 0.9) of that budget, the
+call is flagged in profile records and a budget-pressure note is recorded once
+per loop. With `workflow.auto_shrink_dynamic_context=true` (default), oversized
+CODE prompts shrink their dynamic suffix blocks until the estimated prompt fits
+`workflow.prompt_token_budget_target_ratio` (default 0.85) of the input budget,
+so silent `num_ctx` truncation does not eat the stable prefix instructions.
 
 Set `workflow.record_candidate_artifacts=true` to persist candidate-level
 provenance under `.local_micro_agent/candidate_artifacts`. Each candidate gets a
@@ -303,7 +336,13 @@ narrow same-candidate repair pass. When a candidate has no applied edits because
 `Replacement target not found` was recorded, the controller rereads the current
 writable source excerpt, asks the CODE model to regenerate exactly one candidate
 with a verbatim current-source search block, and then evaluates that repaired
-candidate inside the same todo attempt. The repair is recorded with
+candidate inside the same todo attempt. The repair prompt anchors on the stale
+search text: it quotes the missing target, then shows the best-matching
+current-source region with line numbers,
+`workflow.repair_anchor_context_lines` (default 18) lines around the closest
+token match. Repaired candidates are preflighted before evaluation — a repaired
+target that is still missing or ambiguous in the current file is rejected
+without spending the todo attempt. The repair is recorded with
 `repair_parent_id` so later analysis can distinguish normal candidates from
 search-block repairs.
 
@@ -379,6 +418,50 @@ files, and other out-of-scope surfaces.
 }
 ```
 
+## Workflow Presets
+
+The workflow section has grown to roughly 80 flags, and most failures in long
+runs come from invalid flag combinations rather than from the model. Instead of
+hand-tuning each flag, set `workflow.preset` to one of three vetted bundles
+from `src/local_micro_agent/presets.py`:
+
+- `minimal`: conservative fix-the-tests loop. Deterministic test decisions,
+  rejected-candidate retries, and target-not-found repair stay on; all
+  exploration machinery (brainstorm, novelty gates, adaptive memory, run spec,
+  structural lifecycle, profiling) stays off.
+- `search`: long-running metric search. Enables conditional reflect, brainstorm
+  after repeated rejections, novelty/axis/region gates, the adaptive gate
+  controller, candidate history and artifacts, continue-after-improvement, and
+  profiling.
+- `structural`: `search` plus the scaffold/probe/expand machinery for
+  multi-step refactors: run-spec task graph, semantic analysis, structural
+  tactic lifecycle, and structural state checkpoints.
+
+Preset values are defaults, not a mode switch: any key set explicitly in
+`workflow` wins over the preset value, so a preset can be used as a base and
+selectively overridden.
+
+```json
+{
+  "workflow": {
+    "preset": "search",
+    "writable_files": ["src/target.py"],
+    "test_commands": ["python3 -m pytest -q"],
+    "max_code_test_loops": 100
+  }
+}
+```
+
+Note that several features described in this README are dormant unless a
+preset or explicit flag enables them. In the shipped `config/*.json` profiles,
+`reflect_before_retry` is false and `brainstorm_after_rejections` is 0, so the
+REFLECT/BRAINSTORM/todo/gate machinery never fires; `semantic_analysis_after_read`,
+`run_spec_after_read`, `continue_after_improvement`, `candidate_history_path`,
+and `record_candidate_artifacts` are also off. The default execution path of
+those profiles is `PLAN -> READ -> (CODE -> TEST)*`. Use the `search` or
+`structural` preset when the run should actually exercise the exploration
+machinery.
+
 ## Focused Source Context
 
 For narrow Python edits, `workflow.context_symbols` can replace full-file
@@ -399,12 +482,31 @@ CODE context with exact function/class excerpts:
 
 - `config.example.json`: provider and workflow configuration.
 - `config/`: ready-to-use local model provider configs.
-- `src/local_micro_agent/orchestrator.py`: FSM runner.
+- `src/local_micro_agent/orchestrator.py`: FSM core (run/plan/read/code/test/
+  reflect), snapshot/patch application, command execution, CLI.
+- `src/local_micro_agent/model_runtime.py`: model calls, JSON repair, token
+  budget warnings, response normalization.
+- `src/local_micro_agent/telemetry.py`: profiling spans, stream artifacts,
+  run logging.
+- `src/local_micro_agent/tactics.py`: brainstorm generation, scoring, gates,
+  tactic-to-todo creation.
+- `src/local_micro_agent/search_memory.py`: adaptive search memory, axis and
+  region cooldowns, candidate contracts, failure memory.
+- `src/local_micro_agent/todos.py`: durable todo lifecycle, run-spec task
+  graph, structural checkpoints.
+- `src/local_micro_agent/context.py`: project/external context, source
+  excerpts, slicing and line numbering.
+- `src/local_micro_agent/candidates.py`: candidate history, observations,
+  artifacts, target-not-found repair.
+- `src/local_micro_agent/presets.py`: named workflow flag bundles.
 - `src/local_micro_agent/state.py`: single global state bag.
 - `src/local_micro_agent/models.py`: model-manager abstraction.
 - `src/local_micro_agent/mcp_client.py`: async tool boundary.
 - `src/local_micro_agent/prompts.py`: micro system prompts per state.
 - `src/local_micro_agent/validators.py`: JSON validation/retry helpers.
+
+The domain modules are mixins composed into `MicroAgent`; the public entry
+point remains `local_micro_agent.orchestrator.MicroAgent`.
 
 ## Smoke
 
