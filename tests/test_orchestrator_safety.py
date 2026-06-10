@@ -52,6 +52,16 @@ class _FailingModelManager:
         return _FailingModel()
 
 
+class _SpecFallbackModelManager:
+    def __init__(self, fallback_output: str):
+        self.fallback_output = fallback_output
+
+    def get(self, role):
+        if role == "reasoner":
+            return _FailingModel()
+        return _StaticModel(self.fallback_output)
+
+
 class _StaticModel:
     def __init__(self, output: str):
         self.output = output
@@ -2729,6 +2739,46 @@ Background / non-constraints
             self.assertIn("Default acceptance kind: metric", context)
             self.assertIn("force every task", context)
             self.assertIn("do not synthesize unit tests", context)
+
+    def test_spec_synth_falls_back_after_primary_model_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            fallback_spec = json.dumps(
+                {
+                    "version": 2,
+                    "spec_id": "fallback",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "write target",
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "metric"},
+                        }
+                    ],
+                }
+            )
+            agent = MicroAgent(
+                {
+                    "models": {"reasoner": "bad", "coder": "good", "default": "good"},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_after_read": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_synth_fallback_model_role": "coder",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.models = _SpecFallbackModelManager(fallback_spec)
+
+            asyncio.run(agent._maybe_refresh_run_spec(force=True))
+
+            spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            self.assertEqual(spec["spec_id"], "fallback")
+            self.assertIn("Run spec model fallback succeeded: coder", "\n".join(agent.state.notes))
 
     def test_structural_tactic_creates_structural_probe_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
