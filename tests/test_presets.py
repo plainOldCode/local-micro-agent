@@ -69,6 +69,32 @@ class WorkflowPresetTests(unittest.TestCase):
             config = load_config(config_path)
             self.assertEqual(config["workflow"]["max_code_test_loops"], 25)
 
+    def test_preset_records_defaulted_keys_provenance(self) -> None:
+        config = apply_workflow_preset(
+            {"workflow": {"preset": "search", "max_code_test_loops": 100}}
+        )
+        defaulted = config["workflow"]["preset_defaulted_keys"]
+        self.assertNotIn("max_code_test_loops", defaulted)
+        self.assertIn("adaptive_search_memory", defaulted)
+
+    def test_reexpansion_preserves_defaulted_key_provenance(self) -> None:
+        once = apply_workflow_preset({"workflow": {"preset": "search"}})
+        twice = apply_workflow_preset(once)
+        self.assertEqual(
+            once["workflow"]["preset_defaulted_keys"],
+            twice["workflow"]["preset_defaulted_keys"],
+        )
+        self.assertIn("max_code_test_loops", twice["workflow"]["preset_defaulted_keys"])
+
+    def test_preexpanded_config_still_syncs_state_max_loops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"workflow": {"preset": "search"}}))
+            config = load_config(config_path)
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            MicroAgent({**config, "models": {}, "providers": {}, "mcp_servers": {}}, state)
+            self.assertEqual(state.max_loops, 25)
+
     def test_micro_agent_init_syncs_state_max_loops_from_preset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")

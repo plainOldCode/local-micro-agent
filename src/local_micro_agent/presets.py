@@ -88,6 +88,12 @@ def apply_workflow_preset(config: dict[str, Any]) -> dict[str, Any]:
     Explicit workflow keys always win over preset values. Returns the
     original config object unchanged when no preset is requested; raises
     ValueError for an unknown preset name.
+
+    The expanded workflow records provenance in `preset_defaulted_keys`:
+    the preset keys that were NOT explicit in the pre-expansion workflow.
+    Re-expanding an already expanded config preserves that record, so
+    consumers such as MicroAgent can distinguish a caller-supplied value
+    from a preset default even when the config went through load_config().
     """
     workflow = config.get("workflow")
     if not isinstance(workflow, dict):
@@ -99,6 +105,14 @@ def apply_workflow_preset(config: dict[str, Any]) -> dict[str, Any]:
     if preset is None:
         valid = ", ".join(sorted(WORKFLOW_PRESETS))
         raise ValueError(f"Unknown workflow preset {name!r}; valid presets: {valid}")
-    merged_workflow = {**preset, **{k: v for k, v in workflow.items() if k != "preset"}}
+    reserved = {"preset", "preset_defaulted_keys"}
+    explicit = {k: v for k, v in workflow.items() if k not in reserved}
+    prior_defaulted = workflow.get("preset_defaulted_keys")
+    if isinstance(prior_defaulted, list):
+        defaulted = sorted(str(key) for key in prior_defaulted if str(key) in preset)
+    else:
+        defaulted = sorted(key for key in preset if key not in explicit)
+    merged_workflow = {**preset, **explicit}
     merged_workflow["preset"] = str(name)
+    merged_workflow["preset_defaulted_keys"] = defaulted
     return {**config, "workflow": merged_workflow}

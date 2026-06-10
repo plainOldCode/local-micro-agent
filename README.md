@@ -439,7 +439,11 @@ from `src/local_micro_agent/presets.py`:
 
 Preset values are defaults, not a mode switch: any key set explicitly in
 `workflow` wins over the preset value, so a preset can be used as a base and
-selectively overridden.
+selectively overridden. The expanded workflow records which keys came from
+the preset rather than the config in `preset_defaulted_keys`; re-expansion
+preserves that record, and the controller uses it to tell preset defaults
+apart from caller-supplied values (for example when deriving the loop
+budget).
 
 ```json
 {

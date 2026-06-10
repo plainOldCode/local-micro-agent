@@ -52,17 +52,20 @@ class MicroAgent(
     CandidateRecordsMixin,
 ):
     def __init__(self, config: dict[str, Any], state: AgentState):
-        raw_workflow = config.get("workflow", {})
         self.config = apply_workflow_preset(config)
-        preset_loops = self.config.get("workflow", {}).get("max_code_test_loops")
-        if (
-            isinstance(raw_workflow, dict)
-            and "max_code_test_loops" not in raw_workflow
-            and isinstance(preset_loops, int)
-        ):
-            # The preset is the only source for the loop budget here; a state
-            # built from the raw config could not have seen it.
-            state.max_loops = preset_loops
+        workflow = self.config.get("workflow")
+        if isinstance(workflow, dict):
+            defaulted = workflow.get("preset_defaulted_keys")
+            preset_loops = workflow.get("max_code_test_loops")
+            if (
+                isinstance(defaulted, list)
+                and "max_code_test_loops" in defaulted
+                and isinstance(preset_loops, int)
+            ):
+                # The loop budget came from the preset, not the caller, even
+                # if the config was already expanded by load_config(); a state
+                # built from the pre-preset config could not have seen it.
+                state.max_loops = preset_loops
         self.state = state
         self.models = ModelManager(self.config)
         self.mcp = McpToolClient(
