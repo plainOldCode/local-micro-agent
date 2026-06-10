@@ -355,4 +355,3 @@ class ModelRuntimeMixin:
                 next_focus=str(data.get("next_focus", "")),
             )
         raise JsonValidationError(f"Unsupported decision schema: {schema}")
-

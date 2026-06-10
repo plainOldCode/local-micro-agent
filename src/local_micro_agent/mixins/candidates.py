@@ -1031,4 +1031,3 @@ class CandidateRecordsMixin:
                 }
             )
         return summary
-

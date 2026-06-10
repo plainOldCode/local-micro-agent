@@ -73,7 +73,8 @@ class AgentState:
     user_request: str
     current: AgentStateName = AgentStateName.PLAN
     loop_count: int = 0
-    max_loops: int = DEFAULT_MAX_LOOPS
+    max_loops: int | None = None
+    max_loops_defaulted: bool = field(default=True, init=False, repr=False)
     plan_markdown: str = ""
     planned_files: list[str] = field(default_factory=list)
     file_context: list[FileSnapshot] = field(default_factory=list)
@@ -82,6 +83,13 @@ class AgentState:
     test_results: list[TestResult] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     scratch: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.max_loops is None:
+            self.max_loops = DEFAULT_MAX_LOOPS
+            self.max_loops_defaulted = True
+        else:
+            self.max_loops_defaulted = False
 
     def latest_test_summary(self) -> str:
         if not self.test_results:
@@ -103,4 +111,5 @@ class AgentState:
         data = asdict(self)
         data["repo_root"] = str(self.repo_root)
         data["current"] = str(self.current)
+        data.pop("max_loops_defaulted", None)
         return data

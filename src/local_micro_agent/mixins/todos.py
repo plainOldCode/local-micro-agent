@@ -1095,4 +1095,3 @@ class TodoLifecycleMixin:
         }
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-

@@ -119,6 +119,18 @@ class WorkflowPresetTests(unittest.TestCase):
             MicroAgent(config, state)
             self.assertEqual(state.max_loops, 7)
 
+    def test_caller_supplied_default_loop_count_survives_preset_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test", max_loops=3)
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"preset": "search"},
+            }
+            MicroAgent(config, state)
+            self.assertEqual(state.max_loops, 3)
+
     def test_explicit_loop_budget_leaves_state_max_loops_to_caller(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test", max_loops=7)

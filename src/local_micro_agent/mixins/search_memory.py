@@ -1282,4 +1282,3 @@ class AdaptiveSearchMixin:
     @staticmethod
     def _normalize_fingerprint_text(text: str) -> str:
         return normalize_fingerprint_text(text)
-

@@ -257,5 +257,3 @@ class TelemetryMixin:
             f"[{time.strftime('%Y-%m-%d %H:%M:%S%z')}] [local-micro-agent] {message}",
             flush=True,
         )
-
-

@@ -929,4 +929,3 @@ class BrainstormTacticsMixin:
         plan.setdefault("version", 1)
         plan.setdefault("todos", [])
         return plan
-

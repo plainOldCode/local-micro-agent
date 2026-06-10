@@ -23,7 +23,6 @@ from .prompts import (
     test_prompt,
 )
 from .state import (
-    DEFAULT_MAX_LOOPS,
     AgentState,
     AgentStateName,
     CodeChange,
@@ -62,13 +61,15 @@ class MicroAgent(
                 isinstance(defaulted, list)
                 and "max_code_test_loops" in defaulted
                 and isinstance(preset_loops, int)
-                and state.max_loops == DEFAULT_MAX_LOOPS
+                and state.max_loops_defaulted
             ):
                 # The loop budget came from the preset, not the caller, even
                 # if the config was already expanded by load_config(). A state
-                # still at the dataclass default could not have seen it; a
-                # caller-supplied max_loops stays authoritative.
+                # whose max_loops was omitted could not have seen it; an
+                # explicitly supplied max_loops stays authoritative even when
+                # it equals DEFAULT_MAX_LOOPS.
                 state.max_loops = preset_loops
+                state.max_loops_defaulted = False
         self.state = state
         self.models = ModelManager(self.config)
         self.mcp = McpToolClient(
