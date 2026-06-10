@@ -1896,6 +1896,136 @@ Background / non-constraints
             self.assertEqual(spec["task_graph"][0]["status"], "failed")
             self.assertEqual(spec["progress"], {"total": 1, "closed": 0, "deferred": 0, "failed": 1})
 
+    def test_spec_mode_synthesizes_and_freezes_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "acceptance",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "write target",
+                                "deliverables": ["target.py"],
+                                "acceptance": {"kind": "synthesized"},
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            model_output = json.dumps(
+                {
+                    "files": [
+                        {
+                            "path": "test_task.py",
+                            "content": (
+                                "from pathlib import Path\n"
+                                "assert Path('target.py').read_text() == 'done'\n"
+                            ),
+                        }
+                    ],
+                    "commands": ["python3 .lma_acceptance/task-001/test_task.py"],
+                }
+            )
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": [],
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 3,
+                    "writable_files": ["target.py", ".lma_acceptance/**"],
+                    "seed_changes": [{"path": "target.py", "content": "done"}],
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=3)
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(model_output)
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            acceptance = spec["task_graph"][0]["acceptance"]
+            self.assertEqual(acceptance["kind"], "synthesized")
+            self.assertTrue(acceptance["frozen_sha256"])
+            self.assertEqual(
+                acceptance["test_paths"],
+                [".lma_acceptance/task-001/test_task.py"],
+            )
+
+    def test_spec_mode_blocks_writes_to_frozen_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            acceptance_dir = repo / ".lma_acceptance" / "task-001"
+            artifact_dir.mkdir()
+            acceptance_dir.mkdir(parents=True)
+            test_path = acceptance_dir / "test_task.py"
+            test_path.write_text("assert False\n")
+            agent_for_hash = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            frozen = agent_for_hash._hash_acceptance_files(
+                [".lma_acceptance/task-001/test_task.py"]
+            )
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "blocked-write",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "try to edit tests",
+                                "deliverables": ["target.py", ".lma_acceptance/task-001/test_task.py"],
+                                "acceptance": {
+                                    "kind": "synthesized",
+                                    "test_paths": [".lma_acceptance/task-001/test_task.py"],
+                                    "commands": ["python3 .lma_acceptance/task-001/test_task.py"],
+                                    "frozen_sha256": frozen,
+                                },
+                                "budget": {"attempts_max": 1},
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 1,
+                    "writable_files": ["target.py", ".lma_acceptance/**"],
+                    "seed_files": [],
+                    "seed_changes": [
+                        {"path": ".lma_acceptance/task-001/test_task.py", "content": "assert True\n"},
+                        {"path": "target.py", "content": "done"},
+                    ],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual(test_path.read_text(), "assert False\n")
+            self.assertTrue(
+                any("Rejected out-of-plan change" in note for note in result.notes)
+            )
+
     def test_run_spec_artifact_is_not_loaded_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -64,6 +64,23 @@ Rules:
 - Do not include historical prior-run winners unless they are present in this run's input.
 - Keep task_graph to 3-8 tasks."""
 
+ACCEPTANCE_SYNTH_SYSTEM = """You are the ACCEPT_SYNTH node in a local coding-agent FSM.
+Write task-local acceptance tests before implementation.
+Output strict JSON:
+{
+  "files": [
+    {"path": "test_task.py", "content": "test code"}
+  ],
+  "commands": ["python3 -m pytest .lma_acceptance/task-001 -q"]
+}
+Rules:
+- Paths must be relative filenames, not absolute paths.
+- Write only test files for the current task.
+- Each concrete requirement needs at least one specific assertion or input/output pair.
+- Tests must fail before the task implementation exists or is completed.
+- Do not test private model reasoning or unrelated behavior.
+- No markdown fences, no commentary outside JSON."""
+
 REFLECT_SYSTEM = """You are the REFLECT node in a local coding-agent FSM.
 Do not write code. Analyze only the latest rejected attempt and feedback.
 Output exactly 1-3 concise Markdown bullets:
@@ -221,6 +238,31 @@ def spec_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
                 f"Source files:\n{source_blocks}"
                 f"{semantic_block}"
                 f"{focus_block}"
+            ),
+        },
+    ]
+
+
+def acceptance_synth_prompt(state: AgentState, task: dict, acceptance_dir: str) -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    run_spec = state.scratch.get("run_spec")
+    spec_block = (
+        json.dumps(run_spec, ensure_ascii=False, indent=2)
+        if isinstance(run_spec, dict) and run_spec
+        else str(run_spec or "")
+    )
+    return [
+        {"role": "system", "content": ACCEPTANCE_SYNTH_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Run-local spec:\n{spec_block}\n\n"
+                f"Current task:\n{json.dumps(task, ensure_ascii=False, indent=2)}\n\n"
+                f"Acceptance directory:\n{acceptance_dir}\n\n"
+                f"Task-scoped source context:\n{source_blocks or '<none>'}"
             ),
         },
     ]
@@ -426,6 +468,7 @@ PROMPT_MARKDOWN = {
     "PLAN": PLAN_SYSTEM,
     "READ": READ_SYSTEM,
     "SEMANTIC_ANALYSIS": SEMANTIC_ANALYSIS_SYSTEM,
+    "ACCEPT_SYNTH": ACCEPTANCE_SYNTH_SYSTEM,
     "REFLECT": REFLECT_SYSTEM,
     "BRAINSTORM": BRAINSTORM_SYSTEM,
     "CODE": CODE_SYSTEM,

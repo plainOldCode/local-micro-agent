@@ -87,6 +87,8 @@ _SPEC: dict[str, Any] = {
     "spec_task_attempt_budget": 8,
     "spec_acceptance_dir": ".lma_acceptance",
     "spec_acceptance_review": False,
+    "spec_default_acceptance_kind": "synthesized",
+    "spec_acceptance_synth_retries": 1,
     "spec_regression_scope": "all",
     "spec_invariant_commands": [],
     "continue_after_improvement": False,

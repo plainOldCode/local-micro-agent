@@ -204,9 +204,7 @@ class MicroAgent(
         await self._read_current_spec_task_context()
 
     async def accept_synth(self) -> None:
-        # M1 supports pre-authored command/metric acceptance only. The
-        # dedicated state is reserved for M2's synthesized acceptance files.
-        self.state.current = AgentStateName.CODE
+        await self._ensure_current_spec_task_acceptance()
 
     def _read_fallback_files(self) -> list[str]:
         workflow = self.config.get("workflow", {})
@@ -1180,12 +1178,16 @@ class MicroAgent(
         }
 
     async def test(self) -> None:
-        self.state.test_results = await self._run_preflight_for_proposed_changes()
-        if not self.state.test_results:
-            self.state.test_results = await self._run_test_commands()
+        frozen_acceptance_failed = self._frozen_acceptance_changed()
+        if not frozen_acceptance_failed:
+            self.state.test_results = await self._run_preflight_for_proposed_changes()
+            if not self.state.test_results:
+                self.state.test_results = await self._run_test_commands()
         failed = False
         for result in self.state.test_results:
             failed = failed or result.exit_code != 0
+        if frozen_acceptance_failed:
+            failed = True
         if self.state.scratch.get("applied_changes", 0) == 0:
             failed = True
             self.state.notes.append("No code changes were applied")
@@ -1260,6 +1262,7 @@ class MicroAgent(
             path
             for path in writable
             if self._repo_path_key(path) not in external_paths
+            and not self._is_spec_acceptance_path(path)
         }
 
     async def _snapshot_files(self, paths: list[str]) -> dict[str, str | None]:

@@ -5,6 +5,7 @@ Extracted from orchestrator.py; mixed into MicroAgent.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import re
 import time
@@ -12,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from ..decisions import CodeCandidate
-from ..prompts import spec_prompt
-from ..state import AgentStateName, FileSnapshot
+from ..prompts import acceptance_synth_prompt, spec_prompt
+from ..state import AgentStateName, CodeChange, FileSnapshot, TestResult
 from ..validators import parse_json_object
 
 
@@ -165,7 +166,8 @@ class TodoLifecycleMixin:
         acceptance = task.get("acceptance")
         if not isinstance(acceptance, dict):
             acceptance = {}
-        kind = str(acceptance.get("kind") or "command").strip() or "command"
+        default_kind = workflow.get("spec_default_acceptance_kind", "command")
+        kind = str(acceptance.get("kind") or default_kind).strip() or "command"
         commands = acceptance.get("commands")
         if not isinstance(commands, list):
             commands = workflow.get("test_commands", [])
@@ -173,7 +175,7 @@ class TodoLifecycleMixin:
             "kind": kind,
             "commands": [str(command) for command in commands if str(command).strip()],
         }
-        for key in ("test_paths", "frozen_sha256", "synthesized_at"):
+        for key in ("test_paths", "frozen_sha256", "synthesized_at", "red_first"):
             value = acceptance.get(key)
             if value not in (None, "", [], {}):
                 normalized_acceptance[key] = value
@@ -384,7 +386,7 @@ class TodoLifecycleMixin:
             content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
         await self._load_external_contexts()
-        self.state.current = AgentStateName.CODE
+        self.state.current = AgentStateName.ACCEPT_SYNTH
 
     def _spec_task_read_paths(self, task: dict[str, Any]) -> list[str]:
         paths: list[str] = []
@@ -443,14 +445,229 @@ class TodoLifecycleMixin:
             or any(fnmatch.fnmatch(str(item), pattern) for pattern in patterns)
         ]
 
+    def _spec_acceptance_dir(self) -> Path:
+        return self._workflow_artifact_path("spec_acceptance_dir", ".lma_acceptance")
+
+    def _spec_acceptance_rel_dir(self) -> str:
+        try:
+            return self._spec_acceptance_dir().resolve(strict=False).relative_to(
+                self.state.repo_root.resolve(strict=False)
+            ).as_posix()
+        except ValueError:
+            return str(self._spec_acceptance_dir())
+
+    def _is_spec_acceptance_path(self, path: str) -> bool:
+        key = self._repo_path_key(path)
+        acceptance_key = self._repo_path_key(str(self._spec_acceptance_dir()))
+        return key == acceptance_key or key.startswith(f"{acceptance_key}/")
+
     def _test_commands_for_current_scope(self) -> list[str]:
         task = self._current_spec_task() if self._spec_mode_enabled() else None
         acceptance = task.get("acceptance") if isinstance(task, dict) else None
-        if isinstance(acceptance, dict) and acceptance.get("kind") in {"command", "metric"}:
+        if isinstance(acceptance, dict) and acceptance.get("kind") in {"command", "metric", "synthesized"}:
             commands = acceptance.get("commands")
             if isinstance(commands, list) and commands:
                 return [str(command) for command in commands if str(command).strip()]
         return [str(command) for command in self.config.get("workflow", {}).get("test_commands", [])]
+
+    async def _ensure_current_spec_task_acceptance(self) -> None:
+        task = self._current_spec_task()
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(task, dict) or not isinstance(spec, dict):
+            self.state.current = AgentStateName.CODE
+            return
+        acceptance = task.setdefault("acceptance", {})
+        if not isinstance(acceptance, dict):
+            acceptance = {}
+            task["acceptance"] = acceptance
+        kind = str(acceptance.get("kind") or "command")
+        if kind != "synthesized" or acceptance.get("frozen_sha256"):
+            self.state.current = AgentStateName.CODE
+            return
+        ok = await self._synthesize_and_freeze_acceptance(task)
+        self._persist_run_spec(spec)
+        if ok:
+            self.state.current = AgentStateName.CODE
+            return
+        if task.get("status") == "closed":
+            self.state.current = AgentStateName.SCHEDULE
+            return
+        self.state.current = AgentStateName.CODE
+
+    async def _synthesize_and_freeze_acceptance(self, task: dict[str, Any]) -> bool:
+        workflow = self.config.get("workflow", {})
+        retries = int(workflow.get("spec_acceptance_synth_retries", 1) or 1)
+        attempts = max(1, retries + 1)
+        task_id = str(task.get("task_id") or "task")
+        task_dir = self._spec_acceptance_dir() / task_id
+        rel_task_dir = f"{self._spec_acceptance_rel_dir().rstrip('/')}/{task_id}"
+        for attempt in range(1, attempts + 1):
+            try:
+                output = await self._model_chat(
+                    "coder",
+                    acceptance_synth_prompt(self.state, task, rel_task_dir),
+                    call_site="acceptance_synth",
+                )
+                data = parse_json_object(output)
+                files = self._normalize_acceptance_files(data, task_id)
+                commands = self._normalize_acceptance_commands(data, rel_task_dir)
+            except Exception as exc:
+                self.state.notes.append(
+                    f"Acceptance synth failed for {task_id} attempt {attempt}: {type(exc).__name__}: {exc}"
+                )
+                continue
+            if not files or not commands:
+                self.state.notes.append(
+                    f"Acceptance synth failed for {task_id} attempt {attempt}: empty files or commands"
+                )
+                continue
+            task_dir.mkdir(parents=True, exist_ok=True)
+            written_paths: list[str] = []
+            for rel_name, content in files:
+                path = task_dir / rel_name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+                written_paths.append(
+                    path.resolve(strict=False)
+                    .relative_to(self.state.repo_root.resolve(strict=False))
+                    .as_posix()
+                )
+            preflight = await self._preflight_acceptance_files(written_paths)
+            if preflight:
+                self.state.test_results = preflight
+                self.state.notes.append(
+                    f"Acceptance preflight failed for {task_id} attempt {attempt}"
+                )
+                continue
+            red_results = await self._run_acceptance_commands(commands)
+            red_failed = any(result.exit_code != 0 for result in red_results)
+            if not red_failed:
+                task["status"] = "closed"
+                task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                task["last_observation"] = {
+                    "acceptance": "red_first_already_green",
+                    "summary": "\n".join(result.stdout[-800:] + result.stderr[-800:] for result in red_results),
+                }
+                self.state.notes.append(
+                    f"Acceptance red-first already green for {task_id}; closing task"
+                )
+                return False
+            acceptance = task.setdefault("acceptance", {})
+            acceptance.update(
+                {
+                    "kind": "synthesized",
+                    "test_paths": written_paths,
+                    "commands": commands,
+                    "frozen_sha256": self._hash_acceptance_files(written_paths),
+                    "synthesized_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "red_first": True,
+                }
+            )
+            self.state.notes.append(f"Frozen synthesized acceptance for {task_id}")
+            return True
+        fallback_commands = self.config.get("workflow", {}).get("test_commands", [])
+        task["acceptance"] = {
+            "kind": "command",
+            "commands": [str(command) for command in fallback_commands if str(command).strip()],
+            "synthesized_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        self.state.notes.append(
+            f"Acceptance synth exhausted for {task_id}; downgraded to command acceptance"
+        )
+        return False
+
+    def _normalize_acceptance_files(
+        self, data: dict[str, Any], task_id: str
+    ) -> list[tuple[str, str]]:
+        raw_files = data.get("files")
+        if not isinstance(raw_files, list):
+            return []
+        files: list[tuple[str, str]] = []
+        for index, item in enumerate(raw_files, start=1):
+            if not isinstance(item, dict):
+                continue
+            raw_path = str(item.get("path") or f"test_{task_id}_{index}.py").strip()
+            path = Path(raw_path)
+            if path.is_absolute() or ".." in path.parts:
+                continue
+            content = str(item.get("content") or "")
+            if not content.strip():
+                continue
+            files.append((path.as_posix(), content))
+        return files
+
+    @staticmethod
+    def _normalize_acceptance_commands(data: dict[str, Any], rel_task_dir: str) -> list[str]:
+        raw_commands = data.get("commands")
+        if isinstance(raw_commands, list):
+            commands = [
+                command
+                for command in (str(command).strip() for command in raw_commands)
+                if command and rel_task_dir in command
+            ]
+            if commands:
+                return commands
+        return [f"python3 -m pytest {rel_task_dir} -q"]
+
+    async def _preflight_acceptance_files(self, paths: list[str]) -> list[TestResult]:
+        candidate = CodeCandidate(
+            "acceptance",
+            [
+                CodeChange(path=path, reason="acceptance preflight")
+                for path in paths
+            ],
+            "acceptance preflight",
+        )
+        return await self._run_candidate_preflight(candidate, set(paths))
+
+    async def _run_acceptance_commands(self, commands: list[str]) -> list[TestResult]:
+        results: list[TestResult] = []
+        workflow = self.config.get("workflow", {})
+        for command in commands:
+            result = await self.mcp.run_command(
+                command,
+                cwd=str(self.state.repo_root),
+                timeout_seconds=workflow.get("command_timeout_seconds", 120),
+                output_limit=workflow.get("command_output_limit", 200_000),
+            )
+            results.append(TestResult(**result))
+        return results
+
+    def _hash_acceptance_files(self, paths: list[str]) -> str:
+        digest = hashlib.sha256()
+        for rel_path in sorted(paths):
+            digest.update(rel_path.encode())
+            digest.update(b"\0")
+            path = self.state.repo_root / rel_path
+            if path.exists():
+                digest.update(path.read_bytes())
+            else:
+                digest.update(b"<missing>")
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def _frozen_acceptance_changed(self) -> bool:
+        task = self._current_spec_task() if self._spec_mode_enabled() else None
+        acceptance = task.get("acceptance") if isinstance(task, dict) else None
+        if not isinstance(acceptance, dict):
+            return False
+        frozen = str(acceptance.get("frozen_sha256") or "")
+        paths = acceptance.get("test_paths")
+        if not frozen or not isinstance(paths, list):
+            return False
+        rel_paths = [str(path) for path in paths if str(path).strip()]
+        current = self._hash_acceptance_files(rel_paths)
+        if current == frozen:
+            return False
+        self.state.test_results = [
+            TestResult(
+                command="preflight:acceptance-frozen",
+                exit_code=1,
+                stderr="Frozen synthesized acceptance files changed before TEST",
+            )
+        ]
+        self.state.notes.append("Frozen synthesized acceptance hash mismatch")
+        return True
 
     def _handle_spec_task_test_result(self, failed: bool) -> None:
         task = self._current_spec_task()
