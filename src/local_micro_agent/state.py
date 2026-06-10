@@ -62,6 +62,9 @@ class TestResult:
     stderr: str = ""
 
 
+DEFAULT_MAX_LOOPS = 3
+
+
 @dataclass
 class AgentState:
     """The single state bag carried through the FSM."""
@@ -70,7 +73,7 @@ class AgentState:
     user_request: str
     current: AgentStateName = AgentStateName.PLAN
     loop_count: int = 0
-    max_loops: int = 3
+    max_loops: int = DEFAULT_MAX_LOOPS
     plan_markdown: str = ""
     planned_files: list[str] = field(default_factory=list)
     file_context: list[FileSnapshot] = field(default_factory=list)
