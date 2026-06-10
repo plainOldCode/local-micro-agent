@@ -162,10 +162,11 @@ def _post_openai_stream(
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
     usage = _openai_usage(done_data)
+    content = "".join(chunks)
     if reasoning_chunks:
         usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
-        usage["reasoning_only_response"] = not bool(chunks)
-    return ModelResponse("".join(chunks), usage=usage)
+        usage["reasoning_only_response"] = not bool(content.strip())
+    return ModelResponse(content, usage=usage)
 
 
 def _post_ollama_stream(
@@ -213,10 +214,11 @@ def _post_ollama_stream(
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
     usage = _ollama_usage(done_data)
+    content = "".join(chunks)
     if reasoning_chunks:
         usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
-        usage["reasoning_only_response"] = not bool(chunks)
-    return ModelResponse("".join(chunks), usage=usage)
+        usage["reasoning_only_response"] = not bool(content.strip())
+    return ModelResponse(content, usage=usage)
 
 
 @dataclass(frozen=True)
@@ -295,7 +297,7 @@ class OpenAICompatibleModel:
         )
         if reasoning:
             usage["reasoning_content_chars"] = len(reasoning)
-            usage["reasoning_only_response"] = not bool(content)
+            usage["reasoning_only_response"] = not bool(content.strip())
         return ModelResponse(content, usage=usage)
 
 
@@ -348,7 +350,7 @@ class OllamaNativeModel:
         reasoning = message.get("thinking") or message.get("reasoning_content") or ""
         if reasoning:
             usage["reasoning_content_chars"] = len(reasoning)
-            usage["reasoning_only_response"] = not bool(content)
+            usage["reasoning_only_response"] = not bool(content.strip())
         return ModelResponse(content, usage=usage)
 
 

@@ -456,6 +456,68 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertTrue(response.usage["reasoning_only_response"])
         self.assertEqual(response.usage["completion_tokens"], 3)
 
+    def test_openai_stream_marks_whitespace_final_as_reasoning_only(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                rows = [
+                    'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}',
+                    'data: {"choices":[{"delta":{"content":"  \\n\\t"}}],"usage":{"completion_tokens":3}}',
+                    "data: [DONE]",
+                ]
+                return iter((f"{row}\n".encode("utf-8") for row in rows))
+
+        original = model_module.urllib.request.urlopen
+        model_module.urllib.request.urlopen = lambda request, timeout: FakeResponse()
+        try:
+            response = model_module._post_openai_stream(
+                "http://localhost:1234/v1/chat/completions",
+                {"model": "fake", "messages": [], "stream": True},
+                {},
+                30,
+                None,
+            )
+        finally:
+            model_module.urllib.request.urlopen = original
+
+        self.assertEqual(response.content, "  \n\t")
+        self.assertTrue(response.usage["reasoning_only_response"])
+
+    def test_openai_non_stream_marks_whitespace_final_as_reasoning_only(self) -> None:
+        original = model_module._post_json
+
+        def fake_post_json(url, payload, headers, timeout):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "reasoning_content": "think",
+                            "content": " \n",
+                        }
+                    }
+                ],
+                "usage": {"completion_tokens": 3},
+            }
+
+        model_module._post_json = fake_post_json
+        try:
+            response = asyncio.run(
+                OpenAICompatibleModel(
+                    base_url="http://localhost:1234/v1",
+                    model="fake",
+                ).chat([])
+            )
+        finally:
+            model_module._post_json = original
+
+        self.assertEqual(response.content, " \n")
+        self.assertTrue(response.usage["reasoning_only_response"])
+
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
             "model": "local",
@@ -1967,6 +2029,16 @@ Background / non-constraints
             self.assertEqual(result.current, AgentStateName.FAILED)
             self.assertEqual(result.loop_count, 1)
             self.assertEqual(target.read_text(), "value = 'old'\n")
+
+    def test_shipped_deterministic_configs_enable_rejected_candidate_retries(self) -> None:
+        for config_path in Path("config").glob("*.json"):
+            with self.subTest(config=str(config_path)):
+                workflow = json.loads(config_path.read_text()).get("workflow", {})
+                if workflow.get("deterministic_test_decision"):
+                    self.assertTrue(
+                        workflow.get("retry_rejected_candidates"),
+                        f"{config_path} can stop after one rejected candidate",
+                    )
 
     def test_bad_coder_json_is_rejected_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

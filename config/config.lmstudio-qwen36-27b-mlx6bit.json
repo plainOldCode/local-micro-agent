@@ -85,7 +85,7 @@
     "baseline_metric": null,
     "require_metric": false,
     "accept_if_improved": false,
-    "retry_rejected_candidates": false,
+    "retry_rejected_candidates": true,
     "reflect_before_retry": false,
     "code_output_format": "json",
     "prompt_cache_friendly_layout": true,
