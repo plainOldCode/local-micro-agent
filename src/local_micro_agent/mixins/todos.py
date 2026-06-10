@@ -268,6 +268,8 @@ class TodoLifecycleMixin:
             "acceptance": normalized_acceptance,
             "budget": {"attempts_max": attempts_max, "attempts_used": attempts_used},
             "closed_at": task.get("closed_at"),
+            "recovery_rounds": int(task.get("recovery_rounds", 0) or 0),
+            "attempts_total": int(task.get("attempts_total", 0) or 0),
         }
 
     def _todo_soft_until_first_improvement_enabled(self) -> bool:
@@ -354,6 +356,7 @@ class TodoLifecycleMixin:
             return
         if self._spec_global_loop_cap_reached():
             spec["progress"] = self._run_spec_progress(spec)
+            spec["last_stop_reason"] = "max_code_test_loops"
             self._persist_run_spec(spec)
             self.state.notes.append(
                 f"Spec mode reached max_code_test_loops={self.state.max_loops}"
@@ -370,14 +373,30 @@ class TodoLifecycleMixin:
             restored = self._restore_deferred_spec_tasks(tasks)
             if restored:
                 open_candidates = self._schedulable_spec_tasks(tasks)
+        if not open_candidates and not self._spec_global_loop_cap_reached():
+            reopened = self._reopen_failed_spec_prerequisites(tasks)
+            if reopened:
+                self._persist_run_spec(spec)
+                self._append_spec_progress_event(
+                    "reopened",
+                    spec,
+                    extra={
+                        "reason": "failed_prerequisite_recovery",
+                        "reopened_tasks": reopened,
+                        "remaining_loops": self._spec_remaining_loop_budget(),
+                    },
+                )
+                open_candidates = self._schedulable_spec_tasks(tasks)
         if not open_candidates:
+            blocked_extra = self._spec_blocked_event_extra(tasks)
+            spec["last_stop_reason"] = blocked_extra["stop_reason"]
             spec["progress"] = self._run_spec_progress(spec)
             self._persist_run_spec(spec)
             self.state.notes.append(
                 "Spec scheduler found no runnable task: "
                 + self._spec_blocked_task_summary(tasks)
             )
-            self._append_spec_progress_event("blocked", spec)
+            self._append_spec_progress_event("blocked", spec, extra=blocked_extra)
             self.state.current = AgentStateName.FAILED
             return
         task = self._select_spec_task(tasks, open_candidates)
@@ -404,6 +423,12 @@ class TodoLifecycleMixin:
     def _spec_global_loop_cap_reached(self) -> bool:
         max_loops = self.state.max_loops
         return isinstance(max_loops, int) and max_loops >= 0 and self.state.loop_count >= max_loops
+
+    def _spec_remaining_loop_budget(self) -> int | None:
+        max_loops = self.state.max_loops
+        if not isinstance(max_loops, int) or max_loops < 0:
+            return None
+        return max(0, max_loops - self.state.loop_count)
 
     @staticmethod
     def _spec_blocked_task_summary(tasks: list[Any]) -> str:
@@ -473,6 +498,135 @@ class TodoLifecycleMixin:
             task["deferred_revisited"] = True
             restored = True
         return restored
+
+    def _reopen_failed_spec_prerequisites(self, tasks: list[Any]) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        max_rounds = int(workflow.get("spec_task_recovery_rounds", 2) or 0)
+        if max_rounds <= 0:
+            return []
+        blocking_ids = self._failed_spec_prerequisite_ids(tasks)
+        if not blocking_ids:
+            return []
+        reopened: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("task_id") or "")
+            if task_id not in blocking_ids or str(task.get("status")) != "failed":
+                continue
+            rounds = int(task.get("recovery_rounds", 0) or 0)
+            if rounds >= max_rounds:
+                continue
+            budget = task.setdefault("budget", {})
+            if not isinstance(budget, dict):
+                budget = {}
+                task["budget"] = budget
+            prior_attempts = int(budget.get("attempts_used", task.get("attempts", 0)) or 0)
+            task["attempts_total"] = int(task.get("attempts_total", 0) or 0) + prior_attempts
+            budget["attempts_used"] = 0
+            task["attempts"] = 0
+            task["status"] = "open"
+            task["recovery_rounds"] = rounds + 1
+            observation = task.get("last_observation")
+            summary = ""
+            if isinstance(observation, dict):
+                summary = self._truncate_text(str(observation.get("summary", "")), 320)
+            hint = "recovery_after_failure"
+            if summary:
+                hint += f": {summary}"
+            task["decision_hint"] = hint
+            task["reopened_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self.state.notes.append(
+                f"Reopened failed prerequisite spec task: {task_id} "
+                f"(recovery {rounds + 1}/{max_rounds})"
+            )
+            reopened.append(task_id)
+        return reopened
+
+    @staticmethod
+    def _failed_spec_prerequisite_ids(tasks: list[Any]) -> set[str]:
+        failed = {
+            str(task.get("task_id"))
+            for task in tasks
+            if isinstance(task, dict) and str(task.get("status")) == "failed"
+        }
+        blocking: set[str] = set()
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status not in {"open", "deferred", "in_progress"}:
+                continue
+            deps = task.get("depends_on")
+            if not isinstance(deps, list):
+                continue
+            for dep in deps:
+                dep_id = str(dep)
+                if dep_id in failed:
+                    blocking.add(dep_id)
+        return blocking
+
+    def _spec_blocked_event_extra(self, tasks: list[Any]) -> dict[str, Any]:
+        failed_prerequisites = sorted(self._failed_spec_prerequisite_ids(tasks))
+        blocked_tasks = self._spec_blocked_task_ids(tasks)
+        remaining = self._spec_remaining_loop_budget()
+        stop_reason = "no_recovery_possible"
+        if (
+            failed_prerequisites
+            and remaining
+            and remaining > 0
+            and self._reopenable_failed_spec_prerequisite_ids(tasks)
+        ):
+            stop_reason = "dependency_blocked_before_budget_exhaustion"
+        return {
+            "stop_reason": stop_reason,
+            "remaining_loops": remaining,
+            "runnable_tasks_at_exit": 0,
+            "blocked_tasks": blocked_tasks,
+            "failed_prerequisites": failed_prerequisites,
+        }
+
+    def _reopenable_failed_spec_prerequisite_ids(self, tasks: list[Any]) -> set[str]:
+        workflow = self.config.get("workflow", {})
+        max_rounds = int(workflow.get("spec_task_recovery_rounds", 2) or 0)
+        if max_rounds <= 0:
+            return set()
+        blocking_ids = self._failed_spec_prerequisite_ids(tasks)
+        reopenable: set[str] = set()
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("task_id") or "")
+            if task_id not in blocking_ids or str(task.get("status")) != "failed":
+                continue
+            rounds = int(task.get("recovery_rounds", 0) or 0)
+            if rounds < max_rounds:
+                reopenable.add(task_id)
+        return reopenable
+
+    @staticmethod
+    def _spec_blocked_task_ids(tasks: list[Any]) -> list[str]:
+        closed = {
+            str(task.get("task_id"))
+            for task in tasks
+            if isinstance(task, dict) and str(task.get("status")) == "closed"
+        }
+        blocked: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status not in {"open", "deferred", "in_progress"}:
+                continue
+            deps = task.get("depends_on")
+            missing = [
+                str(dep)
+                for dep in deps
+                if str(dep) not in closed
+            ] if isinstance(deps, list) else []
+            if missing:
+                blocked.append(str(task.get("task_id") or "<unknown>"))
+        return blocked
 
     def _select_spec_task(
         self, tasks: list[Any], candidates: list[dict[str, Any]]
@@ -1153,11 +1307,12 @@ class TodoLifecycleMixin:
             f"- code_test_loop_count: {self.state.loop_count}",
             f"- fsm_step_count: {self.state.fsm_step_count}",
             f"- max_code_test_loops: {self.state.max_loops}",
+            f"- stop_reason: `{spec.get('last_stop_reason', '')}`",
             "",
             "## Tasks",
             "",
-            "| task_id | status | attempts | deliverables | acceptance |",
-            "|---|---:|---:|---|---|",
+            "| task_id | status | attempts | recovery | deliverables | acceptance |",
+            "|---|---:|---:|---:|---|---|",
         ]
         for task in tasks:
             if not isinstance(task, dict):
@@ -1175,7 +1330,13 @@ class TodoLifecycleMixin:
             if isinstance(commands, list) and commands:
                 acceptance_bits.append("commands=" + str(len(commands)))
             budget = task.get("budget") if isinstance(task.get("budget"), dict) else {}
-            attempts = budget.get("attempts_used", task.get("attempts", 0))
+            attempts_used = budget.get("attempts_used", task.get("attempts", 0))
+            attempts_total = int(task.get("attempts_total", 0) or 0)
+            if attempts_total > 0:
+                attempts = f"{attempts_used} current / {attempts_total} prior"
+            else:
+                attempts = str(attempts_used)
+            recovery = task.get("recovery_rounds", 0)
             deliverables = task.get("deliverables") if isinstance(task.get("deliverables"), list) else []
             lines.append(
                 "| "
@@ -1184,6 +1345,7 @@ class TodoLifecycleMixin:
                         str(task.get("task_id", "")),
                         str(task.get("status", "")),
                         str(attempts),
+                        str(recovery),
                         ", ".join(str(item) for item in deliverables),
                         "; ".join(bit for bit in acceptance_bits if bit),
                     ]

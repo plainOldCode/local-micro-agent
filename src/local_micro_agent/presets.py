@@ -85,6 +85,7 @@ _SPEC: dict[str, Any] = {
     "spec_resume": True,
     "spec_max_tasks": 24,
     "spec_task_attempt_budget": 8,
+    "spec_task_recovery_rounds": 2,
     "spec_acceptance_dir": ".lma_acceptance",
     "spec_acceptance_command_template": "{quoted_python} -m unittest discover -s {quoted_dir} -p 'test*.py'",
     "spec_acceptance_review": False,

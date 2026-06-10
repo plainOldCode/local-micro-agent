@@ -1935,6 +1935,129 @@ Background / non-constraints
             progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
             self.assertIn('"reason": "context_only"', progress_events)
 
+    def test_spec_mode_reopens_failed_prerequisite_when_budget_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "recover-chain",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "context",
+                        "status": "closed",
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "required implementation",
+                        "status": "failed",
+                        "depends_on": ["task-001"],
+                        "deliverables": ["target.txt"],
+                        "decision_hint": "budget_exhausted",
+                        "last_observation": {"summary": "metric stayed flat"},
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                    {
+                        "task_id": "task-003",
+                        "title": "dependent implementation",
+                        "status": "open",
+                        "depends_on": ["task-002"],
+                        "deliverables": ["target.txt"],
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_task_recovery_rounds": 1,
+                        "max_code_test_loops": 10,
+                        "writable_files": ["target.txt"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = persisted["task_graph"][1]
+            self.assertEqual(task["status"], "in_progress")
+            self.assertEqual(task["recovery_rounds"], 1)
+            self.assertEqual(task["budget"]["attempts_used"], 0)
+            self.assertEqual(task["attempts"], 0)
+            self.assertEqual(task["attempts_total"], 3)
+            self.assertIn("recovery_after_failure", task["decision_hint"])
+            self.assertEqual(persisted["active_task_id"], "task-002")
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "reopened"', progress_events)
+            self.assertIn('"reopened_tasks": ["task-002"]', progress_events)
+
+    def test_spec_mode_reports_blocked_when_recovery_rounds_are_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "blocked-chain",
+                "task_graph": [
+                    {"task_id": "task-001", "title": "context", "status": "closed"},
+                    {
+                        "task_id": "task-002",
+                        "title": "required implementation",
+                        "status": "failed",
+                        "depends_on": ["task-001"],
+                        "recovery_rounds": 1,
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                    {
+                        "task_id": "task-003",
+                        "title": "dependent implementation",
+                        "status": "open",
+                        "depends_on": ["task-002"],
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_task_recovery_rounds": 1,
+                        "max_code_test_loops": 10,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["last_stop_reason"], "no_recovery_possible")
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "blocked"', progress_events)
+            self.assertIn('"failed_prerequisites": ["task-002"]', progress_events)
+            self.assertIn('"remaining_loops": 6', progress_events)
+            self.assertIn('"stop_reason": "no_recovery_possible"', progress_events)
+
     def test_spec_mode_cold_start_synthesizes_v2_run_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
