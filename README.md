@@ -117,6 +117,21 @@ Candidate observations update the spec task state with controller hints such as
 `validated_no_metric_signal`, giving later loops an explicit repair/pivot/deepen
 signal instead of relying only on unstructured recent history.
 
+That advisory run spec is different from strict `workflow.spec_mode=true`. In
+strict spec mode, a version 2 `run_spec.json` becomes the deterministic loop
+driver: `SPEC_SYNTH` creates or resumes the graph, `SCHEDULE` picks the next
+runnable task without a model call, `TASK_READ` scopes context to that task,
+`ACCEPT_SYNTH` freezes task acceptance when needed, and `CODE`/`TEST` operate
+inside the active task. `depends_on` edges are hard gates: a task is runnable
+only when all dependencies are closed. `max_code_test_loops` is the global
+CODE/TEST opportunity cap; PLAN, READ, SPEC_SYNTH, SCHEDULE, TASK_READ, and
+ACCEPT_SYNTH do not consume it. If a required prerequisite task fails while
+downstream tasks are blocked and global loop budget remains, SCHEDULE reopens
+that failed prerequisite for up to `workflow.spec_task_recovery_rounds` fresh
+recovery rounds instead of ending early from graph starvation. Reports and
+progress JSONL distinguish `max_code_test_loops`, dependency blocking, recovery
+reopen events, and remaining loop budget.
+
 For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
 Rejected candidate fingerprints are then remembered inside the current run,
 and an identical later candidate is rejected before tests run. The rejection is
@@ -418,11 +433,112 @@ files, and other out-of-scope surfaces.
 }
 ```
 
+## Spec Mode
+
+`workflow.spec_mode=true` promotes a run-local spec from advisory context to the
+controller's task scheduler. It is for "build this spec through a graph of
+tasks" runs, not for the default flat CODE/TEST loop.
+
+The strict spec FSM is:
+
+```text
+PLAN -> READ -> SCHEDULE -> SPEC_SYNTH -> SCHEDULE
+     -> TASK_READ -> ACCEPT_SYNTH -> CODE -> TEST
+     -> SCHEDULE ...
+```
+
+`SCHEDULE` is deterministic and does not call a model. It persists
+`run_spec.json`, chooses the next open task whose `depends_on` entries are all
+closed, restores deferred tasks once, reopens failed prerequisite tasks when
+they block downstream work and loop budget remains, and terminates with DONE or
+FAILED when the graph is closed, unrecoverable, or the global loop cap is hit.
+
+Version 2 task specs use these controller-owned fields:
+
+```jsonc
+{
+  "version": 2,
+  "spec_id": "feature-or-optimization",
+  "objective": "...",
+  "invariants": ["..."],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "title": "Implement parser",
+      "depends_on": [],
+      "deliverables": ["src/parser.py"],
+      "read_hints": ["src/parser.py", "docs/spec.md"],
+      "acceptance": {
+        "kind": "synthesized",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 8,
+        "attempts_used": 0
+      },
+      "status": "open"
+    }
+  ]
+}
+```
+
+Acceptance kinds:
+
+- `synthesized`: `ACCEPT_SYNTH` writes frozen tests under `.lma_acceptance`.
+- `command`: task-provided or workflow-provided shell commands are run.
+- `metric`: existing metric rules and commands drive acceptance for performance
+  tasks.
+
+Synthesized acceptance is constrained by the controller: generated files must be
+under the task acceptance directory, command execution uses the configured
+`spec_acceptance_command_template`, zero-test acceptance is rejected, and CODE
+cannot write `.lma_acceptance` files after they are frozen. Closed tasks can be
+rechecked by the spec regression gate.
+
+Useful spec-mode options:
+
+```jsonc
+{
+  "workflow": {
+    "preset": "spec",
+    "spec_mode": true,
+    "run_spec_enabled": true,
+    "spec_resume": true,
+    "spec_max_tasks": 24,
+    "spec_task_attempt_budget": 8,
+    "spec_task_recovery_rounds": 2,
+    "spec_default_acceptance_kind": "synthesized",
+    "spec_regression_scope": "all",
+    "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+    "spec_report_path": ".local_micro_agent/spec_report.md",
+    "max_code_test_loops": 100
+  }
+}
+```
+
+`spec_task_recovery_rounds` handles strict dependency chains. When a failed
+task is a prerequisite for unfinished downstream tasks, SCHEDULE reopens that
+failed task with fresh per-round `attempts_used=0` while preserving
+`recovery_rounds` and prior attempt totals for reporting. Downstream tasks stay
+blocked until the prerequisite closes; the controller does not relax business
+dependencies to spend budget. If recovery rounds are exhausted, the report uses
+`stop_reason=no_recovery_possible`. If the global CODE/TEST cap is reached, it
+uses `stop_reason=max_code_test_loops`.
+
+## Spec Reports
+
+Spec mode writes `.local_micro_agent/spec_progress.jsonl` as the graph runs and
+`.local_micro_agent/spec_report.md` at DONE/FAILED. The report includes graph
+progress, `code_test_loop_count`, `fsm_step_count`, `max_code_test_loops`,
+`stop_reason`, per-task attempts, recovery rounds, deliverables, acceptance
+kind, and the recent notes tail. This is the quickest way to distinguish a true
+loop-cap exit from dependency blocking or no-recovery termination.
+
 ## Workflow Presets
 
 The workflow section has grown to roughly 80 flags, and most failures in long
 runs come from invalid flag combinations rather than from the model. Instead of
-hand-tuning each flag, set `workflow.preset` to one of three vetted bundles
+hand-tuning each flag, set `workflow.preset` to one of four vetted bundles
 from `src/local_micro_agent/presets.py`:
 
 - `minimal`: conservative fix-the-tests loop. Deterministic test decisions,
@@ -436,6 +552,10 @@ from `src/local_micro_agent/presets.py`:
 - `structural`: `search` plus the scaffold/probe/expand machinery for
   multi-step refactors: run-spec task graph, semantic analysis, structural
   tactic lifecycle, and structural state checkpoints.
+- `spec`: `structural` plus strict spec-mode scheduling. A version 2 task graph
+  becomes the deterministic loop driver with task-scoped READ, acceptance,
+  dependency gates, progress/report artifacts, and failed-prerequisite recovery
+  rounds.
 
 Preset values are defaults, not a mode switch: any key set explicitly in
 `workflow` wins over the preset value, so a preset can be used as a base and
@@ -462,9 +582,9 @@ preset or explicit flag enables them. In the shipped `config/*.json` profiles,
 REFLECT/BRAINSTORM/todo/gate machinery never fires; `semantic_analysis_after_read`,
 `run_spec_after_read`, `continue_after_improvement`, `candidate_history_path`,
 and `record_candidate_artifacts` are also off. The default execution path of
-those profiles is `PLAN -> READ -> (CODE -> TEST)*`. Use the `search` or
-`structural` preset when the run should actually exercise the exploration
-machinery.
+those profiles is `PLAN -> READ -> (CODE -> TEST)*`. Use the `search`,
+`structural`, or `spec` preset when the run should actually exercise the
+exploration or graph-scheduling machinery.
 
 ## Focused Source Context
 
