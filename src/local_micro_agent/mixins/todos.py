@@ -51,6 +51,14 @@ class TodoLifecycleMixin:
             role = str(workflow.get("run_spec_model_role", role_default))
             call_site = "spec_synth" if self._spec_mode_enabled() and force else "run_spec"
             prompt = spec_prompt(self.state, focus=focus)
+            fallback_role = str(
+                workflow.get(
+                    "spec_synth_fallback_model_role",
+                    "coder" if self._spec_mode_enabled() and force else "",
+                )
+                or ""
+            ).strip()
+            used_role = role
             try:
                 output = await self._model_chat(
                     role,
@@ -61,13 +69,6 @@ class TodoLifecycleMixin:
                 self.state.notes.append(
                     f"Run spec model call failed: {type(exc).__name__}: {exc}"
                 )
-                fallback_role = str(
-                    workflow.get(
-                        "spec_synth_fallback_model_role",
-                        "coder" if self._spec_mode_enabled() and force else "",
-                    )
-                    or ""
-                ).strip()
                 if not fallback_role or fallback_role == role:
                     return
                 try:
@@ -79,6 +80,7 @@ class TodoLifecycleMixin:
                     self.state.notes.append(
                         f"Run spec model fallback succeeded: {fallback_role}"
                     )
+                    used_role = fallback_role
                 except Exception as fallback_exc:
                     self.state.notes.append(
                         "Run spec fallback model call failed: "
@@ -91,7 +93,24 @@ class TodoLifecycleMixin:
                 self.state.notes.append(
                     f"Run spec JSON parse failed: {type(exc).__name__}: {exc}"
                 )
-                return
+                if not fallback_role or fallback_role == used_role:
+                    return
+                try:
+                    output = await self._model_chat(
+                        fallback_role,
+                        prompt,
+                        call_site=f"{call_site}_fallback",
+                    )
+                    self.state.notes.append(
+                        f"Run spec model fallback succeeded: {fallback_role}"
+                    )
+                    spec = parse_json_object(output)
+                except Exception as fallback_exc:
+                    self.state.notes.append(
+                        "Run spec fallback parse failed: "
+                        f"{type(fallback_exc).__name__}: {fallback_exc}"
+                    )
+                    return
             spec = self._normalize_run_spec(spec)
             if not spec:
                 self.state.notes.append("Run spec discarded: no task_graph")
