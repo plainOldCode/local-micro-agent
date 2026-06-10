@@ -27,6 +27,14 @@ class TodoLifecycleMixin:
         if not self._run_spec_enabled():
             self.state.scratch.pop("run_spec", None)
             return
+        if workflow.get("spec_resume", True) and path.exists() and not force:
+            spec = self._load_run_spec(path)
+            if isinstance(spec, dict) and int(spec.get("version", 1) or 1) >= 2:
+                spec = self._normalize_run_spec(spec)
+                if spec:
+                    self.state.scratch["run_spec"] = spec
+                    self.state.notes.append(f"Resumed run spec: {path}")
+                    return
         if workflow.get("run_spec_after_read") or force:
             self.state.scratch.pop("run_spec", None)
             focus = self._focused_read_model_context(str(workflow.get("run_spec_focus", "")))
@@ -217,6 +225,37 @@ class TodoLifecycleMixin:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
 
+    def _append_spec_progress_event(
+        self,
+        event: str,
+        spec: dict[str, Any],
+        task: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not self._spec_mode_enabled():
+            return
+        path = self._workflow_artifact_path(
+            "spec_progress_path", ".local_micro_agent/spec_progress.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": event,
+            "state": str(self.state.current),
+            "loop": self.state.loop_count,
+            "spec_id": spec.get("spec_id"),
+            "active_task_id": spec.get("active_task_id"),
+            "progress": self._run_spec_progress(spec),
+        }
+        if isinstance(task, dict):
+            record["task_id"] = task.get("task_id")
+            record["task_status"] = task.get("status")
+            record["task_attempts"] = task.get("attempts")
+        if extra:
+            record.update(extra)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
     def _run_spec_progress(self, spec: dict[str, Any]) -> dict[str, int]:
         tasks = spec.get("task_graph")
         if not isinstance(tasks, list):
@@ -246,6 +285,7 @@ class TodoLifecycleMixin:
         self._clear_active_spec_task()
         if all(str(task.get("status")) == "closed" for task in tasks if isinstance(task, dict)):
             self._persist_run_spec(spec)
+            self._append_spec_progress_event("done", spec)
             self.state.current = AgentStateName.DONE
             return
         open_candidates = self._schedulable_spec_tasks(tasks)
@@ -257,6 +297,7 @@ class TodoLifecycleMixin:
             spec["progress"] = self._run_spec_progress(spec)
             self._persist_run_spec(spec)
             self.state.notes.append("Spec scheduler found no runnable task")
+            self._append_spec_progress_event("blocked", spec)
             self.state.current = AgentStateName.FAILED
             return
         task = self._select_spec_task(tasks, open_candidates)
@@ -270,6 +311,7 @@ class TodoLifecycleMixin:
         self.state.scratch["current_spec_task"] = task
         self._persist_todo_plan(todo)
         self.state.notes.append(f"Scheduled spec task: {task.get('task_id')}")
+        self._append_spec_progress_event("scheduled", spec, task)
         self.state.current = AgentStateName.TASK_READ
 
     def _retry_or_fail_without_spec(self) -> AgentStateName:
@@ -830,6 +872,7 @@ class TodoLifecycleMixin:
             self.state.loop_count += 1
             self.state.scratch.pop("spec_task_boundary_snapshot", None)
             self._persist_run_spec(spec)
+            self._append_spec_progress_event("closed", spec, task)
             self.state.current = AgentStateName.SCHEDULE
             return
         if attempts_used >= attempts_max:
@@ -842,11 +885,80 @@ class TodoLifecycleMixin:
             )
             self.state.loop_count += 1
             self._persist_run_spec(spec)
+            self._append_spec_progress_event(str(task["status"]), spec, task)
             self.state.current = AgentStateName.SCHEDULE
             return
         self.state.loop_count += 1
         self._persist_run_spec(spec)
+        self._append_spec_progress_event("retry", spec, task)
         self.state.current = self._retry_state_after_failure()
+
+    def _persist_spec_report(self) -> None:
+        if not self._spec_mode_enabled():
+            return
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict):
+            spec = self._load_run_spec(self._run_spec_path())
+        if not isinstance(spec, dict) or not spec:
+            return
+        progress = self._run_spec_progress(spec)
+        report_path = self._workflow_artifact_path(
+            "spec_report_path", ".local_micro_agent/spec_report.md"
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        lines = [
+            "# Spec Mode Report",
+            "",
+            f"- status: `{self.state.current}`",
+            f"- spec_id: `{spec.get('spec_id', '')}`",
+            f"- objective: {spec.get('objective', '')}",
+            f"- progress: {progress.get('closed', 0)}/{progress.get('total', 0)} closed, "
+            f"{progress.get('deferred', 0)} deferred, {progress.get('failed', 0)} failed",
+            f"- loop_count: {self.state.loop_count}",
+            "",
+            "## Tasks",
+            "",
+            "| task_id | status | attempts | deliverables | acceptance |",
+            "|---|---:|---:|---|---|",
+        ]
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), dict) else {}
+            commands = acceptance.get("commands") if isinstance(acceptance, dict) else []
+            test_paths = acceptance.get("test_paths") if isinstance(acceptance, dict) else []
+            acceptance_bits = []
+            if isinstance(acceptance, dict):
+                acceptance_bits.append(str(acceptance.get("kind", "")))
+                if acceptance.get("frozen_sha256"):
+                    acceptance_bits.append("frozen")
+            if isinstance(test_paths, list) and test_paths:
+                acceptance_bits.append("tests=" + ",".join(str(path) for path in test_paths))
+            if isinstance(commands, list) and commands:
+                acceptance_bits.append("commands=" + str(len(commands)))
+            budget = task.get("budget") if isinstance(task.get("budget"), dict) else {}
+            attempts = budget.get("attempts_used", task.get("attempts", 0))
+            deliverables = task.get("deliverables") if isinstance(task.get("deliverables"), list) else []
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(task.get("task_id", "")),
+                        str(task.get("status", "")),
+                        str(attempts),
+                        ", ".join(str(item) for item in deliverables),
+                        "; ".join(bit for bit in acceptance_bits if bit),
+                    ]
+                )
+                + " |"
+            )
+        notes_tail = self.state.notes[-12:]
+        if notes_tail:
+            lines.extend(["", "## Notes Tail", ""])
+            lines.extend(f"- {note}" for note in notes_tail)
+        report_path.write_text("\n".join(lines).rstrip() + "\n")
+        self.state.notes.append(f"Persisted spec report: {report_path}")
 
     def _todo_contract_soft_now(self) -> bool:
         return (

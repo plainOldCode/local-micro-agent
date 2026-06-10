@@ -113,6 +113,7 @@ class MicroAgent(
                     await self._profiled_phase("TEST", self.test)
                 else:
                     self.state.current = AgentStateName.FAILED
+            self._persist_spec_report()
         finally:
             await self.mcp.close()
         return self.state

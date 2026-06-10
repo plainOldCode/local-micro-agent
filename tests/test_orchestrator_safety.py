@@ -2188,6 +2188,90 @@ Background / non-constraints
             self.assertTrue(
                 any("Restored spec task boundary snapshot: task-002" in note for note in result.notes)
             )
+            report = (repo / ".local_micro_agent" / "spec_report.md").read_text()
+            self.assertIn("status: `failed`", report)
+            self.assertIn("task-002", report)
+
+    def test_spec_mode_resume_skips_closed_tasks_and_writes_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "a.txt").write_text("done-a")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "resume",
+                        "objective": "resume from task two",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "already done",
+                                "deliverables": ["a.txt"],
+                                "status": "closed",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('a.txt').read_text() == 'done-a'\""
+                                    ],
+                                },
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "finish b",
+                                "depends_on": ["task-001"],
+                                "deliverables": ["b.txt"],
+                                "status": "open",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('b.txt').read_text() == 'done-b'\""
+                                    ],
+                                },
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": [],
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_after_read": True,
+                    "spec_resume": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 3,
+                    "writable_files": ["*.txt"],
+                    "seed_changes": [{"path": "b.txt", "content": "done-b"}],
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=3)
+            agent = MicroAgent(config, state)
+            agent.models = _FailingModelManager()
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertEqual((repo / "a.txt").read_text(), "done-a")
+            self.assertEqual((repo / "b.txt").read_text(), "done-b")
+            self.assertIn("Resumed run spec", "\n".join(result.notes))
+            report = (artifact_dir / "spec_report.md").read_text()
+            self.assertIn("status: `done`", report)
+            self.assertIn("progress: 2/2 closed", report)
+            self.assertIn("task-001", report)
+            self.assertIn("task-002", report)
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "scheduled"', progress_events)
+            self.assertIn('"event": "closed"', progress_events)
+            self.assertIn('"event": "done"', progress_events)
 
     def test_run_spec_artifact_is_not_loaded_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -91,6 +91,8 @@ _SPEC: dict[str, Any] = {
     "spec_acceptance_synth_retries": 1,
     "spec_regression_scope": "all",
     "spec_invariant_commands": [],
+    "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+    "spec_report_path": ".local_micro_agent/spec_report.md",
     "continue_after_improvement": False,
     "deterministic_test_decision": True,
 }
