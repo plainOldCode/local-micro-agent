@@ -73,6 +73,9 @@ class ModelRuntimeMixin:
             role=role,
             call_site=call_site,
         )
+        rejected_reasoning_only = self._reject_reasoning_only_response(
+            output, usage, role=role, call_site=call_site
+        )
         self._record_profile_span(
             "model_call",
             start,
@@ -86,13 +89,21 @@ class ModelRuntimeMixin:
                 "message_count": len(messages),
                 "prompt_chars": prompt_chars,
                 "output_chars": len(output),
-                "success": True,
+                "success": not rejected_reasoning_only,
+                **(
+                    {
+                        "rejected_reasoning_only": True,
+                        "error": "Model returned reasoning-only response with empty final content",
+                    }
+                    if rejected_reasoning_only
+                    else {}
+                ),
                 **stream_stats,
                 **usage_fields,
                 **budget_fields,
             },
         )
-        if self._reject_reasoning_only_response(output, usage, role=role, call_site=call_site):
+        if rejected_reasoning_only:
             raise RuntimeError(
                 "Model returned reasoning-only response with empty final content"
             )

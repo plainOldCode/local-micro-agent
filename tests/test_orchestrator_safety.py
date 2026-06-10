@@ -913,7 +913,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 "models": {},
                 "providers": {},
                 "mcp_servers": {},
-                "workflow": {},
+                "workflow": {"profile_agent": True},
             }
             agent = MicroAgent(config, state)
             agent.models = _ReasoningOnlyModelManager()
@@ -928,6 +928,17 @@ class OrchestratorSafetyTests(unittest.TestCase):
                 )
 
             self.assertIn("Rejected reasoning-only", "\n".join(state.notes))
+            profile_path = repo / ".local_micro_agent" / "profile_events.jsonl"
+            rows = [
+                json.loads(line)
+                for line in profile_path.read_text().splitlines()
+                if line.strip()
+            ]
+            model_event = next(row for row in rows if row["event_type"] == "model_call")
+            self.assertFalse(model_event["success"])
+            self.assertTrue(model_event["reasoning_only_response"])
+            self.assertTrue(model_event["rejected_reasoning_only"])
+            self.assertIn("reasoning-only", model_event["error"])
 
     def test_reasoning_only_allowed_call_site_bypasses_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
