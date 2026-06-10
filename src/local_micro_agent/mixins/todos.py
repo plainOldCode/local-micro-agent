@@ -1215,12 +1215,30 @@ class TodoLifecycleMixin:
         )
         budget["attempts_used"] = attempts_used
         task["attempts"] = attempts_used
+        metric_acceptance = self.state.scratch.get("metric_acceptance")
+        metric_observation = metric_acceptance if isinstance(metric_acceptance, dict) else {}
         task["last_observation"] = {
             "loop": self.state.loop_count,
             "failed": failed,
             "budget_counted": budget_counted,
             "summary": self.state.latest_test_summary(),
         }
+        if metric_observation:
+            task["last_observation"].update(
+                {
+                    key: value
+                    for key, value in metric_observation.items()
+                    if value is not None
+                }
+            )
+            metric_summary = str(metric_observation.get("summary") or "").strip()
+            if metric_summary:
+                task["last_observation"]["summary"] = metric_summary
+        if failed and metric_observation.get("failure_class") == "no_improvement":
+            task["decision_hint"] = (
+                "metric_no_improvement: tests passed but the measured metric did not "
+                "improve. Ensure any new branch or helper is called by the benchmark path."
+            )
         if not failed:
             task["status"] = "closed"
             task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -1253,6 +1271,9 @@ class TodoLifecycleMixin:
             extra={"budget_counted": budget_counted},
         )
         if self._spec_global_loop_cap_reached():
+            spec["last_stop_reason"] = "max_code_test_loops"
+            spec["progress"] = self._run_spec_progress(spec)
+            self._persist_run_spec(spec)
             self.state.notes.append(
                 f"Spec mode reached max_code_test_loops={self.state.max_loops}"
             )

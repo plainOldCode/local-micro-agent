@@ -1318,28 +1318,117 @@ class MicroAgent(
     def _evaluate_metric_acceptance(self) -> bool:
         workflow = self.config.get("workflow", {})
         self.state.scratch["metric_improved"] = False
+        requires_improvement = self._spec_metric_task_requires_improvement()
+        self.state.scratch["metric_acceptance"] = {
+            "requires_improvement": requires_improvement,
+        }
         if not workflow.get("metric_regex"):
+            if requires_improvement:
+                self.state.scratch["metric_acceptance"].update(
+                    {
+                        "failed": True,
+                        "failure_class": "metric_missing",
+                        "summary": (
+                            "Spec metric task requires improvement, but "
+                            "workflow.metric_regex is not configured."
+                        ),
+                    }
+                )
+                self.state.notes.append(
+                    "Spec metric task requires improvement, but workflow.metric_regex is not configured"
+                )
+                return True
             return False
         metric = self._metric_from_results(self.state.test_results)
         if metric is None:
-            self.state.notes.append(f"Metric not found with regex: {workflow.get('metric_regex')}")
-            return bool(workflow.get("require_metric"))
+            self.state.notes.append(
+                f"Metric not found with regex: {workflow.get('metric_regex')}"
+            )
+            self.state.scratch["metric_acceptance"].update(
+                {
+                    "failed": bool(
+                        workflow.get("require_metric") or requires_improvement
+                    ),
+                    "failure_class": "metric_missing",
+                    "summary": "Metric output was not parseable.",
+                }
+            )
+            return bool(workflow.get("require_metric") or requires_improvement)
         self.state.scratch["last_metric"] = metric
 
-        baseline = self.state.scratch.get("best_metric", workflow.get("baseline_metric"))
+        baseline = self.state.scratch.get(
+            "best_metric", workflow.get("baseline_metric")
+        )
         if baseline is None:
             self.state.scratch["best_metric"] = metric
             self.state.notes.append(f"Recorded initial metric: {metric}")
-            return False
+            self.state.scratch["metric_acceptance"].update(
+                {
+                    "metric": metric,
+                    "baseline": None,
+                    "improved": False,
+                    "failed": requires_improvement,
+                    "failure_class": (
+                        "metric_baseline_missing" if requires_improvement else None
+                    ),
+                    "summary": (
+                        "Recorded initial metric; no baseline was available "
+                        "to prove improvement."
+                    ),
+                }
+            )
+            if requires_improvement:
+                self.state.notes.append(
+                    "Spec metric task requires improvement, but no baseline metric is available"
+                )
+            return requires_improvement
 
         baseline_int = int(baseline)
         improved = self._metric_improved(metric, baseline_int)
-        self.state.notes.append(f"Metric candidate={metric} baseline={baseline_int} improved={improved}")
+        self.state.notes.append(
+            f"Metric candidate={metric} baseline={baseline_int} improved={improved}"
+        )
+        metric_summary = (
+            f"Metric candidate={metric} baseline={baseline_int} improved={improved}."
+        )
+        self.state.scratch["metric_acceptance"].update(
+            {
+                "metric": metric,
+                "baseline": baseline_int,
+                "improved": improved,
+                "failed": bool(
+                    not improved
+                    and (workflow.get("accept_if_improved") or requires_improvement)
+                ),
+                "failure_class": None if improved else "no_improvement",
+                "summary": metric_summary
+                if improved
+                else (
+                    metric_summary
+                    + " Treat this as an inert/no-signal edit; ensure the "
+                    "changed code path is actually executed."
+                ),
+            }
+        )
         if improved:
             self.state.scratch["best_metric"] = metric
             self.state.scratch["metric_improved"] = True
             return False
-        return bool(workflow.get("accept_if_improved"))
+        if requires_improvement:
+            self.state.notes.append(
+                "Spec metric task requires improvement before close; rejecting unchanged metric"
+            )
+        return bool(workflow.get("accept_if_improved") or requires_improvement)
+
+    def _spec_metric_task_requires_improvement(self) -> bool:
+        if not self._spec_mode_enabled():
+            return False
+        workflow = self.config.get("workflow", {})
+        if workflow.get("spec_metric_requires_improvement", True) is False:
+            return False
+        task = self._current_spec_task()
+        acceptance = task.get("acceptance") if isinstance(task, dict) else None
+        return isinstance(acceptance, dict) and str(acceptance.get("kind")) == "metric"
 
     def _metric_from_results(self, results: list[TestResult]) -> int | None:
         metric_regex = self.config.get("workflow", {}).get("metric_regex")

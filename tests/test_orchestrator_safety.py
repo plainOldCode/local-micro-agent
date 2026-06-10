@@ -1935,6 +1935,71 @@ Background / non-constraints
             progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
             self.assertIn('"reason": "context_only"', progress_events)
 
+    def test_spec_metric_task_requires_improvement_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "metric-task",
+                        "objective": "Improve the measured cycle metric.",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "optimize target",
+                                "deliverables": ["target.py"],
+                                "acceptance": {"kind": "metric", "commands": []},
+                                "budget": {"attempts_max": 3},
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 1,
+                    "writable_files": ["target.py"],
+                    "seed_files": [],
+                    "seed_changes": [
+                        {
+                            "path": "target.py",
+                            "target": "value = 'old'\n",
+                            "replacement": "value = 'new'\n",
+                        }
+                    ],
+                    "test_commands": ["python3 -c \"print('cycles: 100')\""],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.FAILED)
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = spec["task_graph"][0]
+            self.assertEqual(task["status"], "in_progress")
+            self.assertEqual(spec["last_stop_reason"], "max_code_test_loops")
+            self.assertEqual(task["last_observation"]["metric"], 100)
+            self.assertEqual(task["last_observation"]["baseline"], 100)
+            self.assertFalse(task["last_observation"]["improved"])
+            self.assertEqual(task["last_observation"]["failure_class"], "no_improvement")
+            self.assertIn("metric_no_improvement", task["decision_hint"])
+            report = (artifact_dir / "spec_report.md").read_text()
+            self.assertIn("stop_reason: `max_code_test_loops`", report)
+            notes = "\n".join(result.notes)
+            self.assertIn("Spec metric task requires improvement before close", notes)
+
     def test_spec_mode_reopens_failed_prerequisite_when_budget_remains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2320,6 +2385,9 @@ Background / non-constraints
             self.assertIn("max_code_test_loops=1", "\n".join(result.notes))
             spec = json.loads((artifact_dir / "run_spec.json").read_text())
             self.assertEqual([task["status"] for task in spec["task_graph"]], ["closed", "open"])
+            self.assertEqual(spec["last_stop_reason"], "max_code_test_loops")
+            report = (artifact_dir / "spec_report.md").read_text()
+            self.assertIn("stop_reason: `max_code_test_loops`", report)
 
     def test_spec_mode_synthesizes_and_freezes_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -176,7 +176,10 @@ the deliverables of dependency tasks, and the task's own deliverables.
   acceptance. `spec_force_default_acceptance_kind=true` overrides
   model-declared kinds.
 - `command`: human-supplied shell commands (task-level or `test_commands`).
-- `metric`: existing metric rules drive acceptance for performance tasks.
+- `metric`: existing metric rules drive acceptance for performance tasks. In
+  strict spec mode, metric tasks require a proven improvement over the current
+  baseline by default (`spec_metric_requires_improvement=true`); an unchanged
+  metric is treated as an inert/no-signal edit and the task stays open.
 
 ### Closing a task
 
@@ -189,6 +192,9 @@ the task's budget is then exhausted, the task-boundary snapshot is restored
 and the task is deferred. Patch-application misses (stale search blocks) do
 not consume the task budget, mirroring
 `todo_ignore_patch_failures_for_budget`.
+Metric task failures record the candidate metric, baseline, improvement flag,
+and no-improvement hint in the task observation so the next CODE attempt can
+steer toward changes that actually execute on the benchmark path.
 
 ### Progress and reports
 
