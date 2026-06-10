@@ -162,9 +162,11 @@ def _post_openai_stream(
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
     usage = _openai_usage(done_data)
+    content = "".join(chunks)
     if reasoning_chunks:
         usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
-    return ModelResponse("".join(chunks), usage=usage)
+        usage["reasoning_only_response"] = not bool(content.strip())
+    return ModelResponse(content, usage=usage)
 
 
 def _post_ollama_stream(
@@ -212,10 +214,11 @@ def _post_ollama_stream(
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
     usage = _ollama_usage(done_data)
+    content = "".join(chunks)
     if reasoning_chunks:
         usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
-        usage["reasoning_only_response"] = not bool(chunks)
-    return ModelResponse("".join(chunks), usage=usage)
+        usage["reasoning_only_response"] = not bool(content.strip())
+    return ModelResponse(content, usage=usage)
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,7 @@ class OpenAICompatibleModel:
     think: bool | None = None
     disable_thinking_with_assistant_prefill: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
+    extra_options: dict[str, Any] = field(default_factory=dict)
 
     async def chat(
         self,
@@ -249,6 +253,9 @@ class OpenAICompatibleModel:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        # Precedence is base payload < extra_options < explicit thinking flags < extra_body.
+        # Keep extra_body last so provider-specific request bodies can deliberately override.
+        payload.update(self.extra_options)
         if self.think is not None:
             payload["think"] = self.think
             payload["enable_thinking"] = self.think
@@ -272,7 +279,26 @@ class OpenAICompatibleModel:
             self.timeout_seconds,
         )
         content = _openai_chat_content(data)
-        return ModelResponse(content, usage=_openai_usage(data))
+        usage = _openai_usage(data)
+        choices = data.get("choices")
+        message = (
+            choices[0].get("message")
+            if isinstance(choices, list)
+            and choices
+            and isinstance(choices[0], dict)
+            and isinstance(choices[0].get("message"), dict)
+            else {}
+        )
+        reasoning = (
+            message.get("reasoning_content")
+            or message.get("thinking")
+            or message.get("reasoning")
+            or ""
+        )
+        if reasoning:
+            usage["reasoning_content_chars"] = len(reasoning)
+            usage["reasoning_only_response"] = not bool(content.strip())
+        return ModelResponse(content, usage=usage)
 
 
 @dataclass(frozen=True)
@@ -286,21 +312,24 @@ class OllamaNativeModel:
     num_ctx: int | None = None
     think: bool = False
     timeout_seconds: int = 120
+    extra_options: dict[str, Any] = field(default_factory=dict)
 
     async def chat(
         self,
         messages: list[dict[str, str]],
         stream_callback: StreamCallback | None = None,
     ) -> ModelResponse:
+        options = {
+            "temperature": self.temperature,
+            "num_predict": self.max_tokens,
+            **self.extra_options,
+        }
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": stream_callback is not None,
             "think": self.think,
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.max_tokens,
-            },
+            "options": options,
         }
         if self.num_ctx:
             payload["options"]["num_ctx"] = self.num_ctx
@@ -321,7 +350,7 @@ class OllamaNativeModel:
         reasoning = message.get("thinking") or message.get("reasoning_content") or ""
         if reasoning:
             usage["reasoning_content_chars"] = len(reasoning)
-            usage["reasoning_only_response"] = not bool(content)
+            usage["reasoning_only_response"] = not bool(content.strip())
         return ModelResponse(content, usage=usage)
 
 
@@ -351,6 +380,7 @@ class ModelManager:
                     "disable_thinking_with_assistant_prefill", False
                 ),
                 extra_body=spec.get("extra_body") or {},
+                extra_options=spec.get("extra_options") or {},
             )
         if spec["kind"] == "ollama_native":
             return OllamaNativeModel(
@@ -361,5 +391,6 @@ class ModelManager:
                 num_ctx=spec.get("num_ctx"),
                 think=spec.get("think", False),
                 timeout_seconds=spec.get("timeout_seconds", 120),
+                extra_options=spec.get("extra_options") or {},
             )
         raise ValueError(f"Unsupported provider kind: {spec['kind']}")

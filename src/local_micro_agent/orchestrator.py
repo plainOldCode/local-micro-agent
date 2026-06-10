@@ -206,7 +206,37 @@ class MicroAgent:
                 **self._profile_model_usage_fields(usage, elapsed_seconds),
             },
         )
+        if self._reject_reasoning_only_response(output, usage, role=role, call_site=call_site):
+            raise RuntimeError(
+                "Model returned reasoning-only response with empty final content"
+            )
         return output
+
+    def _reject_reasoning_only_response(
+        self,
+        output: str,
+        usage: dict[str, Any],
+        *,
+        role: str,
+        call_site: str,
+    ) -> bool:
+        if output.strip():
+            return False
+        if usage.get("reasoning_only_response") is not True:
+            return False
+        workflow = self.config.get("workflow", {})
+        if workflow.get("allow_reasoning_only_response"):
+            return False
+        allowed = workflow.get("reasoning_only_allowed_call_sites", [])
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        if call_site in {str(item) for item in allowed if str(item).strip()}:
+            return False
+        self.state.notes.append(
+            "Rejected reasoning-only model response with empty content: "
+            f"role={role} call_site={call_site}"
+        )
+        return True
 
     def _model_role_for_call_site(self, role: str, call_site: str) -> str:
         workflow = self.config.get("workflow", {})
@@ -436,20 +466,56 @@ class MicroAgent:
         workflow_context = self._workflow_plan_context()
         if workflow_context:
             project_context = "\n\n".join(part for part in [project_context, workflow_context] if part)
-        output = await self._model_chat(
-            "planner",
-            plan_prompt(self.state, project_context),
-            call_site="plan",
-        )
+        try:
+            output = await self._model_chat(
+                "planner",
+                plan_prompt(self.state, project_context),
+                call_site="plan",
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"PLAN model call failed; using fallback plan: {type(exc).__name__}: {exc}"
+            )
+            output = self._fallback_plan_markdown(project_context)
         self.state.plan_markdown = output.strip()
         self.state.current = AgentStateName.READ
+
+    def _fallback_plan_markdown(self, project_context: str = "") -> str:
+        workflow = self.config.get("workflow", {})
+        files = workflow.get("read_fallback_files") or workflow.get("writable_files") or []
+        file_lines = "\n".join(f"- `{path}`" for path in files) or "- Use READ fallback files."
+        tests = workflow.get("test_commands") or []
+        test_lines = "\n".join(f"- `{command}`" for command in tests) or "- Run configured tests."
+        return (
+            "# Fallback Plan\n\n"
+            "## Files to read or modify\n"
+            f"{file_lines}\n\n"
+            "## Ordered implementation steps\n"
+            "1. Read the configured source files and current workflow constraints.\n"
+            "2. Make the smallest correctness-preserving change requested by the task.\n"
+            "3. Validate with the configured test and metric commands.\n\n"
+            "## Test commands\n"
+            f"{test_lines}\n"
+        )
 
     async def read(self) -> None:
         seeded_files = self.config.get("workflow", {}).get("seed_files")
         if seeded_files is not None:
             decision = ReadDecision(files=seeded_files, reason="seeded by workflow config")
         else:
-            decision = await self._json_call("planner", read_prompt(self.state), ReadDecision)
+            try:
+                decision = await self._json_call("planner", read_prompt(self.state), ReadDecision)
+            except JsonValidationError as exc:
+                fallback_files = self._read_fallback_files()
+                self.state.notes.append(
+                    "READ decision failed; falling back to configured files: "
+                    f"{exc}"
+                )
+                if not fallback_files:
+                    self.state.notes.append(
+                        "READ fallback file list is empty; CODE will run without source context"
+                    )
+                decision = ReadDecision(files=fallback_files, reason="fallback after READ failure")
         self.state.planned_files = self._filter_read_files(decision.files)
         self.state.file_context = []
         for rel_path in self.state.planned_files:
@@ -461,6 +527,14 @@ class MicroAgent:
         await self._maybe_refresh_semantic_analysis()
         await self._maybe_refresh_run_spec()
         self.state.current = AgentStateName.CODE
+
+    def _read_fallback_files(self) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        for key in ("read_fallback_files", "writable_files", "project_context_files"):
+            value = workflow.get(key)
+            if isinstance(value, list) and value:
+                return [str(item) for item in value]
+        return []
 
     async def _maybe_refresh_semantic_analysis(self) -> None:
         workflow = self.config.get("workflow", {})
@@ -3239,6 +3313,25 @@ class MicroAgent:
             name = str(spec.get("name") or f"diagnostic-{index}")
             output_limit = int(spec.get("output_limit", default_limit) or default_limit)
             timeout = int(spec.get("timeout_seconds", default_timeout) or default_timeout)
+            skip_reason = self._diagnostic_skip_reason(command)
+            if skip_reason:
+                skipped = self.state.scratch.setdefault("_skipped_diagnostics", [])
+                if isinstance(skipped, list) and command not in skipped:
+                    skipped.append(command)
+                    self.state.notes.append(
+                        f"Diagnostic {name} skipped: {skip_reason}"
+                    )
+                results.append(
+                    {
+                        "name": name,
+                        "command": command,
+                        "exit_code": 0,
+                        "stdout": f"skipped: {skip_reason}",
+                        "stderr": "",
+                        "skipped": True,
+                    }
+                )
+                continue
             start = self._profile_span_start()
             try:
                 result = await self.mcp.run_command(
@@ -3277,6 +3370,26 @@ class MicroAgent:
                 }
             )
         return results
+
+    def _diagnostic_skip_reason(self, command: str) -> str:
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return ""
+        for part in parts[1:]:
+            if part.startswith("-"):
+                continue
+            if not part.endswith((".py", ".sh")):
+                continue
+            candidate = Path(part)
+            if candidate.is_absolute():
+                exists = candidate.exists()
+            else:
+                exists = (self.state.repo_root / candidate).exists()
+            if not exists:
+                return f"missing diagnostic file {part}"
+            return ""
+        return ""
 
     def _diagnostic_command_specs(self, when: str = "after_test") -> list[dict[str, Any]]:
         configured = self.config.get("workflow", {}).get("diagnostic_commands", [])
@@ -3388,7 +3501,18 @@ class MicroAgent:
             self.state.current = AgentStateName.FAILED if failed else AgentStateName.DONE
             return
 
-        decision = await self._json_call("tester", test_prompt(self.state), TestDecision)
+        try:
+            decision = await self._json_call("tester", test_prompt(self.state), TestDecision)
+        except JsonValidationError as exc:
+            self.state.notes.append(
+                "TEST decision failed; using deterministic test result: "
+                f"{exc}"
+            )
+            decision = TestDecision(
+                status="retry" if failed else "pass",
+                reason="fallback after TEST decision failure",
+                next_focus="Use concrete test output and avoid malformed tester JSON.",
+            )
         if not failed and decision.status == "pass":
             if self._should_continue_after_improvement():
                 self._create_validated_pattern_followup_todo()

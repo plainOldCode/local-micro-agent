@@ -27,6 +27,7 @@ from local_micro_agent.state import (
     FileSnapshot,
     TestResult,
 )
+from local_micro_agent.validators import JsonValidationError
 
 
 class _BadJsonModel:
@@ -85,6 +86,23 @@ class _UsageModel:
 class _UsageModelManager:
     def get(self, role):
         return _UsageModel()
+
+
+class _ReasoningOnlyModel:
+    async def chat(self, messages):
+        return ModelResponse(
+            "",
+            usage={
+                "reasoning_only_response": True,
+                "reasoning_content_chars": 1024,
+                "completion_tokens": 4096,
+            },
+        )
+
+
+class _ReasoningOnlyModelManager:
+    def get(self, role):
+        return _ReasoningOnlyModel()
 
 
 class _StreamingModel:
@@ -402,6 +420,104 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertFalse(response.usage["reasoning_only_response"])
         self.assertEqual(response.usage["completion_tokens"], 3)
 
+    def test_openai_stream_marks_reasoning_only_response(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                rows = [
+                    'data: {"choices":[{"delta":{"reasoning_content":"think-a"}}]}',
+                    'data: {"choices":[{"delta":{"reasoning_content":"think-b"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}',
+                    "data: [DONE]",
+                ]
+                return iter((f"{row}\n".encode("utf-8") for row in rows))
+
+        original = model_module.urllib.request.urlopen
+        model_module.urllib.request.urlopen = lambda request, timeout: FakeResponse()
+        try:
+            chunks: list[object] = []
+            response = model_module._post_openai_stream(
+                "http://localhost:1234/v1/chat/completions",
+                {"model": "fake", "messages": [], "stream": True},
+                {},
+                30,
+                chunks.append,
+            )
+        finally:
+            model_module.urllib.request.urlopen = original
+
+        self.assertEqual(response.content, "")
+        self.assertEqual(chunks, ["think-a", "think-b"])
+        self.assertEqual(response.usage["reasoning_content_chars"], len("think-athink-b"))
+        self.assertTrue(response.usage["reasoning_only_response"])
+        self.assertEqual(response.usage["completion_tokens"], 3)
+
+    def test_openai_stream_marks_whitespace_final_as_reasoning_only(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                rows = [
+                    'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}',
+                    'data: {"choices":[{"delta":{"content":"  \\n\\t"}}],"usage":{"completion_tokens":3}}',
+                    "data: [DONE]",
+                ]
+                return iter((f"{row}\n".encode("utf-8") for row in rows))
+
+        original = model_module.urllib.request.urlopen
+        model_module.urllib.request.urlopen = lambda request, timeout: FakeResponse()
+        try:
+            response = model_module._post_openai_stream(
+                "http://localhost:1234/v1/chat/completions",
+                {"model": "fake", "messages": [], "stream": True},
+                {},
+                30,
+                None,
+            )
+        finally:
+            model_module.urllib.request.urlopen = original
+
+        self.assertEqual(response.content, "  \n\t")
+        self.assertTrue(response.usage["reasoning_only_response"])
+
+    def test_openai_non_stream_marks_whitespace_final_as_reasoning_only(self) -> None:
+        original = model_module._post_json
+
+        def fake_post_json(url, payload, headers, timeout):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "reasoning_content": "think",
+                            "content": " \n",
+                        }
+                    }
+                ],
+                "usage": {"completion_tokens": 3},
+            }
+
+        model_module._post_json = fake_post_json
+        try:
+            response = asyncio.run(
+                OpenAICompatibleModel(
+                    base_url="http://localhost:1234/v1",
+                    model="fake",
+                ).chat([])
+            )
+        finally:
+            model_module._post_json = original
+
+        self.assertEqual(response.content, " \n")
+        self.assertTrue(response.usage["reasoning_only_response"])
+
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
             "model": "local",
@@ -697,6 +813,163 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(model_event["completion_tokens_per_second"], 5.0)
             self.assertEqual(model_event["total_tokens_per_second"], 5.0)
             self.assertGreater(model_event["wall_tokens_per_second"], 0)
+
+    def test_json_call_rejects_reasoning_only_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _ReasoningOnlyModelManager()
+
+            with self.assertRaises(JsonValidationError):
+                asyncio.run(
+                    agent._json_call(
+                        "planner",
+                        [{"role": "user", "content": "choose files"}],
+                        schema=ReadDecision,
+                    )
+                )
+
+            self.assertIn("Rejected reasoning-only", "\n".join(state.notes))
+
+    def test_reasoning_only_allowed_call_site_bypasses_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"reasoning_only_allowed_call_sites": ["plan"]},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _ReasoningOnlyModelManager()
+
+            output = asyncio.run(
+                agent._model_chat(
+                    "planner",
+                    [{"role": "user", "content": "plan"}],
+                    call_site="plan",
+                )
+            )
+
+            self.assertEqual(output, "")
+            self.assertNotIn("Rejected reasoning-only", "\n".join(state.notes))
+
+    def test_plan_falls_back_after_reasoning_only_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -m pytest -q"],
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _ReasoningOnlyModelManager()
+
+            asyncio.run(agent.plan())
+
+            self.assertEqual(state.current, AgentStateName.READ)
+            self.assertIn("# Fallback Plan", state.plan_markdown)
+            self.assertIn("PLAN model call failed", "\n".join(state.notes))
+
+    def test_read_falls_back_to_configured_files_after_json_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 1\n")
+            state = AgentState(repo_root=repo, user_request="test")
+            state.plan_markdown = "Plan"
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"writable_files": ["target.py"]},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _BadJsonModelManager()
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            self.assertEqual(state.planned_files, ["target.py"])
+            self.assertEqual([snap.path for snap in state.file_context], ["target.py"])
+            self.assertIn("READ decision failed", "\n".join(state.notes))
+
+    def test_read_notes_empty_fallback_after_json_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            state.plan_markdown = "Plan"
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _BadJsonModelManager()
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            self.assertEqual(state.planned_files, [])
+            self.assertIn("READ fallback file list is empty", "\n".join(state.notes))
+
+    def test_test_decision_falls_back_to_pytest_result_after_json_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.TEST,
+                max_loops=1,
+            )
+            state.scratch["applied_changes"] = 1
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _BadJsonModelManager()
+
+            async def test_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.test()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(test_once())
+
+            self.assertEqual(state.current, AgentStateName.DONE)
+            self.assertIn("TEST decision failed", "\n".join(state.notes))
 
     def test_reasoning_lane_routes_freeform_calls_without_touching_json_or_coder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1757,6 +2030,16 @@ Background / non-constraints
             self.assertEqual(result.loop_count, 1)
             self.assertEqual(target.read_text(), "value = 'old'\n")
 
+    def test_shipped_deterministic_configs_enable_rejected_candidate_retries(self) -> None:
+        for config_path in Path("config").glob("*.json"):
+            with self.subTest(config=str(config_path)):
+                workflow = json.loads(config_path.read_text()).get("workflow", {})
+                if workflow.get("deterministic_test_decision"):
+                    self.assertTrue(
+                        workflow.get("retry_rejected_candidates"),
+                        f"{config_path} can stop after one rejected candidate",
+                    )
+
     def test_bad_coder_json_is_rejected_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2152,6 +2435,32 @@ Background / non-constraints
             artifact = json.loads((repo / record["artifact_path"]).read_text())
             self.assertIn("diagnostics", artifact)
             self.assertIn("OBS instructions=7", artifact["diagnostics"][0]["output"])
+
+    def test_missing_diagnostic_script_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "diagnostic_commands": [
+                        {
+                            "name": "missing-stats",
+                            "command": "python3 tools/generated_kernel_stats.py",
+                        }
+                    ]
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            results = asyncio.run(agent._run_diagnostic_commands())
+
+            self.assertEqual(results[0]["exit_code"], 0)
+            self.assertTrue(results[0]["skipped"])
+            self.assertIn("missing diagnostic file", results[0]["stdout"])
+            self.assertIn("Diagnostic missing-stats skipped", "\n".join(state.notes))
 
     def test_soft_todo_still_formats_observation_chain_for_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -69,7 +69,8 @@ Do not write code. Analyze only the latest rejected attempt and feedback.
 Output exactly 1-3 concise Markdown bullets:
 - why the previous attempt failed
 - what must change in the next CODE attempt
-- what pattern must not be repeated"""
+- what pattern must not be repeated
+Always emit final content. Do not end after hidden reasoning."""
 
 BRAINSTORM_SYSTEM = """You are the BRAINSTORM node in a local coding-agent FSM.
 The search is stuck in a local minimum. Do not write code.
@@ -90,7 +91,8 @@ Each tactic must:
 - put only secondary or uncertain category names after "new_axis_suggestion:"
 - include one concrete implementation hook in the supplied source
 - include one spec_task_id line when the tactic maps to a Run-local spec task
-Keep each tactic to 2 short sentences."""
+Keep each tactic to 2 short sentences.
+Always emit final content. Do not end after hidden reasoning."""
 
 CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
 Use only the supplied plan, source files, external advisory context, and latest
@@ -100,6 +102,8 @@ Output strict JSON:
 Rules:
 - Modify only listed files.
 - Prefer exact target/replacement snippets.
+- For every replacement edit, copy the target verbatim from the current supplied source.
+- Do not invent or paraphrase a replacement target; stale targets will be rejected.
 - Use "patch" only if target/replacement is impossible.
 - Use full-file "content" only for very small files.
 - Preserve existing public behavior unless the plan says otherwise.
@@ -134,6 +138,7 @@ Rules:
 - Never replace an entire function or class.
 - Prefer a tiny local edit around the immediate bottleneck.
 - The <search> block must match existing code exactly, including whitespace.
+- Copy <search> verbatim from the current supplied source; do not paraphrase stale code.
 - Put raw code inside <search> and <replace>; do not JSON-escape quotes or newlines.
 - Do not add markdown fences or prose outside <candidates>.
 - Do not output comment-only, formatting-only, or explanatory placeholder changes."""
