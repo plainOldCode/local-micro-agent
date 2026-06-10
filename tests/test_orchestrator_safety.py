@@ -420,6 +420,42 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertFalse(response.usage["reasoning_only_response"])
         self.assertEqual(response.usage["completion_tokens"], 3)
 
+    def test_openai_stream_marks_reasoning_only_response(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                rows = [
+                    'data: {"choices":[{"delta":{"reasoning_content":"think-a"}}]}',
+                    'data: {"choices":[{"delta":{"reasoning_content":"think-b"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}',
+                    "data: [DONE]",
+                ]
+                return iter((f"{row}\n".encode("utf-8") for row in rows))
+
+        original = model_module.urllib.request.urlopen
+        model_module.urllib.request.urlopen = lambda request, timeout: FakeResponse()
+        try:
+            chunks: list[object] = []
+            response = model_module._post_openai_stream(
+                "http://localhost:1234/v1/chat/completions",
+                {"model": "fake", "messages": [], "stream": True},
+                {},
+                30,
+                chunks.append,
+            )
+        finally:
+            model_module.urllib.request.urlopen = original
+
+        self.assertEqual(response.content, "")
+        self.assertEqual(chunks, ["think-a", "think-b"])
+        self.assertEqual(response.usage["reasoning_content_chars"], len("think-athink-b"))
+        self.assertTrue(response.usage["reasoning_only_response"])
+        self.assertEqual(response.usage["completion_tokens"], 3)
+
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
             "model": "local",
@@ -740,6 +776,52 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertIn("Rejected reasoning-only", "\n".join(state.notes))
 
+    def test_reasoning_only_allowed_call_site_bypasses_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"reasoning_only_allowed_call_sites": ["plan"]},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _ReasoningOnlyModelManager()
+
+            output = asyncio.run(
+                agent._model_chat(
+                    "planner",
+                    [{"role": "user", "content": "plan"}],
+                    call_site="plan",
+                )
+            )
+
+            self.assertEqual(output, "")
+            self.assertNotIn("Rejected reasoning-only", "\n".join(state.notes))
+
+    def test_plan_falls_back_after_reasoning_only_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -m pytest -q"],
+                },
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _ReasoningOnlyModelManager()
+
+            asyncio.run(agent.plan())
+
+            self.assertEqual(state.current, AgentStateName.READ)
+            self.assertIn("# Fallback Plan", state.plan_markdown)
+            self.assertIn("PLAN model call failed", "\n".join(state.notes))
+
     def test_read_falls_back_to_configured_files_after_json_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -767,6 +849,32 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(state.planned_files, ["target.py"])
             self.assertEqual([snap.path for snap in state.file_context], ["target.py"])
             self.assertIn("READ decision failed", "\n".join(state.notes))
+
+    def test_read_notes_empty_fallback_after_json_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state = AgentState(repo_root=repo, user_request="test")
+            state.plan_markdown = "Plan"
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {},
+            }
+            agent = MicroAgent(config, state)
+            agent.models = _BadJsonModelManager()
+
+            async def read_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(read_once())
+
+            self.assertEqual(state.planned_files, [])
+            self.assertIn("READ fallback file list is empty", "\n".join(state.notes))
 
     def test_test_decision_falls_back_to_pytest_result_after_json_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

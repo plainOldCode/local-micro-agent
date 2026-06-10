@@ -466,13 +466,37 @@ class MicroAgent:
         workflow_context = self._workflow_plan_context()
         if workflow_context:
             project_context = "\n\n".join(part for part in [project_context, workflow_context] if part)
-        output = await self._model_chat(
-            "planner",
-            plan_prompt(self.state, project_context),
-            call_site="plan",
-        )
+        try:
+            output = await self._model_chat(
+                "planner",
+                plan_prompt(self.state, project_context),
+                call_site="plan",
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"PLAN model call failed; using fallback plan: {type(exc).__name__}: {exc}"
+            )
+            output = self._fallback_plan_markdown(project_context)
         self.state.plan_markdown = output.strip()
         self.state.current = AgentStateName.READ
+
+    def _fallback_plan_markdown(self, project_context: str = "") -> str:
+        workflow = self.config.get("workflow", {})
+        files = workflow.get("read_fallback_files") or workflow.get("writable_files") or []
+        file_lines = "\n".join(f"- `{path}`" for path in files) or "- Use READ fallback files."
+        tests = workflow.get("test_commands") or []
+        test_lines = "\n".join(f"- `{command}`" for command in tests) or "- Run configured tests."
+        return (
+            "# Fallback Plan\n\n"
+            "## Files to read or modify\n"
+            f"{file_lines}\n\n"
+            "## Ordered implementation steps\n"
+            "1. Read the configured source files and current workflow constraints.\n"
+            "2. Make the smallest correctness-preserving change requested by the task.\n"
+            "3. Validate with the configured test and metric commands.\n\n"
+            "## Test commands\n"
+            f"{test_lines}\n"
+        )
 
     async def read(self) -> None:
         seeded_files = self.config.get("workflow", {}).get("seed_files")
@@ -487,6 +511,10 @@ class MicroAgent:
                     "READ decision failed; falling back to configured files: "
                     f"{exc}"
                 )
+                if not fallback_files:
+                    self.state.notes.append(
+                        "READ fallback file list is empty; CODE will run without source context"
+                    )
                 decision = ReadDecision(files=fallback_files, reason="fallback after READ failure")
         self.state.planned_files = self._filter_read_files(decision.files)
         self.state.file_context = []

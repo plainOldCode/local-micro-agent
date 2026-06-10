@@ -164,6 +164,7 @@ def _post_openai_stream(
     usage = _openai_usage(done_data)
     if reasoning_chunks:
         usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
+        usage["reasoning_only_response"] = not bool(chunks)
     return ModelResponse("".join(chunks), usage=usage)
 
 
@@ -250,6 +251,8 @@ class OpenAICompatibleModel:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        # Precedence is base payload < extra_options < explicit thinking flags < extra_body.
+        # Keep extra_body last so provider-specific request bodies can deliberately override.
         payload.update(self.extra_options)
         if self.think is not None:
             payload["think"] = self.think
@@ -274,7 +277,26 @@ class OpenAICompatibleModel:
             self.timeout_seconds,
         )
         content = _openai_chat_content(data)
-        return ModelResponse(content, usage=_openai_usage(data))
+        usage = _openai_usage(data)
+        choices = data.get("choices")
+        message = (
+            choices[0].get("message")
+            if isinstance(choices, list)
+            and choices
+            and isinstance(choices[0], dict)
+            and isinstance(choices[0].get("message"), dict)
+            else {}
+        )
+        reasoning = (
+            message.get("reasoning_content")
+            or message.get("thinking")
+            or message.get("reasoning")
+            or ""
+        )
+        if reasoning:
+            usage["reasoning_content_chars"] = len(reasoning)
+            usage["reasoning_only_response"] = not bool(content)
+        return ModelResponse(content, usage=usage)
 
 
 @dataclass(frozen=True)
