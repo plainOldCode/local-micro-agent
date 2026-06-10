@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -553,7 +554,7 @@ class TodoLifecycleMixin:
                 )
                 data = parse_json_object(output)
                 files = self._normalize_acceptance_files(data, task_id)
-                commands = self._normalize_acceptance_commands(data, rel_task_dir)
+                commands = self._acceptance_commands_for_task_dir(rel_task_dir)
             except Exception as exc:
                 self.state.notes.append(
                     f"Acceptance synth failed for {task_id} attempt {attempt}: {type(exc).__name__}: {exc}"
@@ -639,18 +640,21 @@ class TodoLifecycleMixin:
             files.append((path.as_posix(), content))
         return files
 
-    @staticmethod
-    def _normalize_acceptance_commands(data: dict[str, Any], rel_task_dir: str) -> list[str]:
-        raw_commands = data.get("commands")
-        if isinstance(raw_commands, list):
-            commands = [
-                command
-                for command in (str(command).strip() for command in raw_commands)
-                if command and rel_task_dir in command
-            ]
-            if commands:
-                return commands
-        return [f"python3 -m pytest {rel_task_dir} -q"]
+    def _acceptance_commands_for_task_dir(self, rel_task_dir: str) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        template = str(
+            workflow.get(
+                "spec_acceptance_command_template",
+                "python3 -m unittest discover -s {quoted_dir} -p 'test*.py'",
+            )
+        ).strip()
+        if not template:
+            template = "python3 -m unittest discover -s {quoted_dir} -p 'test*.py'"
+        command = template.format(
+            dir=rel_task_dir,
+            quoted_dir=shlex.quote(rel_task_dir),
+        ).strip()
+        return [command] if command else []
 
     async def _preflight_acceptance_files(self, paths: list[str]) -> list[TestResult]:
         candidate = CodeCandidate(

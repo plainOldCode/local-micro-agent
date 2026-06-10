@@ -70,14 +70,15 @@ Output strict JSON:
 {
   "files": [
     {"path": "test_task.py", "content": "test code"}
-  ],
-  "commands": ["python3 -m pytest .lma_acceptance/task-001 -q"]
+  ]
 }
 Rules:
 - Paths must be relative filenames, not absolute paths.
 - Write only test files for the current task.
+- Use Python stdlib unittest-compatible tests unless the task explicitly requires another format.
 - Each concrete requirement needs at least one specific assertion or input/output pair.
 - Tests must fail before the task implementation exists or is completed.
+- Do not output shell commands; the controller will build the acceptance command.
 - Do not test private model reasoning or unrelated behavior.
 - No markdown fences, no commentary outside JSON."""
 

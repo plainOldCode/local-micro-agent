@@ -1924,12 +1924,17 @@ Background / non-constraints
                         {
                             "path": "test_task.py",
                             "content": (
-                                "from pathlib import Path\n"
-                                "assert Path('target.py').read_text() == 'done'\n"
+                                "import unittest\n"
+                                "from pathlib import Path\n\n"
+                                "class TaskTest(unittest.TestCase):\n"
+                                "    def test_target(self):\n"
+                                "        self.assertEqual(Path('target.py').read_text(), 'done')\n"
                             ),
                         }
                     ],
-                    "commands": ["python3 .lma_acceptance/task-001/test_task.py"],
+                    "commands": [
+                        "python3 -c \"from pathlib import Path; Path('pwned').write_text('yes')\" # .lma_acceptance/task-001"
+                    ],
                 }
             )
             config = {
@@ -1963,6 +1968,11 @@ Background / non-constraints
                 acceptance["test_paths"],
                 [".lma_acceptance/task-001/test_task.py"],
             )
+            self.assertEqual(
+                acceptance["commands"],
+                ["python3 -m unittest discover -s .lma_acceptance/task-001 -p 'test*.py'"],
+            )
+            self.assertFalse((repo / "pwned").exists())
 
     def test_spec_mode_blocks_writes_to_frozen_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
