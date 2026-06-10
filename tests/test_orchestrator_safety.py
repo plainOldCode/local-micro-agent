@@ -6039,6 +6039,136 @@ value = 'fast'
             self.assertIsNone(updated["active_todo_id"])
             self.assertIn("third valid probe still did not improve", failed)
 
+    def test_candidate_preflight_rejects_escaped_python_entities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("if value &lt; 2:\n    result = value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"writable_files": ["target.py"]},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            candidate = CodeCandidate(
+                "escaped",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="escaped operator",
+                        target="if value < 2:\n    result = value\n",
+                        replacement="if value &lt; 2:\n    result = value\n",
+                    )
+                ],
+                "escaped operator",
+            )
+
+            async def run_preflight() -> list[TestResult]:
+                await agent.mcp.start()
+                try:
+                    return await agent._run_candidate_preflight(candidate, {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            results = asyncio.run(run_preflight())
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].command, "preflight:html-entities target.py")
+            self.assertIn("HTML entity '&lt;'", results[0].stderr)
+
+    def test_candidate_preflight_rejects_python_syntax_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("def build():\n    if True print('bad')\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"writable_files": ["target.py"]},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            candidate = CodeCandidate(
+                "syntax",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="bad syntax",
+                        target="def build():\n    pass\n",
+                        replacement="def build():\n    if True print('bad')\n",
+                    )
+                ],
+                "bad syntax",
+            )
+
+            async def run_preflight() -> list[TestResult]:
+                await agent.mcp.start()
+                try:
+                    return await agent._run_candidate_preflight(candidate, {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            results = asyncio.run(run_preflight())
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].command, "preflight:syntax target.py")
+            self.assertIn("SyntaxError in target.py", results[0].stderr)
+            self.assertIn("if True print('bad')", results[0].stderr)
+
+    def test_exact_context_refresh_is_queued_after_target_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def build():\n"
+                "    value = 1\n"
+                "    return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"writable_files": ["target.py"]},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="retarget from current source",
+                        target="def build():\n    value = 2\n    return value\n",
+                        replacement="def build():\n    value = 3\n    return value\n",
+                    )
+                ],
+                "retarget from current source",
+            )
+
+            async def queue_refresh() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._record_exact_context_refresh_request(
+                        candidate,
+                        "Replacement target not found: target.py",
+                        {"target.py"},
+                    )
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(queue_refresh())
+
+            refresh = agent.state.scratch["exact_context_refresh"]
+            self.assertIn("Replacement target not found: target.py", refresh)
+            self.assertIn("Best current-source excerpt", refresh)
+            self.assertIn("value = 1", refresh)
+
 
 if __name__ == "__main__":
     unittest.main()

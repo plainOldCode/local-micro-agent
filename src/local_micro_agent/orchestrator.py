@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import difflib
 import json
@@ -294,6 +295,15 @@ class MicroAgent(
                         "and the 'N: ' prefix are not part of the file content; never "
                         "include them in target/search/replace text.\n"
                         f"{current_source_context}"
+                    )
+                exact_refresh = self.state.scratch.pop("exact_context_refresh", "")
+                if exact_refresh:
+                    add_runtime_context(
+                        "Exact context refresh follows because a previous candidate "
+                        "missed its target/search block or changed only comments/blank "
+                        "lines. The next candidate must copy target/search text from "
+                        "the current-source excerpt below, not from stale memory.\n"
+                        f"{exact_refresh}"
                     )
                 if self.config.get("workflow", {}).get("candidate_queue"):
                     messages = [*messages, self._candidate_queue_message(output_format)]
@@ -699,6 +709,11 @@ class MicroAgent(
                         applied=0,
                         failed=True,
                     )
+                    await self._record_exact_context_refresh_request(
+                        candidate_for_record,
+                        no_change_reason,
+                        allowed,
+                    )
                     continue
                 candidate = candidate_for_record
             else:
@@ -710,7 +725,9 @@ class MicroAgent(
                     f"Candidate {candidate.candidate_id} is repair of {repair_parent_id}"
                 )
 
-            results = await self._run_test_commands()
+            results = await self._run_candidate_preflight(candidate, allowed)
+            if not results:
+                results = await self._run_test_commands()
             failed = any(result.exit_code != 0 for result in results)
             metric = self._metric_from_results(results)
             if metric is None:
@@ -772,6 +789,11 @@ class MicroAgent(
                 failed=failed,
             )
             if failed or not improved:
+                await self._record_exact_context_refresh_request(
+                    candidate,
+                    failure_detail,
+                    allowed,
+                )
                 self._remember_rejected_candidate(candidate)
                 continue
 
@@ -842,6 +864,122 @@ class MicroAgent(
             )
             results.append(TestResult(**result))
         return results
+
+    async def _run_candidate_preflight(
+        self, candidate: CodeCandidate, allowed: set[str]
+    ) -> list[TestResult]:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("candidate_syntax_preflight", True) is False:
+            return []
+        paths = sorted(
+            {
+                change.path
+                for change in candidate.changes
+                if change.path in allowed and str(change.path).endswith(".py")
+            }
+        )
+        results: list[TestResult] = []
+        for rel_path in paths:
+            try:
+                content = await self.mcp.read_file(str(self.state.repo_root / rel_path))
+            except FileNotFoundError:
+                continue
+            entity_error = ""
+            if workflow.get("candidate_html_entity_preflight", True) is not False:
+                entity_error = self._html_entity_preflight_error(content)
+            if entity_error:
+                result = TestResult(
+                    command=f"preflight:html-entities {rel_path}",
+                    exit_code=1,
+                    stderr=entity_error,
+                )
+                self.state.notes.append(
+                    f"Candidate preflight failed for {rel_path}: {entity_error}"
+                )
+                results.append(result)
+                continue
+            try:
+                ast.parse(content, filename=rel_path)
+            except SyntaxError as exc:
+                line = exc.lineno or 0
+                excerpt = self._source_error_excerpt(content, line)
+                stderr = (
+                    f"SyntaxError in {rel_path}:{line}:{exc.offset or 0}: {exc.msg}\n"
+                    f"{excerpt}"
+                )
+                result = TestResult(
+                    command=f"preflight:syntax {rel_path}",
+                    exit_code=1,
+                    stderr=stderr,
+                )
+                self.state.notes.append(
+                    f"Candidate preflight failed for {rel_path}: SyntaxError line {line}"
+                )
+                results.append(result)
+        return results
+
+    async def _run_preflight_for_proposed_changes(self) -> list[TestResult]:
+        if not self.state.proposed_changes:
+            return []
+        candidate = CodeCandidate(
+            "proposed",
+            self.state.proposed_changes,
+            "preflight proposed changes",
+        )
+        return await self._run_candidate_preflight(candidate, self._writable_files())
+
+    @staticmethod
+    def _html_entity_preflight_error(content: str) -> str:
+        entity_pattern = re.compile(r"&(?:lt|gt|amp|quot|apos);")
+        match = entity_pattern.search(content)
+        if match is None:
+            return ""
+        line = content.count("\n", 0, match.start()) + 1
+        return (
+            f"HTML entity {match.group(0)!r} found in Python source at line {line}; "
+            "model likely escaped code. Use literal Python operators instead."
+        )
+
+    @staticmethod
+    def _source_error_excerpt(content: str, line: int, context: int = 3) -> str:
+        lines = content.splitlines()
+        if line <= 0:
+            return ""
+        start = max(line - context, 1)
+        end = min(line + context, len(lines))
+        return "\n".join(
+            f"{index}: {lines[index - 1]}" for index in range(start, end + 1)
+        )
+
+    async def _record_exact_context_refresh_request(
+        self, candidate: CodeCandidate, failure_detail: str, allowed: set[str]
+    ) -> None:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("exact_context_refresh_after_patch_miss", True) is False:
+            return
+        indicators = workflow.get(
+            "exact_context_refresh_indicators",
+            [
+                "target not found",
+                "comment",
+                "blank",
+                "no writable file content changed",
+            ],
+        )
+        if isinstance(indicators, str):
+            indicators = [indicators]
+        detail_lower = failure_detail.lower()
+        if not any(str(indicator).lower() in detail_lower for indicator in indicators):
+            return
+        context = await self._candidate_repair_source_context(candidate, allowed)
+        if not context:
+            return
+        limit = int(workflow.get("exact_context_refresh_char_limit", 12000) or 12000)
+        self.state.scratch["exact_context_refresh"] = (
+            f"Failure detail:\n{self._truncate_text(failure_detail, 1600)}\n\n"
+            f"{self._truncate_text(context, limit)}"
+        )
+        self.state.notes.append("Queued exact context refresh for next CODE attempt")
 
     async def _run_diagnostic_commands(self, when: str = "after_test") -> list[dict[str, Any]]:
         specs = self._diagnostic_command_specs(when=when)
@@ -1013,7 +1151,9 @@ class MicroAgent(
         }
 
     async def test(self) -> None:
-        self.state.test_results = await self._run_test_commands()
+        self.state.test_results = await self._run_preflight_for_proposed_changes()
+        if not self.state.test_results:
+            self.state.test_results = await self._run_test_commands()
         failed = False
         for result in self.state.test_results:
             failed = failed or result.exit_code != 0
