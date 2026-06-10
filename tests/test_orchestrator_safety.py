@@ -518,6 +518,59 @@ class OrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual(response.content, " \n")
         self.assertTrue(response.usage["reasoning_only_response"])
 
+    def test_model_token_budget_fields_warn_near_input_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {"prompt_token_budget_warn_ratio": 0.9},
+            }
+            agent = MicroAgent(config, state)
+
+            fields = agent._model_token_budget_fields(
+                {"num_ctx": 100, "max_tokens": 20},
+                {"prompt_tokens": 75},
+                prompt_chars=0,
+                role="coder",
+                call_site="json_call",
+            )
+
+            self.assertEqual(fields["input_token_budget"], 80)
+            self.assertTrue(fields["input_token_budget_warning"])
+            self.assertIn("Prompt token budget pressure", "\n".join(state.notes))
+
+    def test_dynamic_suffix_blocks_shrink_to_input_token_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            config = {
+                "models": {"coder": "local"},
+                "providers": {
+                    "local": {
+                        "kind": "ollama_native",
+                        "num_ctx": 100,
+                        "max_tokens": 20,
+                    }
+                },
+                "mcp_servers": {},
+                "workflow": {
+                    "prompt_chars_per_token_estimate": 1,
+                    "prompt_token_budget_target_ratio": 0.5,
+                },
+            }
+            agent = MicroAgent(config, state)
+            blocks = ["a" * 1000, "b" * 1000]
+
+            shrunk = agent._shrink_dynamic_suffix_blocks(
+                [{"role": "system", "content": "stable"}],
+                blocks,
+                role="coder",
+            )
+
+            self.assertLess(sum(len(block) for block in shrunk), sum(len(block) for block in blocks))
+            self.assertIn("Shrank dynamic CODE context", "\n".join(state.notes))
+
     def test_openai_stream_payload_preserves_include_usage_default(self) -> None:
         payload = {
             "model": "local",

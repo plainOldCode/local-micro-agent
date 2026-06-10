@@ -188,6 +188,14 @@ class MicroAgent:
             raise
         output, usage = self._normalize_model_response(response)
         elapsed_seconds = max(time.perf_counter() - start["perf"], 0.0)
+        usage_fields = self._profile_model_usage_fields(usage, elapsed_seconds)
+        budget_fields = self._model_token_budget_fields(
+            provider,
+            usage,
+            prompt_chars=prompt_chars,
+            role=role,
+            call_site=call_site,
+        )
         self._record_profile_span(
             "model_call",
             start,
@@ -203,7 +211,8 @@ class MicroAgent:
                 "output_chars": len(output),
                 "success": True,
                 **stream_stats,
-                **self._profile_model_usage_fields(usage, elapsed_seconds),
+                **usage_fields,
+                **budget_fields,
             },
         )
         if self._reject_reasoning_only_response(output, usage, role=role, call_site=call_site):
@@ -262,6 +271,98 @@ class MicroAgent:
         if reasoning_role not in self.config.get("models", {}):
             return role
         return reasoning_role
+
+    def _provider_for_role(self, role: str) -> dict[str, Any]:
+        model_name = self.config.get("models", {}).get(role) or self.config.get(
+            "models", {}
+        ).get("default")
+        provider = self.config.get("providers", {}).get(str(model_name), {})
+        return provider if isinstance(provider, dict) else {}
+
+    def _input_token_budget(self, provider: dict[str, Any]) -> int | None:
+        num_ctx = provider.get("num_ctx")
+        max_tokens = provider.get("max_tokens")
+        if not isinstance(num_ctx, int) or num_ctx <= 0:
+            return None
+        if not isinstance(max_tokens, int) or max_tokens < 0:
+            max_tokens = 0
+        return max(num_ctx - max_tokens, 1)
+
+    def _prompt_chars_per_token(self) -> float:
+        return float(
+            self.config.get("workflow", {}).get("prompt_chars_per_token_estimate", 3.5)
+            or 3.5
+        )
+
+    def _model_token_budget_fields(
+        self,
+        provider: dict[str, Any],
+        usage: dict[str, Any],
+        *,
+        prompt_chars: int,
+        role: str,
+        call_site: str,
+    ) -> dict[str, Any]:
+        input_budget = self._input_token_budget(provider)
+        if input_budget is None:
+            return {}
+        prompt_tokens = usage.get("prompt_tokens")
+        estimated = False
+        if not isinstance(prompt_tokens, (int, float)) or prompt_tokens < 0:
+            prompt_tokens = prompt_chars / self._prompt_chars_per_token()
+            estimated = True
+        ratio = float(prompt_tokens) / float(input_budget)
+        fields: dict[str, Any] = {
+            "input_token_budget": input_budget,
+            "input_token_budget_used_ratio": round(ratio, 4),
+        }
+        if estimated:
+            fields["prompt_tokens_estimated"] = int(prompt_tokens)
+        warn_ratio = float(
+            self.config.get("workflow", {}).get("prompt_token_budget_warn_ratio", 0.9)
+            or 0.9
+        )
+        if ratio >= warn_ratio:
+            fields["input_token_budget_warning"] = True
+            note = (
+                "Prompt token budget pressure: "
+                f"role={role} call_site={call_site or 'chat'} "
+                f"prompt_tokens={'~' if estimated else ''}{int(prompt_tokens)} "
+                f"budget={input_budget} ratio={ratio:.2f}"
+            )
+            self.state.notes.append(note)
+            self._log(note)
+        return fields
+
+    def _shrink_dynamic_suffix_blocks(
+        self,
+        stable_messages: list[dict[str, str]],
+        dynamic_blocks: list[str],
+        *,
+        role: str,
+    ) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("auto_shrink_dynamic_context", True) is False:
+            return dynamic_blocks
+        if not dynamic_blocks:
+            return dynamic_blocks
+        provider = self._provider_for_role(role)
+        input_budget = self._input_token_budget(provider)
+        if input_budget is None:
+            return dynamic_blocks
+        target_ratio = float(workflow.get("prompt_token_budget_target_ratio", 0.85) or 0.85)
+        char_budget = int(input_budget * self._prompt_chars_per_token() * target_ratio)
+        stable_chars = sum(len(str(message.get("content", ""))) for message in stable_messages)
+        dynamic_budget = char_budget - stable_chars
+        dynamic_chars = sum(len(block) for block in dynamic_blocks)
+        if dynamic_budget <= 0 or dynamic_chars <= dynamic_budget:
+            return dynamic_blocks
+        per_block = max(500, dynamic_budget // max(len(dynamic_blocks), 1))
+        self.state.notes.append(
+            "Shrank dynamic CODE context for prompt budget: "
+            f"dynamic_chars={dynamic_chars} budget={dynamic_budget}"
+        )
+        return [self._slice_text(block, per_block) for block in dynamic_blocks]
 
     @staticmethod
     def _normalize_model_response(response: Any) -> tuple[str, dict[str, Any]]:
@@ -1854,6 +1955,11 @@ class MicroAgent:
                         f"{history}"
                     )
                 if dynamic_suffix_blocks:
+                    dynamic_suffix_blocks = self._shrink_dynamic_suffix_blocks(
+                        messages,
+                        dynamic_suffix_blocks,
+                        role="coder",
+                    )
                     messages = [
                         *messages,
                         {
