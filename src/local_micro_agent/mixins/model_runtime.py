@@ -126,6 +126,12 @@ class ModelRuntimeMixin:
 
     def _model_role_for_call_site(self, role: str, call_site: str) -> str:
         workflow = self.config.get("workflow", {})
+        deep_role = self._deep_reasoning_role_for_call_site(role, call_site)
+        if deep_role is not None:
+            return deep_role
+        override_role = self._model_role_override_for_call_site(call_site)
+        if override_role is not None:
+            return override_role
         if not workflow.get("reasoning_lane_enabled", False):
             return role
         call_sites = workflow.get(
@@ -148,6 +154,99 @@ class ModelRuntimeMixin:
         if reasoning_role not in self.config.get("models", {}):
             return role
         return reasoning_role
+
+    def _model_role_override_for_call_site(self, call_site: str) -> str | None:
+        if not call_site:
+            return None
+        workflow = self.config.get("workflow", {})
+        overrides = workflow.get("model_role_overrides_by_call_site", {})
+        if not isinstance(overrides, dict):
+            return None
+        override = str(overrides.get(call_site) or "").strip()
+        if not override or override not in self.config.get("models", {}):
+            return None
+        return override
+
+    def _deep_reasoning_role_for_call_site(
+        self, role: str, call_site: str
+    ) -> str | None:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("deep_reasoning_enabled", False):
+            return None
+        call_sites = workflow.get("deep_reasoning_call_sites", ["reflect"])
+        if isinstance(call_sites, str):
+            call_sites = [call_sites]
+        if call_site not in {str(item) for item in call_sites if str(item).strip()}:
+            return None
+        excluded_roles = workflow.get(
+            "deep_reasoning_excluded_roles", ["coder", "brainstorm", "tester"]
+        )
+        if isinstance(excluded_roles, str):
+            excluded_roles = [excluded_roles]
+        if role in {str(item) for item in excluded_roles if str(item).strip()}:
+            return None
+        deep_role = str(
+            workflow.get("deep_reasoning_model_role")
+            or workflow.get("reasoning_lane_model_role")
+            or "reasoner"
+        ).strip()
+        if not deep_role or deep_role not in self.config.get("models", {}):
+            return None
+        if not self._deep_reasoning_triggered(call_site):
+            return None
+        self.state.notes.append(
+            f"Escalating model call to deep reasoning: call_site={call_site} role={deep_role}"
+        )
+        return deep_role
+
+    def _deep_reasoning_triggered(self, call_site: str) -> bool:
+        workflow = self.config.get("workflow", {})
+        if bool(workflow.get("deep_reasoning_always")):
+            return True
+        failure_threshold = int(
+            workflow.get("deep_reasoning_after_same_failure_class", 0) or 0
+        )
+        if failure_threshold > 0:
+            counts = self.state.scratch.get("retry_failure_class_counts")
+            if isinstance(counts, dict):
+                for value in counts.values():
+                    try:
+                        if int(value) >= failure_threshold:
+                            return True
+                    except (TypeError, ValueError):
+                        continue
+        no_improvement_threshold = int(
+            workflow.get("deep_reasoning_after_no_improvement_loops", 0) or 0
+        )
+        invariant_threshold = int(
+            workflow.get("deep_reasoning_after_invariant_failures", 0) or 0
+        )
+        if no_improvement_threshold <= 0 and invariant_threshold <= 0:
+            return False
+        records_method = getattr(self, "_candidate_history_records", None)
+        if not callable(records_method):
+            return False
+        limit = max(no_improvement_threshold, invariant_threshold, 1)
+        records = records_method(limit=limit)
+        if no_improvement_threshold > 0 and len(records) >= no_improvement_threshold:
+            baseline = self.config.get("workflow", {}).get("baseline_metric")
+            improved = False
+            for record in records[-no_improvement_threshold:]:
+                metric = record.get("metric")
+                if isinstance(metric, (int, float)) and isinstance(baseline, (int, float)):
+                    improved = metric < baseline
+                elif str(record.get("status", "")) in {"accepted", "improved"}:
+                    improved = True
+                if improved:
+                    break
+            if not improved:
+                return True
+        if invariant_threshold > 0 and len(records) >= invariant_threshold:
+            recent = records[-invariant_threshold:]
+            hard_failures = {"correctness_failure", "invariant_broken"}
+            if all(str(record.get("failure_class", "")) in hard_failures for record in recent):
+                return True
+        return False
 
     def _provider_for_role(self, role: str) -> dict[str, Any]:
         model_name = self.config.get("models", {}).get(role) or self.config.get(

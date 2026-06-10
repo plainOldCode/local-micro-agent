@@ -1083,6 +1083,83 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertEqual(len(models.seen["coder"]), 1)
             self.assertNotIn("reflector", models.seen)
 
+    def test_call_site_model_override_keeps_reflect_on_fast_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {
+                    "default": "exact",
+                    "reflector": "reflect-fast",
+                    "reasoner": "deep-reason",
+                },
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reasoning_lane_enabled": True,
+                    "reasoning_lane_call_sites": ["plan", "semantic_analysis", "reflect"],
+                    "model_role_overrides_by_call_site": {"reflect": "reflector"},
+                },
+            }
+            agent = MicroAgent(config, AgentState(repo_root=repo, user_request="test"))
+            models = _RoleModelManager(
+                {
+                    "reflector": "fast reflect",
+                    "reasoner": "deep reasoning",
+                }
+            )
+            agent.models = models
+
+            asyncio.run(
+                agent._model_chat(
+                    "reflector", [{"role": "user", "content": "reflect"}], call_site="reflect"
+                )
+            )
+
+            self.assertEqual(len(models.seen["reflector"]), 1)
+            self.assertNotIn("reasoner", models.seen)
+
+    def test_deep_reasoning_escalates_reflect_after_repeated_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {
+                    "default": "exact",
+                    "reflector": "reflect-fast",
+                    "reasoner": "deep-reason",
+                },
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reasoning_lane_enabled": True,
+                    "reasoning_lane_call_sites": ["plan", "semantic_analysis"],
+                    "model_role_overrides_by_call_site": {"reflect": "reflector"},
+                    "deep_reasoning_enabled": True,
+                    "deep_reasoning_model_role": "reasoner",
+                    "deep_reasoning_call_sites": ["reflect"],
+                    "deep_reasoning_after_same_failure_class": 3,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["retry_failure_class_counts"] = {"correctness_failure": 3}
+            agent = MicroAgent(config, state)
+            models = _RoleModelManager(
+                {
+                    "reflector": "fast reflect",
+                    "reasoner": "deep reasoning",
+                }
+            )
+            agent.models = models
+
+            asyncio.run(
+                agent._model_chat(
+                    "reflector", [{"role": "user", "content": "reflect"}], call_site="reflect"
+                )
+            )
+
+            self.assertEqual(len(models.seen["reasoner"]), 1)
+            self.assertNotIn("reflector", models.seen)
+            self.assertIn("Escalating model call", "\n".join(state.notes))
+
     def test_profile_agent_records_streaming_model_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -1,11 +1,11 @@
 {
   "models": {
     "default": "qwen36_a3b_ollama",
-    "planner": "qwen36_a3b_reason",
+    "planner": "qwen36_a3b_deep_reason",
     "coder": "qwen36_a3b_ollama",
-    "brainstorm": "qwen36_a3b_explore",
-    "reasoner": "qwen36_a3b_reason",
-    "reflector": "qwen36_a3b_reason",
+    "brainstorm": "qwen36_a3b_brainstorm_fast",
+    "reasoner": "qwen36_a3b_deep_reason",
+    "reflector": "qwen36_a3b_reflect_fast",
     "tester": "qwen36_a3b_ollama"
   },
   "providers": {
@@ -19,7 +19,7 @@
       "think": false,
       "timeout_seconds": 360
     },
-    "qwen36_a3b_reason": {
+    "qwen36_a3b_deep_reason": {
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:35b-a3b-coding-mxfp8",
@@ -34,15 +34,30 @@
         "min_p": 0
       }
     },
-    "qwen36_a3b_explore": {
+    "qwen36_a3b_reflect_fast": {
+      "kind": "ollama_native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3.6:35b-a3b-coding-mxfp8",
+      "temperature": 0.2,
+      "max_tokens": 2048,
+      "num_ctx": 64000,
+      "think": false,
+      "timeout_seconds": 240,
+      "extra_options": {
+        "top_p": 0.9,
+        "top_k": 20,
+        "min_p": 0
+      }
+    },
+    "qwen36_a3b_brainstorm_fast": {
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:35b-a3b-coding-mxfp8",
       "temperature": 0.75,
-      "max_tokens": 16384,
+      "max_tokens": 4096,
       "num_ctx": 64000,
-      "think": true,
-      "timeout_seconds": 600,
+      "think": false,
+      "timeout_seconds": 360,
       "extra_options": {
         "top_p": 0.95,
         "top_k": 20,
@@ -130,14 +145,30 @@
     "reasoning_lane_model_role": "reasoner",
     "reasoning_lane_call_sites": [
       "plan",
-      "semantic_analysis",
-      "reflect"
+      "semantic_analysis"
     ],
     "reasoning_lane_excluded_roles": [
       "coder",
       "brainstorm",
       "tester"
     ],
+    "model_role_overrides_by_call_site": {
+      "reflect": "reflector",
+      "brainstorm": "brainstorm"
+    },
+    "deep_reasoning_enabled": true,
+    "deep_reasoning_model_role": "reasoner",
+    "deep_reasoning_call_sites": [
+      "reflect"
+    ],
+    "deep_reasoning_excluded_roles": [
+      "coder",
+      "brainstorm",
+      "tester"
+    ],
+    "deep_reasoning_after_same_failure_class": 3,
+    "deep_reasoning_after_no_improvement_loops": 8,
+    "deep_reasoning_after_invariant_failures": 2,
     "structural_tactic_lifecycle": true,
     "structural_tactic_soft_failures": 2,
     "structural_state_checkpoint": true,
