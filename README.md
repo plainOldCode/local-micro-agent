@@ -265,7 +265,7 @@ validated pattern before exploring unrelated families.
 to providers with different sampling/thinking settings. Two routing layers:
 
 - `model_role_overrides_by_call_site`: pin a call site to a role, e.g.
-  `{"reflect": "reflector", "brainstorm": "brainstorm", "spec_synth": "reasoner"}`.
+  `{"reflect": "reflector", "brainstorm": "brainstorm", "spec_synth": "spec_synth"}`.
 - `deep_reasoning_enabled=true`: escalate selected call sites (default
   `reflect`) from their fast lane to `deep_reasoning_model_role` only when
   triggered — same failure class repeated
@@ -281,9 +281,29 @@ call sites still applies; exact JSON/patch roles (`coder`, `brainstorm`,
 **Reasoning-only responses are failures.** If a thinking provider returns
 reasoning with empty final content, the call fails and the node takes its
 normal fallback path. Keep iterative output budgets small: the tuned configs
-cap JSON/patch and reasoning lanes at 8K tokens and exploration lanes at 16K —
-a large `max_tokens` on a short controller call invites a full reasoning-only
+cap JSON/patch and reflect-escalation lanes at 8K tokens. One-shot spec
+synthesis may use a larger dedicated lane, but should stay separated from
+retry/reflect lanes so repeated failures cannot burn long thinking budgets.
+A large `max_tokens` on a short controller call invites a full reasoning-only
 burn (`num_predict` includes thinking tokens on Ollama).
+
+**A3B MXFP8 Ollama lane split.** The
+`config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json` profile keeps every
+lane at `num_ctx=64000` to avoid runner reloads. Its default coder/tester lane
+uses `think=false`, `max_tokens=8192`, and low sampling (`temperature=0.15`,
+`top_p=0.9`, `top_k=20`, `min_p=0`) to reduce deterministic duplicate variants
+without making JSON/search-replace output too loose. `reflector` and
+`brainstorm` are fast no-think lanes. `spec_synth` is a separate one-shot
+thinking lane (`temperature=0.6`, `max_tokens=16384`) routed by call-site
+override, leaving `reasoner` as the protected 8K deep-reflect lane.
+
+For A3B model-tuning changes, run a short 10-loop smoke before long searches
+and inspect `profile_events.jsonl`: reasoning-only calls should be zero,
+full-`max_tokens` burns should be zero, patch misses should stay under 20%,
+duplicate variants under 10%, and coder token/sec should be recorded against
+the previous run. Also confirm `ollama ps` shows the expected MLX-loaded A3B
+model; if it silently falls back to another backend, speed assumptions are not
+valid.
 
 **Input token budget.** For providers that declare `num_ctx`, the usable input
 budget is `num_ctx - max_tokens`. Calls near the budget

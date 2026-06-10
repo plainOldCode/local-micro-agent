@@ -6,6 +6,7 @@
     "brainstorm": "qwen36_a3b_brainstorm_fast",
     "reasoner": "qwen36_a3b_deep_reason",
     "reflector": "qwen36_a3b_reflect_fast",
+    "spec_synth": "qwen36_a3b_spec_synth",
     "tester": "qwen36_a3b_ollama"
   },
   "providers": {
@@ -13,11 +14,16 @@
       "kind": "ollama_native",
       "base_url": "http://127.0.0.1:11434",
       "model": "qwen3.6:35b-a3b-coding-mxfp8",
-      "temperature": 0.0,
+      "temperature": 0.15,
       "max_tokens": 8192,
       "num_ctx": 64000,
       "think": false,
-      "timeout_seconds": 360
+      "timeout_seconds": 360,
+      "extra_options": {
+        "top_p": 0.9,
+        "top_k": 20,
+        "min_p": 0
+      }
     },
     "qwen36_a3b_deep_reason": {
       "kind": "ollama_native",
@@ -58,6 +64,21 @@
       "num_ctx": 64000,
       "think": false,
       "timeout_seconds": 360,
+      "extra_options": {
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0
+      }
+    },
+    "qwen36_a3b_spec_synth": {
+      "kind": "ollama_native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen3.6:35b-a3b-coding-mxfp8",
+      "temperature": 0.6,
+      "max_tokens": 16384,
+      "num_ctx": 64000,
+      "think": true,
+      "timeout_seconds": 900,
       "extra_options": {
         "top_p": 0.95,
         "top_k": 20,
@@ -154,7 +175,8 @@
     ],
     "model_role_overrides_by_call_site": {
       "reflect": "reflector",
-      "brainstorm": "brainstorm"
+      "brainstorm": "brainstorm",
+      "spec_synth": "spec_synth"
     },
     "deep_reasoning_enabled": true,
     "deep_reasoning_model_role": "reasoner",
