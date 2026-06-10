@@ -2062,6 +2062,35 @@ class MicroAgent:
                 )
                 continue
 
+            cooled_regions = self._cooled_candidate_regions(candidate)
+            if cooled_regions:
+                self.state.notes.append(
+                    "Candidate "
+                    f"{candidate.candidate_id} rejected: cooled edit regions "
+                    f"{', '.join(cooled_regions)}"
+                )
+                extra = self._candidate_rejection_extra(
+                    candidate,
+                    "rejected_cooled_region",
+                    f"cooled edit regions {', '.join(cooled_regions)}",
+                )
+                self._append_candidate_history(
+                    candidate,
+                    status="rejected_cooled_region",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    extra=extra,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status="rejected_cooled_region",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
             await self._restore_snapshot(baseline_snapshot)
             candidate_for_record = candidate
             repair_parent_id = ""
@@ -2249,6 +2278,14 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("adaptive_search_reject_cooled_axes")) and (
             self._adaptive_search_memory_enabled()
+        )
+
+    def _adaptive_search_reject_cooled_regions_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return (
+            workflow.get("adaptive_search_reject_cooled_regions", True) is not False
+            and self._adaptive_search_memory_enabled()
+            and self._adaptive_search_reject_cooled_axes_enabled()
         )
 
     def _rejected_candidate_fingerprint(self, candidate: CodeCandidate) -> str | None:
@@ -2829,6 +2866,106 @@ class MicroAgent:
                 cooled.append(axis)
         return cooled
 
+    def _cooled_candidate_regions(self, candidate: CodeCandidate) -> list[str]:
+        if not self._adaptive_search_reject_cooled_regions_enabled():
+            return []
+        if self._candidate_matches_selected_tactic(candidate):
+            return []
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            memory = self._adaptive_search_memory_from_history()
+            if memory:
+                self.state.scratch["adaptive_search_memory"] = memory
+        if not isinstance(memory, dict):
+            return []
+        regions_state = memory.get("regions")
+        if not isinstance(regions_state, dict):
+            return []
+        current_loop = self.state.loop_count
+        cooled: list[str] = []
+        for region_key in self._candidate_region_keys(candidate):
+            region_state = regions_state.get(region_key)
+            if not isinstance(region_state, dict):
+                continue
+            cooldown_until = region_state.get("cooldown_until_loop")
+            if isinstance(cooldown_until, int) and cooldown_until > current_loop:
+                cooled.append(region_key)
+        return sorted(cooled)
+
+    def _candidate_region_keys(self, candidate: CodeCandidate) -> list[str]:
+        axes = self._candidate_strategy_axes(candidate)
+        families = sorted(self._candidate_reason_family_aliases(candidate))
+        family = families[0] if families else ""
+        keys: list[str] = []
+        for change in candidate.changes:
+            region = self._change_region_key(change)
+            for axis in axes:
+                suffix = axis if not family else f"{axis}+{family}"
+                keys.append(f"{region}::{suffix}")
+        return sorted(set(keys))
+
+    def _change_region_key(self, change: CodeChange) -> str:
+        path = change.path
+        content = self._current_source_for_region(path)
+        if not content:
+            return f"{path}::file"
+        anchor = change.target or change.patch or change.content or change.reason
+        line_no = self._best_anchor_line_number(content, anchor)
+        symbol = self._python_symbol_at_line(content, line_no)
+        if symbol:
+            return f"{path}::{symbol}"
+        bucket = max(1, ((max(line_no, 1) - 1) // 50) + 1)
+        return f"{path}::lines_{bucket * 50 - 49}_{bucket * 50}"
+
+    def _current_source_for_region(self, path: str) -> str:
+        snapshot = self.state.scratch.get("pre_code_snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get(path), str):
+            return str(snapshot[path])
+        abs_path = self.state.repo_root / path
+        try:
+            return abs_path.read_text(errors="replace")
+        except OSError:
+            return ""
+
+    def _best_anchor_line_number(self, content: str, anchor: str) -> int:
+        if not anchor:
+            return 1
+        index = content.find(anchor)
+        if index >= 0:
+            return content[:index].count("\n") + 1
+        lines = content.splitlines()
+        tokens = self._anchor_tokens(anchor)
+        best_index = 0
+        best_score = -1
+        if tokens:
+            for line_index, line in enumerate(lines):
+                score = len(tokens & self._anchor_tokens(line))
+                if score > best_score:
+                    best_index = line_index
+                    best_score = score
+        return best_index + 1
+
+    @staticmethod
+    def _python_symbol_at_line(content: str, line_no: int) -> str:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return ""
+        best: tuple[int, str] | None = None
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            start = getattr(node, "lineno", None)
+            end = getattr(node, "end_lineno", None)
+            if not isinstance(start, int) or not isinstance(end, int):
+                continue
+            if start <= line_no <= end:
+                span = end - start
+                name = node.name
+                if best is None or span < best[0]:
+                    best = (span, name)
+        return best[1] if best else ""
+
     def _candidate_matches_selected_tactic(self, candidate: CodeCandidate) -> bool:
         selected_axis = self._selected_tactic_axis_for_current_loop()
         if not selected_axis:
@@ -2871,6 +3008,7 @@ class MicroAgent:
             memory = {"axes": {}, "recent": []}
             self.state.scratch["adaptive_search_memory"] = memory
         axes_state = memory.setdefault("axes", {})
+        regions_state = memory.setdefault("regions", {})
         recent = memory.setdefault("recent", [])
         improved = status in {"improved", "accepted"} and not failed
         for axis in axes:
@@ -2906,11 +3044,43 @@ class MicroAgent:
                         )
                     )
                     axis_state["cooldown_until_loop"] = self.state.loop_count + cooldown
+        region_keys = self._candidate_region_keys(candidate)
+        for region_key in region_keys:
+            region_state = regions_state.setdefault(
+                region_key,
+                {
+                    "attempts": 0,
+                    "failures": 0,
+                    "successes": 0,
+                    "cooldown_until_loop": None,
+                    "last_status": None,
+                    "last_metric": None,
+                },
+            )
+            region_state["attempts"] = int(region_state.get("attempts", 0)) + 1
+            region_state["last_status"] = status
+            region_state["last_metric"] = metric
+            if improved:
+                region_state["successes"] = int(region_state.get("successes", 0)) + 1
+                region_state["cooldown_until_loop"] = None
+            else:
+                region_state["failures"] = int(region_state.get("failures", 0)) + 1
+                if self._region_should_cool_down(region_key, status):
+                    cooldown = int(
+                        self.config.get("workflow", {}).get(
+                            "adaptive_search_region_cooldown_loops",
+                            self.config.get("workflow", {}).get(
+                                "adaptive_search_axis_cooldown_loops", 3
+                            ),
+                        )
+                    )
+                    region_state["cooldown_until_loop"] = self.state.loop_count + cooldown
         recent.append(
             {
                 "loop": self.state.loop_count,
                 "candidate_id": candidate.candidate_id,
                 "axes": axes,
+                "regions": region_keys,
                 "status": status,
                 "metric": metric,
                 "applied": applied,
@@ -2932,9 +3102,53 @@ class MicroAgent:
         threshold = int(
             self.config.get("workflow", {}).get("adaptive_search_axis_failure_threshold", 3)
         )
-        failure_statuses = {
+        failure_statuses = self._adaptive_search_failure_statuses()
+        if status not in failure_statuses:
+            return False
+        recent_failures = 1
+        for record in reversed(recent[-window:]):
+            if axis not in record.get("axes", []):
+                continue
+            if record.get("status") in failure_statuses or record.get("failed") is True:
+                recent_failures += 1
+        return recent_failures >= threshold
+
+    def _region_should_cool_down(self, region_key: str, status: str) -> bool:
+        memory = self.state.scratch.get("adaptive_search_memory")
+        if not isinstance(memory, dict):
+            return False
+        recent = memory.get("recent")
+        if not isinstance(recent, list):
+            return False
+        window = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_window",
+                self.config.get("workflow", {}).get("adaptive_search_axis_window", 8),
+            )
+        )
+        threshold = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_failure_threshold",
+                self.config.get("workflow", {}).get("adaptive_search_axis_failure_threshold", 3),
+            )
+        )
+        failure_statuses = self._adaptive_search_failure_statuses()
+        if status not in failure_statuses:
+            return False
+        recent_failures = 1
+        for record in reversed(recent[-window:]):
+            if region_key not in record.get("regions", []):
+                continue
+            if record.get("status") in failure_statuses or record.get("failed") is True:
+                recent_failures += 1
+        return recent_failures >= threshold
+
+    @staticmethod
+    def _adaptive_search_failure_statuses() -> set[str]:
+        return {
             "rejected",
             "rejected_cooled_axis",
+            "rejected_cooled_region",
             "rejected_missing_axis",
             "rejected_family_drift",
             "rejected_no_changes",
@@ -2945,15 +3159,6 @@ class MicroAgent:
             "rejected_wrong_axis",
             "rejected_no_metric",
         }
-        if status not in failure_statuses:
-            return False
-        recent_failures = 1
-        for record in reversed(recent[-window:]):
-            if axis not in record.get("axes", []):
-                continue
-            if record.get("status") in failure_statuses or record.get("failed") is True:
-                recent_failures += 1
-        return recent_failures >= threshold
 
     def _format_adaptive_search_memory(self) -> str:
         if not self._adaptive_search_memory_enabled():
@@ -2989,12 +3194,35 @@ class MicroAgent:
                 item["cooldown_until_loop"] = cooldown_until
                 cooled_down.append(axis)
             axes.append(item)
+        regions_state = memory.get("regions")
+        regions = []
+        cooled_regions = []
+        if isinstance(regions_state, dict):
+            for region_key, raw_state in sorted(regions_state.items()):
+                if not isinstance(raw_state, dict):
+                    continue
+                cooldown_until = raw_state.get("cooldown_until_loop")
+                is_cooled = isinstance(cooldown_until, int) and cooldown_until > current_loop
+                item = {
+                    "region": region_key,
+                    "attempts": raw_state.get("attempts", 0),
+                    "failures": raw_state.get("failures", 0),
+                    "successes": raw_state.get("successes", 0),
+                    "last_status": raw_state.get("last_status"),
+                    "last_metric": raw_state.get("last_metric"),
+                }
+                if is_cooled:
+                    item["cooldown_until_loop"] = cooldown_until
+                    cooled_regions.append(region_key)
+                regions.append(item)
         recent = memory.get("recent") if isinstance(memory.get("recent"), list) else []
         payload = {
             "current_loop": current_loop,
             "cooled_down_axes": cooled_down,
+            "cooled_down_regions": cooled_regions,
             "gate_controller": self._adaptive_gate_controller_summary(),
             "axes": axes,
+            "regions": regions[-8:],
             "recent": recent[-5:],
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -3061,16 +3289,7 @@ class MicroAgent:
         limit = int(self.config.get("workflow", {}).get("candidate_history_limit", 20))
         lines = path.read_text(errors="replace").splitlines()[-limit:]
         memory: dict[str, Any] = {"axes": {}, "recent": []}
-        failure_statuses = {
-            "rejected",
-            "rejected_cooled_axis",
-            "rejected_missing_axis",
-            "rejected_no_changes",
-            "rejected_repeated_pattern",
-            "rejected_unknown_axis",
-            "rejected_wrong_axis",
-            "rejected_no_metric",
-        }
+        failure_statuses = self._adaptive_search_failure_statuses()
         for line in lines:
             try:
                 record = json.loads(line)
@@ -3086,6 +3305,11 @@ class MicroAgent:
                 "loop": record.get("loop"),
                 "candidate_id": record.get("candidate_id"),
                 "axes": [str(axis) for axis in axes],
+                "regions": [
+                    str(region)
+                    for region in record.get("region_keys", [])
+                    if str(region)
+                ],
                 "status": status,
                 "metric": metric,
                 "applied": record.get("applied", 0),
@@ -3117,8 +3341,27 @@ class MicroAgent:
                         axis_state["best_metric"] = metric
                 elif status in failure_statuses or failed:
                     axis_state["failures"] += 1
+            for region_key in recent_record["regions"]:
+                region_state = memory.setdefault("regions", {}).setdefault(
+                    region_key,
+                    {
+                        "attempts": 0,
+                        "failures": 0,
+                        "successes": 0,
+                        "cooldown_until_loop": None,
+                        "last_status": None,
+                        "last_metric": None,
+                    },
+                )
+                region_state["attempts"] += 1
+                region_state["last_status"] = status
+                region_state["last_metric"] = metric
+                if status in {"improved", "accepted"} and not failed:
+                    region_state["successes"] += 1
+                elif status in failure_statuses or failed:
+                    region_state["failures"] += 1
         self._apply_history_cooldowns(memory, failure_statuses)
-        return memory if memory["axes"] else None
+        return memory if memory["axes"] or memory.get("regions") else None
 
     def _failure_memory_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -3253,6 +3496,30 @@ class MicroAgent:
                     recent_failures += 1
             if recent_failures >= threshold:
                 axis_state["cooldown_until_loop"] = self.state.loop_count + cooldown
+        regions_state = memory.get("regions")
+        if not isinstance(regions_state, dict):
+            return
+        region_threshold = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_failure_threshold", threshold
+            )
+        )
+        region_cooldown = int(
+            self.config.get("workflow", {}).get(
+                "adaptive_search_region_cooldown_loops", cooldown
+            )
+        )
+        for region_key, region_state in regions_state.items():
+            recent_failures = 0
+            for record in reversed(recent[-window:]):
+                if region_key not in record.get("regions", []):
+                    continue
+                if record.get("status") in failure_statuses or record.get("failed") is True:
+                    recent_failures += 1
+            if recent_failures >= region_threshold:
+                region_state["cooldown_until_loop"] = (
+                    self.state.loop_count + region_cooldown
+                )
 
     @staticmethod
     def _normalize_fingerprint_text(text: str) -> str:
@@ -4743,6 +5010,7 @@ class MicroAgent:
                 "failed": record.get("failed"),
                 "strategy_axis": record.get("strategy_axis", ""),
                 "strategy_axes": record.get("strategy_axes", []),
+                "region_keys": record.get("region_keys", []),
                 "tactic_stage": record.get("tactic_stage", ""),
                 "stage_result": record.get("stage_result", ""),
                 "changes": record.get("changes", []),
@@ -5672,6 +5940,7 @@ class MicroAgent:
             "strategy_axis": candidate.strategy_axis,
             "strategy_axes": self._candidate_strategy_axes(candidate),
             "family_aliases": sorted(self._candidate_reason_family_aliases(candidate)),
+            "region_keys": self._candidate_region_keys(candidate),
             "changes": self._summarize_changes(candidate.changes),
             "todo_id": self._active_todo_id(),
             "spec_task_id": self._active_todo_spec_task_id(),

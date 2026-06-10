@@ -3043,6 +3043,59 @@ value = 'fast'
             history = (repo / ".local_micro_agent" / "candidates.jsonl").read_text()
             self.assertIn('"strategy_axes": ["phase_interleave"]', history)
 
+    def test_adaptive_search_memory_cools_down_repeated_failed_region_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def hot_path():\n"
+                "    value = 'old'\n"
+                "    return value\n"
+            )
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    writable_files=["target.py"],
+                    adaptive_search_memory=True,
+                    adaptive_search_reject_cooled_axes=True,
+                    adaptive_search_axis_failure_threshold=99,
+                    adaptive_search_region_failure_threshold=3,
+                    adaptive_search_region_cooldown_loops=4,
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "hot",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="hot path tweak",
+                        target="    value = 'old'\n",
+                        replacement="    value = 'slow'\n",
+                    )
+                ],
+                "hot path tweak",
+                strategy_axis="performance",
+            )
+
+            for _ in range(3):
+                agent._record_strategy_attempt(
+                    candidate,
+                    status="rejected",
+                    metric=120,
+                    applied=1,
+                    failed=True,
+                )
+
+            cooled = agent._cooled_candidate_regions(candidate)
+            self.assertEqual(cooled, ["target.py::hot_path::performance"])
+            memory = agent._format_adaptive_search_memory()
+            self.assertIn("target.py::hot_path::performance", memory)
+
     def test_code_prompt_includes_adaptive_search_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
