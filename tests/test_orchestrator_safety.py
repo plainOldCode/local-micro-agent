@@ -1849,6 +1849,63 @@ Background / non-constraints
             self.assertEqual(spec["task_graph"][0]["budget"]["attempts_used"], 1)
             self.assertEqual(spec["task_graph"][1]["budget"]["attempts_used"], 1)
 
+    def test_spec_mode_cold_start_synthesizes_v2_run_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 'old'\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            model_output = json.dumps(
+                {
+                    "version": 2,
+                    "spec_id": "cold-start",
+                    "objective": "Update target value.",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "write target",
+                            "deliverables": ["target.py"],
+                            "read_hints": ["target.py"],
+                            "acceptance": {
+                                "kind": "command",
+                                "commands": [
+                                    "python3 -c \"from pathlib import Path; assert Path('target.py').read_text() == 'done'\""
+                                ],
+                            },
+                            "budget": {"attempts_max": 2},
+                        }
+                    ],
+                }
+            )
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 3,
+                    "writable_files": ["target.py"],
+                    "seed_changes": [{"path": "target.py", "content": "done"}],
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test", max_loops=3)
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(model_output)
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertIn("attempting SPEC_SYNTH", "\n".join(result.notes))
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(spec["version"], 2)
+            self.assertEqual(spec["progress"], {"total": 1, "closed": 1, "deferred": 0, "failed": 0})
+            self.assertEqual(spec["task_graph"][0]["status"], "closed")
+
     def test_spec_mode_defers_task_after_budget_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -39,12 +39,14 @@ class TodoLifecycleMixin:
         if workflow.get("run_spec_after_read") or force:
             self.state.scratch.pop("run_spec", None)
             focus = self._focused_read_model_context(str(workflow.get("run_spec_focus", "")))
-            role = str(workflow.get("run_spec_model_role", "planner"))
+            role_default = "reasoner" if self._spec_mode_enabled() and force else "planner"
+            role = str(workflow.get("run_spec_model_role", role_default))
+            call_site = "spec_synth" if self._spec_mode_enabled() and force else "run_spec"
             try:
                 output = await self._model_chat(
                     role,
                     spec_prompt(self.state, focus=focus),
-                    call_site="run_spec",
+                    call_site=call_site,
                 )
                 spec = parse_json_object(output)
             except Exception as exc:
@@ -82,7 +84,7 @@ class TodoLifecycleMixin:
     def _load_run_spec(path: Path) -> dict[str, Any]:
         try:
             data = json.loads(path.read_text(errors="replace"))
-        except json.JSONDecodeError:
+        except (FileNotFoundError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -316,6 +318,10 @@ class TodoLifecycleMixin:
         self.state.current = AgentStateName.TASK_READ
 
     def _retry_or_fail_without_spec(self) -> AgentStateName:
+        if self._spec_mode_enabled() and not self.state.scratch.get("spec_synth_attempted"):
+            self.state.scratch["spec_synth_attempted"] = True
+            self.state.notes.append("Spec mode has no v2 run_spec; attempting SPEC_SYNTH")
+            return AgentStateName.SPEC_SYNTH
         return AgentStateName.FAILED
 
     def _clear_active_spec_task(self) -> None:

@@ -39,9 +39,10 @@ Prefer concrete read/write, ordering, lifecycle, API, or metric facts over gener
 
 SPEC_SYSTEM = """You are the SPEC node in a local coding-agent FSM.
 Do not write code. Convert the request, plan, read source, and semantic facts into
-one run-local execution spec that later BRAINSTORM/CODE/REFLECT attempts must follow.
+one run-local execution spec that the deterministic spec scheduler can execute.
 Output strict JSON with:
 {
+  "version": 2,
   "spec_id": "short-lowercase-id",
   "objective": "one sentence",
   "invariants": ["must preserve..."],
@@ -53,7 +54,18 @@ Output strict JSON with:
       "strategy_axis": "axis_or_general_edit",
       "family_key": "lowercase_snake_case_or_empty",
       "expected_signal": "observable test/metric/diagnostic signal",
-      "status": "open"
+      "status": "open",
+      "depends_on": [],
+      "deliverables": ["relative/path.py"],
+      "read_hints": ["relative/path.py"],
+      "acceptance": {
+        "kind": "synthesized",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      }
     }
   ],
   "decision_rules": ["when patch_miss then repair with fresh source", "..."]
@@ -61,6 +73,15 @@ Output strict JSON with:
 Rules:
 - Ground every task in the supplied request, plan, source, and semantic facts.
 - Prefer small measurable unit tasks over broad ideas.
+- Always set version to 2.
+- Use depends_on to express task ordering; use [] when the task has no prerequisites.
+- Set deliverables to the smallest writable file paths or globs the task may change.
+- Set read_hints to the source paths the task needs before CODE.
+- Use acceptance.kind "synthesized" for implementation tasks unless the request supplies
+  an explicit command or metric acceptance.
+- For command acceptance, include only human-supplied commands from the request or config.
+- For metric acceptance, include the measurable command or leave commands empty when it
+  should use the configured workflow metric command.
 - Do not include historical prior-run winners unless they are present in this run's input.
 - Keep task_graph to 3-8 tasks."""
 
