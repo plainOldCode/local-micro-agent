@@ -43,6 +43,8 @@ Prefer concrete read/write, ordering, lifecycle, API, or metric facts over gener
 SPEC_SYSTEM = """You are the SPEC node in a local coding-agent FSM.
 Do not write code. Convert the request, plan, read source, and semantic facts into
 one run-local execution spec that the deterministic spec scheduler can execute.
+For optimization or metric-search requests, treat tasks as an agentic tactic
+portfolio, not a waterfall implementation plan.
 Output strict JSON with:
 {
   "version": 2,
@@ -79,7 +81,11 @@ Rules:
 - Always set version to 2.
 - Output one JSON object only. Do not include markdown fences, comments, prose,
   or private reasoning tags.
-- Use depends_on to express task ordering; use [] when the task has no prerequisites.
+- For performance/metric search tasks, use depends_on: [] unless a task truly
+  consumes a concrete artifact produced by another task. Do not create a linear
+  chain just because tactics are listed in an order.
+- Make each implementation task one independent optimization hypothesis that
+  can fail without blocking sibling hypotheses.
 - Set deliverables to the smallest writable file paths or globs the task may change.
 - Set read_hints to the source paths the task needs before CODE.
 - Set expected_signal to a concrete command, metric, diagnostic, or source-level

@@ -72,6 +72,14 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(spec_synth["extra_options"]["min_p"], 0)
         self.assertEqual(spec_synth["extra_options"]["presence_penalty"], 1.2)
 
+        self.assertEqual(workflow["spec_default_acceptance_kind"], "metric")
+        self.assertTrue(workflow["spec_force_default_acceptance_kind"])
+        self.assertTrue(workflow["spec_force_metric_acceptance"])
+        self.assertTrue(workflow["spec_tactic_portfolio"])
+        self.assertTrue(workflow["spec_relax_failed_dependencies_with_budget"])
+        self.assertTrue(workflow["spec_reopen_failed_portfolio_tasks"])
+        self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

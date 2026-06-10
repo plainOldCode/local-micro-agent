@@ -117,9 +117,13 @@ the controller's task scheduler.
 3. if nothing is runnable: restores `deferred` tasks once, then reopens failed
    prerequisite tasks that block downstream work for up to
    `spec_task_recovery_rounds` (default 2) fresh recovery rounds (per-round
-   `attempts_used=0`, prior totals preserved for reporting). Only if neither
-   applies does it exit `FAILED` (`stop_reason=no_recovery_possible`) with a
-   blocked-task diagnosis such as `task-003 waiting on task-002`.
+   `attempts_used=0`, prior totals preserved for reporting). Metric-search
+   portfolios can also relax failed dependencies
+   (`spec_relax_failed_dependencies_with_budget=true`) and recycle exhausted
+   failed tactics (`spec_reopen_failed_portfolio_tasks=true`) while loop budget
+   remains. Only if neither applies does it exit `FAILED`
+   (`stop_reason=no_recovery_possible`) with a blocked-task diagnosis such as
+   `task-003 waiting on task-002`.
 
 `max_code_test_loops` counts only CODE/TEST attempts; PLAN, READ, SPEC_SYNTH,
 SCHEDULE, TASK_READ, and ACCEPT_SYNTH do not consume it. Tasks with no
@@ -132,6 +136,13 @@ plan, read source, and semantic facts, with a fallback model role
 (`spec_synth_fallback_model_role`) after model, validation, or parse failures.
 With `spec_resume=true` (default) an existing v2 graph is resumed instead, so
 interrupted runs skip already-closed tasks.
+
+For metric optimization runs, enable `spec_tactic_portfolio=true` with
+`spec_force_metric_acceptance=true`. The controller then treats generated tasks
+as independent measurable hypotheses, strips waterfall dependencies from metric
+tasks, forces `acceptance.kind="metric"`, skips synthesized task-local tests,
+and keeps trying sibling/reopened tactics until the global loop budget is
+exhausted or the metric improves.
 
 ### Task schema (run_spec v2)
 

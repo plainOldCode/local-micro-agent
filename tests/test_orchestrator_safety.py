@@ -2220,6 +2220,119 @@ Background / non-constraints
             self.assertIn('"remaining_loops": 6', progress_events)
             self.assertIn('"stop_reason": "no_recovery_possible"', progress_events)
 
+    def test_spec_mode_relaxes_failed_dependencies_when_budget_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "relax-chain",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "failed tactic",
+                        "status": "failed",
+                        "deliverables": ["target.txt"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "sibling tactic",
+                        "status": "open",
+                        "depends_on": ["task-001"],
+                        "deliverables": ["target.txt"],
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_task_recovery_rounds": 0,
+                        "spec_relax_failed_dependencies_with_budget": True,
+                        "max_code_test_loops": 10,
+                        "writable_files": ["target.txt"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = persisted["task_graph"][1]
+            self.assertEqual(task["depends_on"], [])
+            self.assertEqual(task["status"], "in_progress")
+            self.assertEqual(persisted["active_task_id"], "task-002")
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "dependencies_relaxed"', progress_events)
+
+    def test_spec_mode_reopens_failed_portfolio_tasks_when_budget_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "portfolio-reopen",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "failed tactic",
+                        "status": "failed",
+                        "deliverables": ["target.txt"],
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "another failed tactic",
+                        "status": "failed",
+                        "deliverables": ["target.txt"],
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_reopen_failed_portfolio_tasks": True,
+                        "spec_portfolio_recovery_rounds": 2,
+                        "max_code_test_loops": 10,
+                        "writable_files": ["target.txt"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            first = persisted["task_graph"][0]
+            self.assertEqual(first["status"], "in_progress")
+            self.assertEqual(first["recovery_rounds"], 1)
+            self.assertEqual(first["budget"]["attempts_used"], 0)
+            self.assertEqual(first["attempts_total"], 3)
+            self.assertIn("portfolio_revisit_after_failure", first["decision_hint"])
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "portfolio_reopened"', progress_events)
+
     def test_spec_mode_cold_start_synthesizes_v2_run_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3078,6 +3191,43 @@ Background / non-constraints
 
             self.assertIsNotNone(spec)
             task = spec["task_graph"][0]
+            self.assertEqual(task["acceptance"]["kind"], "metric")
+            self.assertEqual(task["acceptance"]["commands"], [])
+
+    def test_metric_tactic_portfolio_forces_metric_and_strips_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "metric_regex": r"CYCLES:\s*(\d+)",
+                        "spec_metric_requires_improvement": True,
+                        "spec_tactic_portfolio": True,
+                    },
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "portfolio",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "alternate tactic",
+                            "depends_on": ["task-000"],
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "synthesized"},
+                        }
+                    ],
+                }
+            )
+
+            task = spec["task_graph"][0]
+            self.assertEqual(task["depends_on"], [])
             self.assertEqual(task["acceptance"]["kind"], "metric")
             self.assertEqual(task["acceptance"]["commands"], [])
 

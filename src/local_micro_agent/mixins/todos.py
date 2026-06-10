@@ -137,6 +137,23 @@ class TodoLifecycleMixin:
     def _spec_mode_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("spec_mode"))
 
+    def _spec_tactic_portfolio_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(
+            workflow.get("spec_tactic_portfolio")
+            or workflow.get("spec_metric_tactic_portfolio")
+        )
+
+    def _spec_force_metric_acceptance_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("spec_force_metric_acceptance"):
+            return True
+        return bool(
+            self._spec_tactic_portfolio_enabled()
+            and workflow.get("metric_regex")
+            and workflow.get("spec_metric_requires_improvement", True) is not False
+        )
+
     @staticmethod
     def _load_run_spec(path: Path) -> dict[str, Any]:
         try:
@@ -235,13 +252,19 @@ class TodoLifecycleMixin:
         if not isinstance(acceptance, dict):
             acceptance = {}
         default_kind = workflow.get("spec_default_acceptance_kind", "command")
-        if workflow.get("spec_force_default_acceptance_kind"):
+        if self._spec_force_metric_acceptance_enabled():
+            kind = "metric"
+        elif workflow.get("spec_force_default_acceptance_kind"):
             kind = str(default_kind).strip() or "command"
         else:
             kind = str(acceptance.get("kind") or default_kind).strip() or "command"
         commands = acceptance.get("commands")
-        if not isinstance(commands, list):
+        if kind == "metric" and self._spec_force_metric_acceptance_enabled():
+            commands = commands if isinstance(commands, list) else []
+        elif not isinstance(commands, list):
             commands = workflow.get("test_commands", [])
+        if kind == "metric" and self._spec_tactic_portfolio_enabled():
+            depends_on = []
         normalized_acceptance = {
             "kind": kind,
             "commands": [str(command) for command in commands if str(command).strip()],
@@ -382,6 +405,32 @@ class TodoLifecycleMixin:
                     spec,
                     extra={
                         "reason": "failed_prerequisite_recovery",
+                        "reopened_tasks": reopened,
+                        "remaining_loops": self._spec_remaining_loop_budget(),
+                    },
+                )
+                open_candidates = self._schedulable_spec_tasks(tasks)
+        if not open_candidates and not self._spec_global_loop_cap_reached():
+            relaxed = self._relax_failed_spec_dependencies(tasks)
+            if relaxed:
+                self._persist_run_spec(spec)
+                self._append_spec_progress_event(
+                    "dependencies_relaxed",
+                    spec,
+                    extra={
+                        "relaxed_tasks": relaxed,
+                        "remaining_loops": self._spec_remaining_loop_budget(),
+                    },
+                )
+                open_candidates = self._schedulable_spec_tasks(tasks)
+        if not open_candidates and not self._spec_global_loop_cap_reached():
+            reopened = self._reopen_failed_spec_portfolio_tasks(tasks)
+            if reopened:
+                self._persist_run_spec(spec)
+                self._append_spec_progress_event(
+                    "portfolio_reopened",
+                    spec,
+                    extra={
                         "reopened_tasks": reopened,
                         "remaining_loops": self._spec_remaining_loop_budget(),
                     },
@@ -543,6 +592,101 @@ class TodoLifecycleMixin:
             reopened.append(task_id)
         return reopened
 
+    def _relax_failed_spec_dependencies(self, tasks: list[Any]) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("spec_relax_failed_dependencies_with_budget"):
+            return []
+        remaining = self._spec_remaining_loop_budget()
+        if remaining is not None and remaining <= 0:
+            return []
+        failed = {
+            str(task.get("task_id"))
+            for task in tasks
+            if isinstance(task, dict) and str(task.get("status")) == "failed"
+        }
+        if not failed:
+            return []
+        relaxed: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "open")) not in {"open", "deferred"}:
+                continue
+            deps = task.get("depends_on")
+            if not isinstance(deps, list):
+                continue
+            kept = [str(dep) for dep in deps if str(dep) not in failed]
+            if len(kept) == len(deps):
+                continue
+            task["depends_on"] = kept
+            task_id = str(task.get("task_id") or "")
+            task["decision_hint"] = (
+                "dependency_relaxed_after_failed_prerequisite: try this tactic as an "
+                "independent alternative; do not repeat the failed prerequisite patch."
+            )
+            self.state.notes.append(
+                f"Relaxed failed dependencies for spec task: {task_id}"
+            )
+            relaxed.append(task_id)
+        return relaxed
+
+    def _reopen_failed_spec_portfolio_tasks(self, tasks: list[Any]) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("spec_reopen_failed_portfolio_tasks"):
+            return []
+        remaining = self._spec_remaining_loop_budget()
+        if remaining is not None and remaining <= 0:
+            return []
+        max_rounds = int(
+            workflow.get(
+                "spec_portfolio_recovery_rounds",
+                workflow.get("spec_task_recovery_rounds", 0),
+            )
+            or 0
+        )
+        if max_rounds <= 0:
+            return []
+        batch_size = int(workflow.get("spec_portfolio_reopen_batch_size", 0) or 0)
+        reopened: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status")) != "failed":
+                continue
+            deliverables = task.get("deliverables")
+            if not isinstance(deliverables, list) or not any(
+                str(item).strip() for item in deliverables
+            ):
+                continue
+            rounds = int(task.get("recovery_rounds", 0) or 0)
+            if rounds >= max_rounds:
+                continue
+            budget = task.setdefault("budget", {})
+            if not isinstance(budget, dict):
+                budget = {}
+                task["budget"] = budget
+            prior_attempts = int(budget.get("attempts_used", task.get("attempts", 0)) or 0)
+            task["attempts_total"] = int(task.get("attempts_total", 0) or 0) + prior_attempts
+            budget["attempts_used"] = 0
+            task["attempts"] = 0
+            task["status"] = "open"
+            task["recovery_rounds"] = rounds + 1
+            task["decision_hint"] = (
+                "portfolio_revisit_after_failure: previous attempts for this tactic "
+                "failed. Try a materially different local edit or narrower variant, "
+                "using the latest observation as negative evidence."
+            )
+            task["reopened_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            task_id = str(task.get("task_id") or "")
+            self.state.notes.append(
+                f"Reopened failed portfolio spec task: {task_id} "
+                f"(recovery {rounds + 1}/{max_rounds})"
+            )
+            reopened.append(task_id)
+            if batch_size > 0 and len(reopened) >= batch_size:
+                break
+        return reopened
+
     @staticmethod
     def _failed_spec_prerequisite_ids(tasks: list[Any]) -> set[str]:
         failed = {
@@ -578,6 +722,8 @@ class TodoLifecycleMixin:
             and self._reopenable_failed_spec_prerequisite_ids(tasks)
         ):
             stop_reason = "dependency_blocked_before_budget_exhaustion"
+        elif remaining and remaining > 0 and self._reopenable_failed_portfolio_task_ids(tasks):
+            stop_reason = "portfolio_exhausted_before_budget_exhaustion"
         return {
             "stop_reason": stop_reason,
             "remaining_loops": remaining,
@@ -603,6 +749,28 @@ class TodoLifecycleMixin:
             if rounds < max_rounds:
                 reopenable.add(task_id)
         return reopenable
+
+    def _reopenable_failed_portfolio_task_ids(self, tasks: list[Any]) -> set[str]:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("spec_reopen_failed_portfolio_tasks"):
+            return set()
+        max_rounds = int(
+            workflow.get(
+                "spec_portfolio_recovery_rounds",
+                workflow.get("spec_task_recovery_rounds", 0),
+            )
+            or 0
+        )
+        if max_rounds <= 0:
+            return set()
+        reopenable: set[str] = set()
+        for task in tasks:
+            if not isinstance(task, dict) or str(task.get("status")) != "failed":
+                continue
+            rounds = int(task.get("recovery_rounds", 0) or 0)
+            if rounds < max_rounds:
+                reopenable.add(str(task.get("task_id") or ""))
+        return {task_id for task_id in reopenable if task_id}
 
     @staticmethod
     def _spec_blocked_task_ids(tasks: list[Any]) -> list[str]:
@@ -661,6 +829,13 @@ class TodoLifecycleMixin:
 
     def _spec_task_to_active_todo(self, task: dict[str, Any]) -> dict[str, Any]:
         budget = task.get("budget") if isinstance(task.get("budget"), dict) else {}
+        acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), dict) else {}
+        micro_goal = "Complete the scheduled spec task and satisfy its frozen command acceptance."
+        if acceptance.get("kind") == "metric":
+            micro_goal = (
+                "Try this independent metric tactic and improve the configured "
+                "benchmark metric without breaking correctness."
+            )
         return {
             "todo_id": str(task.get("task_id")),
             "spec_task_id": str(task.get("task_id")),
@@ -669,7 +844,7 @@ class TodoLifecycleMixin:
             "family_key": str(task.get("family_key") or task.get("strategy_axis") or ""),
             "title": str(task.get("title") or task.get("task_id")),
             "context": str(task.get("expected_signal") or task.get("title") or ""),
-            "micro_goal": "Complete the scheduled spec task and satisfy its frozen command acceptance.",
+            "micro_goal": micro_goal,
             "implementation_hint": str(task.get("decision_hint") or ""),
             "allowed_files": list(task.get("deliverables") or []),
             "expected_signal": str(task.get("expected_signal") or ""),
@@ -997,6 +1172,11 @@ class TodoLifecycleMixin:
             lines.append(f"- Default acceptance kind: {default_kind}")
         if force_default:
             lines.append("- The controller will force every task to the default acceptance kind.")
+        if self._spec_force_metric_acceptance_enabled():
+            lines.append("- The controller will force metric acceptance for this metric-search run.")
+        if self._spec_tactic_portfolio_enabled():
+            lines.append("- Treat implementation tasks as an independent tactic portfolio, not a waterfall plan.")
+            lines.append("- Use depends_on: [] unless a task consumes a concrete artifact from another task.")
         if default_kind == "metric":
             lines.append("- Use metric acceptance for performance tasks; do not synthesize unit tests for metric optimization tasks.")
             lines.append("- Leave commands empty when the configured workflow metric/test commands should be used.")
