@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .prompts import brainstorm_prompt
-from .strategy import (
+from ..prompts import brainstorm_prompt
+from ..strategy import (
     explicit_tactic_family_key,
     extract_tactic_axis,
     signature_similarity,

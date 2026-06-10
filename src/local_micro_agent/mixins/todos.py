@@ -10,9 +10,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .decisions import CodeCandidate
-from .prompts import spec_prompt
-from .validators import parse_json_object
+from ..decisions import CodeCandidate
+from ..prompts import spec_prompt
+from ..validators import parse_json_object
 
 
 class TodoLifecycleMixin:

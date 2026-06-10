@@ -7,10 +7,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
-from .models import ModelResponse
-from .state import CodeChange
-from .validators import (
+from ..decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
+from ..models import ModelResponse
+from ..state import CodeChange
+from ..validators import (
     JsonValidationError,
     parse_json_object,
     parse_xml_candidates,

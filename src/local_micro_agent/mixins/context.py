@@ -11,8 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .prompts import semantic_analysis_prompt
-from .state import ExternalContext
+from ..prompts import semantic_analysis_prompt
+from ..state import ExternalContext
 
 
 class PromptContextMixin:

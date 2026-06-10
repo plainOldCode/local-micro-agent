@@ -11,9 +11,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .decisions import CodeCandidate
-from .state import CodeChange
-from .strategy import (
+from ..decisions import CodeCandidate
+from ..state import CodeChange
+from ..strategy import (
     DEFAULT_STRATEGY_AXIS_GUIDANCE,
     DEFAULT_STRATEGY_AXIS_KEYWORDS,
     axis_label_matches_text,

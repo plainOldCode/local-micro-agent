@@ -484,20 +484,20 @@ CODE context with exact function/class excerpts:
 - `config/`: ready-to-use local model provider configs.
 - `src/local_micro_agent/orchestrator.py`: FSM core (run/plan/read/code/test/
   reflect), snapshot/patch application, command execution, CLI.
-- `src/local_micro_agent/model_runtime.py`: model calls, JSON repair, token
-  budget warnings, response normalization.
-- `src/local_micro_agent/telemetry.py`: profiling spans, stream artifacts,
-  run logging.
-- `src/local_micro_agent/tactics.py`: brainstorm generation, scoring, gates,
-  tactic-to-todo creation.
-- `src/local_micro_agent/search_memory.py`: adaptive search memory, axis and
-  region cooldowns, candidate contracts, failure memory.
-- `src/local_micro_agent/todos.py`: durable todo lifecycle, run-spec task
-  graph, structural checkpoints.
-- `src/local_micro_agent/context.py`: project/external context, source
+- `src/local_micro_agent/mixins/model_runtime.py`: model calls, JSON repair,
+  token budget warnings, response normalization.
+- `src/local_micro_agent/mixins/telemetry.py`: profiling spans, stream
+  artifacts, run logging.
+- `src/local_micro_agent/mixins/tactics.py`: brainstorm generation, scoring,
+  gates, tactic-to-todo creation.
+- `src/local_micro_agent/mixins/search_memory.py`: adaptive search memory,
+  axis and region cooldowns, candidate contracts, failure memory.
+- `src/local_micro_agent/mixins/todos.py`: durable todo lifecycle, run-spec
+  task graph, structural checkpoints.
+- `src/local_micro_agent/mixins/context.py`: project/external context, source
   excerpts, slicing and line numbering.
-- `src/local_micro_agent/candidates.py`: candidate history, observations,
-  artifacts, target-not-found repair.
+- `src/local_micro_agent/mixins/candidates.py`: candidate history,
+  observations, artifacts, target-not-found repair.
 - `src/local_micro_agent/presets.py`: named workflow flag bundles.
 - `src/local_micro_agent/state.py`: single global state bag.
 - `src/local_micro_agent/models.py`: model-manager abstraction.
@@ -505,8 +505,11 @@ CODE context with exact function/class excerpts:
 - `src/local_micro_agent/prompts.py`: micro system prompts per state.
 - `src/local_micro_agent/validators.py`: JSON validation/retry helpers.
 
-The domain modules are mixins composed into `MicroAgent`; the public entry
-point remains `local_micro_agent.orchestrator.MicroAgent`.
+The domain modules under `src/local_micro_agent/mixins/` are stateless mixins
+composed into `MicroAgent`; the public entry point remains
+`local_micro_agent.orchestrator.MicroAgent`. `tests/test_mixin_modules.py`
+guards the structure: independent module imports, no method collisions across
+mixins, no shadowing by the FSM core, and no mutable class state in mixins.
 
 ## Smoke
 
