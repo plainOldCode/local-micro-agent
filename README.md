@@ -1,569 +1,64 @@
 # Local Micro Agent
 
-Ultra-light local coding-agent skeleton for M2 Max 64GB class machines.
+A spec-driven implementation loop for local models on M2 Max 64GB class
+machines. Give it a request or a spec, and a deterministic controller drives
+swappable LLMs (Ollama/MLX, llama-server, vLLM, LM Studio, or any
+OpenAI-compatible endpoint) through as many CODE/TEST loops as it takes.
 
-The design goal is to avoid the prompt bloat of full agent frameworks by
-running a small finite-state workflow:
-
-1. `PLAN`: produce a compact file/action plan.
-2. `READ`: load only planned source files through the tool boundary.
-3. `CODE`: generate strict patch/write operations from the plan and source.
-4. `TEST`: run configured commands with strict time/output limits and loop back on failure.
-
-The implementation is intentionally small. It is a scaffold for experiments
-with local models such as Qwen 3.6 35B/27B, Ollama, llama-server, vLLM, or
-commercial APIs behind an OpenAI-compatible endpoint.
+It is not a general-purpose interactive agent. The controller owns scheduling,
+acceptance decisions, budgets, and safety gates; models only plan, decompose,
+and generate patches. This keeps weak local models productive: hallucinated
+test verdicts cannot override real exit codes, repeated failures are gated, and
+runaway thinking is treated as a failed call.
 
 Runtime dependencies: none outside the Python standard library.
 
-## How A Run Starts
+## State Machine
 
-The default path is project-instructions-first, then README:
-
-1. `PLAN` reads repo-local instruction/context files before asking the model to
-   plan. By default this auto-detects `AGENTS.md`, `CLAUDE.md`,
-   `INSTRUCTIONS.md`, then `README.md`, `Readme.md`, `readme.md`, `README`, or
-   `README.txt`.
-2. `PLAN` receives workflow constraints such as `writable_files`,
-   `test_commands`, and metric settings next to the project context.
-3. `PLAN` turns the user request plus project context into a compact action
-   plan that respects those constraints.
-4. `READ` selects the minimum files needed for that plan.
-5. `CODE` may only modify files allowed by `workflow.writable_files` or the
-   planned file list.
-6. `TEST` runs configured commands with timeout and output limits, then accepts,
-   rejects, or retries. If `workflow.reflect_before_retry=true`, rejected
-   retries pass through `REFLECT` before returning to `CODE`.
-
-With reflect enabled, `workflow.reflect_conditionally=true` (default) keeps
-REFLECT off the hot path for structured simple failures. Retries classified as
-`patch_miss`, `duplicate_variant`, or axis/family/contract mismatches go
-straight back to `CODE` with their structured failure notes; REFLECT only runs
-once the same failure class has repeated
-`workflow.reflect_after_repeated_failure_class` times (default 3), and the
-per-class counter resets after each reflect, so long runs reflect once per N
-repeats instead of on every retry. Set `reflect_conditionally=false` to restore
-reflect-on-every-retry.
-
-Each retry carries compact feedback forward. Recent agent notes such as
-`target not found`, `no-op`, `comment-only`, failed metrics, and restore events
-are added to the next `CODE` prompt. `REFLECT` adds a short no-code failure
-analysis to the retry prompt, which helps local models avoid repeating the same
-invalid or no-op candidate. Candidate history can also be persisted as JSONL
-with `workflow.candidate_history_path` so accepted/rejected directions survive
-across runs.
-
-For tasks where the source has a subtle execution model, enable
-`workflow.semantic_analysis_after_read=true`. After `READ`, the agent writes a
-domain-neutral semantic analysis artifact to
-`workflow.semantic_analysis_path`, writes the controller-filtered prompt copy to
-`workflow.semantic_analysis_curated_path`, and feeds only the curated copy into
-later `CODE` and `BRAINSTORM` prompts. The artifact should capture facts such as
-data visibility, read/write hazards, API contracts, lifecycle ordering, current
-metric constraints, and safe implementation hooks. Background benchmark notes or
-other non-constraints are kept out of the curated prompt context. It is generated
-from the current request and source files, not from hidden benchmark-specific
-rules; existing artifacts at the same path are filtered again before resumed
-runs load them into the prompt.
-
-Use `workflow.external_context_paths` to inject read-only advisory context packs
-such as Markdown notes from a human, prior high-quality analysis, repo docs, or
-later fetched web references. These packs are stored separately from source file
-context, carry source/hash/trust metadata, and are labeled as advisory in
-`PLAN`, `READ`, `SEMANTIC_ANALYSIS`, `REFLECT`, `BRAINSTORM`, and `CODE`
-prompts. Local source files, tests, and the current user request remain
-authoritative. Bound the total and per-item prompt size with
-`workflow.external_context_char_limit` and
-`workflow.external_context_item_char_limit`.
-
-For non-code freeform reasoning, enable `workflow.reasoning_lane_enabled=true`
-and map `workflow.reasoning_lane_model_role` to a low-temperature provider with
-thinking enabled, for example `models.reasoner = "qwen_reason"`. By default the
-lane only routes `plan`, `semantic_analysis`, and `reflect` call sites. Exact
-JSON/search-replace roles such as `coder`, `brainstorm`, and `tester` stay on
-their configured providers unless you explicitly change the call-site and
-excluded-role lists. This keeps planner-style reasoning separate from strict
-patch generation and JSON repair paths.
-
-Thinking providers are expected to return final content, not only hidden or
-side-channel reasoning. Ollama native and OpenAI-compatible backends normalize
-provider reasoning fields into model usage metadata. If a response contains
-reasoning but its final content is empty or only whitespace, the controller
-treats it as a failed model call by default. `PLAN`, `READ`, `CODE`, `TEST`,
-`REFLECT`, and `BRAINSTORM` then use their normal failure or fallback path
-instead of silently accepting an empty plan, JSON object, or retry analysis. Use
-`workflow.allow_reasoning_only_response=true` only for diagnostics, or
-`workflow.reasoning_only_allowed_call_sites` to allow a specific experimental
-call site.
-
-Keep iterative thinking budgets small. The tuned local configs cap exact
-JSON/patch lanes at 8K tokens, reasoning lanes at 8K tokens, and exploration
-lanes at 16K tokens, with non-greedy sampling for `think=true` roles. Larger
-context windows are useful for source grounding, but large generation budgets on
-short controller calls can turn a retry into a full reasoning-only burn with no
-actionable final content.
-
-For long exploratory runs that otherwise drift between unrelated brainstorm
-ideas, enable `workflow.run_spec_after_read=true`. After `PLAN` and `READ`, the
-agent asks the model to synthesize a run-local spec from the current request,
-plan, read source, and semantic facts, then persists it to
-`workflow.run_spec_path` (default `.local_micro_agent/run_spec.json`). The spec
-contains objective/invariant facts plus a small `task_graph` of unit tasks with
-`task_id`, `strategy_axis`, `family_key`, expected signal, and status.
-`BRAINSTORM` is asked to derive tactics from open or repairable spec tasks, and
-new active todos keep `spec_task_id` lineage when a tactic maps to the graph.
-Candidate observations update the spec task state with controller hints such as
-`needs_repair`, `stale_variant`, `needs_guard_or_smaller_scope`, or
-`validated_no_metric_signal`, giving later loops an explicit repair/pivot/deepen
-signal instead of relying only on unstructured recent history.
-
-That advisory run spec is different from strict `workflow.spec_mode=true`. In
-strict spec mode, a version 2 `run_spec.json` becomes the deterministic loop
-driver: `SPEC_SYNTH` creates or resumes the graph, `SCHEDULE` picks the next
-runnable task without a model call, `TASK_READ` scopes context to that task,
-`ACCEPT_SYNTH` freezes task acceptance when needed, and `CODE`/`TEST` operate
-inside the active task. `depends_on` edges are hard gates: a task is runnable
-only when all dependencies are closed. `max_code_test_loops` is the global
-CODE/TEST opportunity cap; PLAN, READ, SPEC_SYNTH, SCHEDULE, TASK_READ, and
-ACCEPT_SYNTH do not consume it. If a required prerequisite task fails while
-downstream tasks are blocked and global loop budget remains, SCHEDULE reopens
-that failed prerequisite for up to `workflow.spec_task_recovery_rounds` fresh
-recovery rounds instead of ending early from graph starvation. Reports and
-progress JSONL distinguish `max_code_test_loops`, dependency blocking, recovery
-reopen events, and remaining loop budget.
-
-For exploration-heavy runs, set `workflow.candidate_novelty_gate=true`.
-Rejected candidate fingerprints are then remembered inside the current run,
-and an identical later candidate is rejected before tests run. The rejection is
-fed back as `forbidden repeated pattern`, which makes retry loops spend budget
-on new search directions instead of repeatedly testing the same failed patch.
-
-Set `workflow.adaptive_search_memory=true` when a long run should manage its
-own search budget. The agent tags each candidate with coarse strategy axes
-such as `correctness`, `api_contract`, `data_flow`, `state_management`,
-`error_handling`, `parsing`, `performance`, or `runtime_control`, records
-per-axis success/failure statistics, and feeds a compact search-memory summary
-into later `CODE` prompts. Axes that fail repeatedly in a recent window enter a
-temporary cooldown, so the model is steered toward under-explored directions
-without hard-coding task-specific blacklists. The same axes are written to
-`workflow.candidate_history_path` records when candidate history is enabled.
-
-If the model ignores the cooled axes, set
-`workflow.adaptive_search_reject_cooled_axes=true`. That turns cooldowns into a
-controller-side pre-test gate: any candidate whose extracted axes are still in
-cooldown is rejected as `rejected_cooled_axis` before file edits or tests run.
-For stronger control, set `workflow.adaptive_search_force_strategy_axis=true`
-and optionally provide `workflow.adaptive_search_axis_pool` as a prompt
-vocabulary. The controller then chooses a required axis for each `CODE` loop,
-injects it into the prompt, and rejects candidates with missing, cooled, or
-wrong declared `strategy_axis` values before applying edits. Set
-`workflow.adaptive_search_strict_axis_pool=true` only when you intentionally
-want to reject explicit axes that are not in `adaptive_search_axis_pool`.
-
-Cooldowns are also tracked per edit region. Each candidate change is keyed by
-`file::symbol` (AST function/class lookup, 50-line buckets as fallback)
-combined with its strategy axis and family, so repeated failures of one
-semantic family inside one function cool that specific region without
-blocking the same axis elsewhere. `workflow.adaptive_search_reject_cooled_regions`
-(default true when axis rejection is enabled) turns region cooldowns into a
-pre-test gate that rejects candidates as `rejected_cooled_region`. Tune with
-`adaptive_search_region_window`, `adaptive_search_region_failure_threshold`,
-and `adaptive_search_region_cooldown_loops`; each falls back to the matching
-axis-level setting when unset.
-
-The built-in axis set is intentionally domain-neutral. If a benchmark or
-project needs specialized axes or tactic families, put that domain vocabulary in
-the task request, for example in `request.txt`, and ask the agent to emit
-explicit `strategy_axis` and optional `family_key` labels. The orchestrator does
-not infer problem-specific tactic families from keywords. `family_key` is a
-free-form label supplied by the model and is used only as an explicit
-current-run grouping signal.
-
-For v0.2-style adaptive gate control, set
-`workflow.adaptive_gate_controller=true` together with
-`workflow.adaptive_search_memory=true`. Failed tactic family gates then become
-evidence-aware instead of permanently static:
-
-- weakly evidenced failed families run in `shadow` mode and are allowed through
-  while the gate decision is recorded;
-- repeated all-skipped brainstorm pressure reopens families in `soft` mode so
-  the search can recover from overblocking;
-- sufficiently evidenced gates remain `hard` and still protect test budget.
-
-Gate decisions are written to `.local_micro_agent/gate_decisions.jsonl` by
-default and summarized back into later `CODE` prompts. Useful knobs include
-`adaptive_gate_min_family_attempts_for_hard`,
-`adaptive_gate_all_skipped_relax_streak`, `adaptive_gate_recent_limit`, and
-`adaptive_gate_decisions_path`.
-
-Structural tactics such as schedulers, parser rewrites, cache layers, lifecycle
-refactors, and vectorization often need a scaffold/probe/expand lifecycle rather
-than a single metric-winning patch. With
-`workflow.structural_tactic_lifecycle=true`, active todos whose tactic text
-looks structural are tagged with `tactic_stage` such as `structural_probe`.
-Their candidate records include `stage_result`, and early correctness failures
-are recorded as structural learning classes like `scope_too_broad` or
-`invariant_broken` instead of immediately exhausting the todo. The controller
-allows up to `workflow.structural_tactic_soft_failures` non-budgeted structural
-learning failures before normal todo budgeting resumes.
-
-Correctness-preserving structural scaffold/probe patches can also be retained
-separately from metric-winning best state. With
-`workflow.structural_state_checkpoint=true`, tests-passing structural candidates
-that do not improve the metric are written to `workflow.structural_state_path`
-and `workflow.structural_checkpoint_dir`. Later CODE prompts receive a compact
-checkpoint summary plus patch excerpt, so long refactors, parser rewrites, cache
-layers, migrations, and scheduler changes can continue from validated
-intermediate structure without treating that checkpoint as the final best patch.
-
-Use `workflow.brainstorm_open_novelty_lanes` to give `BRAINSTORM` a compact
-menu of still-open exploration lanes. These lanes are included whenever
-brainstorming runs by default, even before the all-skipped/new-family gate
-fires, so clean-start searches can see coarse structural routes early. Set
-`workflow.brainstorm_include_open_novelty_lanes=false` to suppress that prompt
-section.
-
-Durable todos honor `workflow.todo_attempt_budget` before moving on. A rejected
-candidate, failed test, or no-change patch keeps the same active todo in the
-next `CODE` prompt until the budget is exhausted, so the model can use the
-error signal to repair or narrow the probe instead of treating every tactic as a
-one-shot attempt. Patch-application misses such as stale search blocks are
-separated from idea failures by default
-(`workflow.todo_ignore_patch_failures_for_budget=true`), so a tactic is not
-discarded just because generated patch/search text did not match the current
-source.
-Before the first metric improvement, `workflow.todo_soft_until_first_improvement=true`
-keeps active todo contracts advisory so exploratory candidates are not hard
-rejected for axis or family drift. That soft contract no longer disables
-brainstorm throttling: by default
-`workflow.pre_improvement_todo_blocks_brainstorm=true` lets an active todo with
-remaining attempt budget block repeated brainstorms until the tactic gets its
-budgeted tries. Set it to `false` to restore the older free-brainstorm behavior.
-By default, `workflow.todo_enforce_active_contract=true` also makes active todo
-contracts controller-enforced: a queued candidate whose declared
-`strategy_axis` or detected family drifts away from the active todo is rejected
-before edits or tests and counted against that todo's retry budget. The
-controller trusts a matching declared `strategy_axis` as structured intent;
-natural-language reason axis matching is used as supporting evidence, not as a
-separate hard reject, so dynamic axes from the request are not overblocked by
-lexical wording misses.
-`workflow.todo_reject_duplicate_variants=true` also rejects same-todo retries
-whose candidate/change reasons are effectively the same as a recent rejected
-attempt, preventing retry budget from being spent on retesting the same
-micro-variant.
-With `workflow.observation_backed_todo_continuation=true` (default), active
-todos also carry an observation chain into CODE and REFLECT even when
-pre-first-improvement contracts are soft. The chain includes recent attempts,
-structured failure classes, recovery hints, and diagnostic summaries. This keeps
-a todo from becoming a small isolated loop: the next candidate is asked to
-continue from the latest evidence, repair the named invariant, or move the edit
-to a measurably relevant location instead of resetting to a generic tactic.
-
-By default, `workflow.brainstorm_score_tactics=true` scores selectable
-BRAINSTORM tactics instead of accepting the first valid block. The score uses
-only current-run harness evidence: recent validated pattern aliases,
-failed/patch-failure aliases, tactic specificity, novelty lane, hook detail, and
-original order as a tie-breaker. `workflow.brainstorm_reject_axis_family_mismatch=true`
-also skips tactics only when the explicit `family_key` is itself the same as a
-known axis but the tactic declares a different axis. The controller no longer
-uses domain-specific family-to-axis maps or keyword rules. This keeps selection
-logic in the harness and benchmark/domain hints in the request.
-
-Set `workflow.validated_pattern_followup=true` with
-`workflow.continue_after_improvement=true` to create a follow-up todo from the
-latest current-run improvement before exploring unrelated families. The follow-up
-todo keeps the same axis/family and asks for a narrow nearby extension of the
-validated local pattern. It is derived only from current-run candidate history
-and artifacts, so clean evaluation does not receive prior-run answer hints.
-
-Set `workflow.continue_after_improvement=true` for long-running search. When a
-candidate improves the metric, the agent persists `.local_micro_agent/best_state.json`
-and `.local_micro_agent/best.patch`, updates the in-memory best metric, and
-continues to the next `CODE` loop until `max_code_test_loops` is reached.
-
-Set `workflow.deterministic_test_decision=true` when configured shell commands
-and metric rules should be the source of truth. In this mode `TEST` does not ask
-a model to reinterpret the command result, so passing tests cannot be rejected by
-tester hallucination and failing commands do not spend another model call. Pair
-it with `workflow.retry_rejected_candidates=true` when `max_code_test_loops`
-should allow repair attempts after a failing command, metric miss, or no-op CODE
-attempt. The shipped local-model configs enable both flags together.
-
-For local models that struggle to JSON-escape multi-line code snippets, set
-`workflow.code_output_format="xml"`. In XML mode the CODE node emits raw
-`<search>` and `<replace>` blocks inside `<candidates>` instead of putting
-multi-line code inside JSON strings. Set `workflow.log_raw_model_outputs=true`
-to save malformed model outputs under `.local_micro_agent/raw_model_outputs`
-when parsing or repair fails.
-
-By default, `workflow.prompt_cache_friendly_layout=true` splits CODE prompts
-into a stable prefix and a dynamic suffix. The stable prefix keeps the CODE
-system instruction, user request, plan, and source context at the front. Runtime
-feedback such as test output, retry reflection, active todo contracts, adaptive
-search memory, gate telemetry, tactic libraries, and recent candidate history is
-merged into one trailing dynamic message. This does not implement prompt/KV
-caching inside the agent; it only keeps prompt layout friendly to provider or
-self-hosted serving-layer prefix caches such as OpenAI/Gemini implicit prompt
-caching, Anthropic cache breakpoints, Gemini cached content, or vLLM/SGLang
-automatic prefix caching. Avoid placing volatile timestamps, request IDs, or
-tool-output snippets before stable repo context if cache hit rate matters.
-
-By default, `workflow.current_source_context_before_code=true` rereads writable
-files immediately before each CODE attempt and appends the current source excerpt
-to the dynamic suffix. This keeps the stable prefix cache-friendly while giving
-the model fresh target/search text after accepted candidates have changed the
-repo. The excerpt is line-numbered, and the prompt tells the model the `N: `
-prefixes are not part of the file content. Use
-`workflow.current_source_context_char_limit` to bound that refreshed context.
-
-The controller also watches the input token budget. For providers that declare
-`num_ctx`, the usable input budget is `num_ctx - max_tokens`; when a call's
-`prompt_tokens` (or a character-based estimate using
-`workflow.prompt_chars_per_token_estimate`, default 3.5) reaches
-`workflow.prompt_token_budget_warn_ratio` (default 0.9) of that budget, the
-call is flagged in profile records and a budget-pressure note is recorded once
-per loop. With `workflow.auto_shrink_dynamic_context=true` (default), oversized
-CODE prompts shrink their dynamic suffix blocks until the estimated prompt fits
-`workflow.prompt_token_budget_target_ratio` (default 0.85) of the input budget,
-so silent `num_ctx` truncation does not eat the stable prefix instructions.
-
-Set `workflow.record_candidate_artifacts=true` to persist candidate-level
-provenance under `.local_micro_agent/candidate_artifacts`. Each candidate gets a
-metadata JSON file, and candidates that apply edits also get a unified diff; test
-runs get a compact stdout/stderr transcript. `rejected_no_changes` records now
-store the concrete no-change reason, such as target-not-found, no-op replacement,
-comment-only edits, out-of-plan paths, or patch rejection. Recent candidate
-history includes those details so later CODE calls can repair the actual miss
-instead of only seeing a generic rejection status.
-
-Set `workflow.diagnostic_commands` to attach user-defined observation commands
-to each evaluated candidate after tests run. Diagnostics are advisory feedback:
-they do not change pass/fail or metric acceptance. Each command can be a string
-or an object with `name`, `command`, `when` (`after_test`), `timeout_seconds`,
-and `output_limit`. Outputs are stored in candidate history/artifacts and fed
-back to REFLECT/CODE so the next attempt can see what the edit actually changed
-or failed to change. For example, a performance task might record generated IR
-or bundle counts; a web task might record bundle size or accessibility output;
-a database task might record an `EXPLAIN` summary.
-
-Set `workflow.repair_target_not_found=true` to turn a stale search block into a
-narrow same-candidate repair pass. When a candidate has no applied edits because
-`Replacement target not found` was recorded, the controller rereads the current
-writable source excerpt, asks the CODE model to regenerate exactly one candidate
-with a verbatim current-source search block, and then evaluates that repaired
-candidate inside the same todo attempt. The repair prompt anchors on the stale
-search text: it quotes the missing target, then shows the best-matching
-current-source region with line numbers,
-`workflow.repair_anchor_context_lines` (default 18) lines around the closest
-token match. Repaired candidates are preflighted before evaluation — a repaired
-target that is still missing or ambiguous in the current file is rejected
-without spending the todo attempt. The repair is recorded with
-`repair_parent_id` so later analysis can distinguish normal candidates from
-search-block repairs.
-
-Set `workflow.profile_agent=true` for structured controller profiling. The
-agent writes `.local_micro_agent/profile_events.jsonl` by default, with phase
-spans for `PLAN`/`READ`/`CODE`/`TEST`/`REFLECT`, model-call spans, and test
-command spans. Each record includes `elapsed_ms`, loop/state metadata, success
-or error information, and compact call metadata such as role, prompt/output
-character counts, command exit code, and stdout/stderr sizes. This is intended
-for comparing bottlenecks across local serving backends such as Ollama, LM
-Studio, vLLM, or SGLang; it is diagnostic logging, not prompt/KV caching.
-When provider usage metadata is available, model-call records also include
-`prompt_tokens`, `completion_tokens`, `total_tokens`, token-per-second rates,
-and provider timing fields such as Ollama prompt/eval/total durations. Providers
-that do not expose token usage continue to record character counts and elapsed
-wall time only.
-When profiling is enabled, providers with native streaming support may also
-stream model output into `.local_micro_agent/model_streams/*.txt`; model-call
-profile records include `stream_path`, `stream_chunks`, and `stream_chars`.
-Reasoning chunks are written separately to matching `.reasoning.txt` artifacts
-and recorded with `reasoning_stream_path`, `reasoning_stream_chunks`,
-`reasoning_content_chars`, and `reasoning_only_response` fields when the
-provider exposes that metadata. Ollama native and OpenAI-compatible providers
-support this path. Set `workflow.profile_model_stream=false` to disable
-streaming artifacts, or tune `workflow.profile_model_stream_log_interval_chars`
-to control the compact progress lines written to `agent.log`.
-
-OpenAI-compatible providers also accept optional request passthrough fields:
-`think` adds common thinking-control keys (`think`, `enable_thinking`, and
-`enableThinking`) to the chat request, and `extra_body` is merged into the
-request body after the standard fields. This is useful for local servers such
-as LM Studio that expose model-specific custom fields in their chat templates.
-Some servers may ignore these keys on the OpenAI-compatible endpoint; verify
-with a smoke request before treating thinking as disabled for benchmark runs.
-For LM Studio models where thinking is enabled globally and per-request custom
-fields are ignored, set `disable_thinking_with_assistant_prefill=true` together
-with `think=false` to append an empty assistant `<think>` prefill for that
-provider only.
-
-For clean model-evaluation runs, do not inject prior-run winning patches or
-human-discovered transformation ladders into the prompt. Candidate ladders used
-by CODE should come from the current run's own PLAN, BRAINSTORM, READ, or
-future RESEARCH artifacts. Solver-oriented runs may enable explicit research or
-external context gathering, but that context should carry provenance instead of
-being silently mixed into clean-eval prompts.
-
-Use `workflow.project_instruction_files` to name instruction files explicitly.
-Use `workflow.project_context_files` to fully override the auto-detected context
-set, or set `workflow.readme_first=false` for controlled experiments.
-Use `workflow.external_context_paths` for explicit advisory context that should
-be visible to prompts without being treated as local source code.
-
-Seeded workflow options are for resume and harness experiments, not the normal
-first look at a repository:
-
-- `workflow.plan_markdown`: bypasses README-first planning with a known plan.
-- `workflow.seed_files`: bypasses model file selection in `READ`.
-- `workflow.seed_changes`: bypasses model code generation in `CODE`.
-
-For general-purpose agent behavior, prefer README-first planning and keep
-`workflow.writable_files` narrow enough to protect tests, fixtures, generated
-files, and other out-of-scope surfaces.
-
-```json
-{
-  "workflow": {
-    "readme_first": true,
-    "project_instruction_files": [],
-    "project_context_files": [],
-    "writable_files": ["src/target.py"],
-    "test_commands": ["python3 -m pytest -q"]
-  }
-}
-```
-
-## Spec Mode
-
-`workflow.spec_mode=true` promotes a run-local spec from advisory context to the
-controller's task scheduler. It is for "build this spec through a graph of
-tasks" runs, not for the default flat CODE/TEST loop.
-
-The strict spec FSM is:
+Classic mode (the default flat loop):
 
 ```text
-PLAN -> READ -> SCHEDULE -> SPEC_SYNTH -> SCHEDULE
-     -> TASK_READ -> ACCEPT_SYNTH -> CODE -> TEST
-     -> SCHEDULE ...
+PLAN ──► READ ──► CODE ◄──► TEST ──► DONE / FAILED
+                   ▲          │
+                   └─ REFLECT ◄┘   retry path; BRAINSTORM runs from REFLECT
+                                   when the search is stuck
 ```
 
-`SCHEDULE` is deterministic and does not call a model. It persists
-`run_spec.json`, chooses the next open task whose `depends_on` entries are all
-closed, restores deferred tasks once, reopens failed prerequisite tasks when
-they block downstream work and loop budget remains, and terminates with DONE or
-FAILED when the graph is closed, unrecoverable, or the global loop cap is hit.
+Spec mode (`workflow.spec_mode=true` or `preset: "spec"`): a version 2
+`run_spec.json` task graph becomes the loop driver.
 
-Version 2 task specs use these controller-owned fields:
-
-```jsonc
-{
-  "version": 2,
-  "spec_id": "feature-or-optimization",
-  "objective": "...",
-  "invariants": ["..."],
-  "task_graph": [
-    {
-      "task_id": "task-001",
-      "title": "Implement parser",
-      "depends_on": [],
-      "deliverables": ["src/parser.py"],
-      "read_hints": ["src/parser.py", "docs/spec.md"],
-      "acceptance": {
-        "kind": "synthesized",
-        "commands": []
-      },
-      "budget": {
-        "attempts_max": 8,
-        "attempts_used": 0
-      },
-      "status": "open"
-    }
-  ]
-}
+```text
+PLAN ──► READ ──► SCHEDULE ──► TASK_READ ──► ACCEPT_SYNTH ──► CODE ◄──► TEST
+                   │   ▲                                       ▲          │
+                   │   └─ SPEC_SYNTH (cold start, once)        └ REFLECT ◄┤
+                   │   ▲                                                  │
+                   │   └──────────── task closed / deferred ◄─────────────┘
+                   │
+                   ├──► DONE    all tasks closed
+                   └──► FAILED  global loop cap / no recovery possible
 ```
 
-Acceptance kinds:
+| State | Role | Model call |
+|---|---|---|
+| `PLAN` | project-instructions-first action plan | planner |
+| `SPEC_SYNTH` | request → v2 task graph (cold start only, once) | reasoner |
+| `SCHEDULE` | pick next runnable task, recovery, termination | **none** |
+| `TASK_READ` | read only the active task's scope | none |
+| `ACCEPT_SYNTH` | synthesize and freeze task acceptance tests | coder |
+| `READ` | select minimum files for the plan | planner |
+| `CODE` | strict patch/search-replace candidates | coder |
+| `TEST` | run commands; deterministic pass/fail | none/tester |
+| `REFLECT` | short failure analysis before retry (conditional) | reflector |
 
-- `synthesized`: `ACCEPT_SYNTH` writes frozen tests under `.lma_acceptance`.
-- `command`: task-provided or workflow-provided shell commands are run.
-- `metric`: existing metric rules and commands drive acceptance for performance
-  tasks.
+## Quick Start
 
-Synthesized acceptance is constrained by the controller: generated files must be
-under the task acceptance directory, command execution uses the configured
-`spec_acceptance_command_template`, zero-test acceptance is rejected, and CODE
-cannot write `.lma_acceptance` files after they are frozen. Closed tasks can be
-rechecked by the spec regression gate.
-
-Useful spec-mode options:
-
-```jsonc
-{
-  "workflow": {
-    "preset": "spec",
-    "spec_mode": true,
-    "run_spec_enabled": true,
-    "spec_resume": true,
-    "spec_max_tasks": 24,
-    "spec_task_attempt_budget": 8,
-    "spec_task_recovery_rounds": 2,
-    "spec_default_acceptance_kind": "synthesized",
-    "spec_regression_scope": "all",
-    "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
-    "spec_report_path": ".local_micro_agent/spec_report.md",
-    "max_code_test_loops": 100
-  }
-}
+```bash
+local-micro-agent --config config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json \
+  --repo . --request "..."
 ```
 
-`spec_task_recovery_rounds` handles strict dependency chains. When a failed
-task is a prerequisite for unfinished downstream tasks, SCHEDULE reopens that
-failed task with fresh per-round `attempts_used=0` while preserving
-`recovery_rounds` and prior attempt totals for reporting. Downstream tasks stay
-blocked until the prerequisite closes; the controller does not relax business
-dependencies to spend budget. If recovery rounds are exhausted, the report uses
-`stop_reason=no_recovery_possible`. If the global CODE/TEST cap is reached, it
-uses `stop_reason=max_code_test_loops`.
-
-## Spec Reports
-
-Spec mode writes `.local_micro_agent/spec_progress.jsonl` as the graph runs and
-`.local_micro_agent/spec_report.md` at DONE/FAILED. The report includes graph
-progress, `code_test_loop_count`, `fsm_step_count`, `max_code_test_loops`,
-`stop_reason`, per-task attempts, recovery rounds, deliverables, acceptance
-kind, and the recent notes tail. This is the quickest way to distinguish a true
-loop-cap exit from dependency blocking or no-recovery termination.
-
-## Workflow Presets
-
-The workflow section has grown to roughly 80 flags, and most failures in long
-runs come from invalid flag combinations rather than from the model. Instead of
-hand-tuning each flag, set `workflow.preset` to one of four vetted bundles
-from `src/local_micro_agent/presets.py`:
-
-- `minimal`: conservative fix-the-tests loop. Deterministic test decisions,
-  rejected-candidate retries, and target-not-found repair stay on; all
-  exploration machinery (brainstorm, novelty gates, adaptive memory, run spec,
-  structural lifecycle, profiling) stays off.
-- `search`: long-running metric search. Enables conditional reflect, brainstorm
-  after repeated rejections, novelty/axis/region gates, the adaptive gate
-  controller, candidate history and artifacts, continue-after-improvement, and
-  profiling.
-- `structural`: `search` plus the scaffold/probe/expand machinery for
-  multi-step refactors: run-spec task graph, semantic analysis, structural
-  tactic lifecycle, and structural state checkpoints.
-- `spec`: `structural` plus strict spec-mode scheduling. A version 2 task graph
-  becomes the deterministic loop driver with task-scoped READ, acceptance,
-  dependency gates, progress/report artifacts, and failed-prerequisite recovery
-  rounds.
-
-Preset values are defaults, not a mode switch: any key set explicitly in
-`workflow` wins over the preset value, so a preset can be used as a base and
-selectively overridden. The expanded workflow records which keys came from
-the preset rather than the config in `preset_defaulted_keys`; re-expansion
-preserves that record, and the controller uses it to tell preset defaults
-apart from caller-supplied values (for example when deriving the loop
-budget).
+Copy `config.example.json` or a tuned profile from `config/`, point
+`models.default` at your model server, then pick a preset:
 
 ```json
 {
@@ -576,77 +71,338 @@ budget).
 }
 ```
 
-Note that several features described in this README are dormant unless a
-preset or explicit flag enables them. In the shipped `config/*.json` profiles,
-`reflect_before_retry` is false and `brainstorm_after_rejections` is 0, so the
-REFLECT/BRAINSTORM/todo/gate machinery never fires; `semantic_analysis_after_read`,
-`run_spec_after_read`, `continue_after_improvement`, `candidate_history_path`,
-and `record_candidate_artifacts` are also off. The default execution path of
-those profiles is `PLAN -> READ -> (CODE -> TEST)*`. Use the `search`,
-`structural`, or `spec` preset when the run should actually exercise the
-exploration or graph-scheduling machinery.
+Keep `workflow.writable_files` narrow enough to protect tests, fixtures, and
+generated files. Smoke check: `python3 -m compileall src`.
 
-## Focused Source Context
+## Workflow Presets
 
-For narrow Python edits, `workflow.context_symbols` can replace full-file
-CODE context with exact function/class excerpts:
+The workflow section has ~80 flags, and most long-run failures come from
+invalid flag combinations rather than from the model. Set `workflow.preset` to
+one of four vetted bundles from `src/local_micro_agent/presets.py`:
 
-```json
+| Preset | For | Enables |
+|---|---|---|
+| `minimal` | conservative fix-the-tests loop | deterministic test decisions, retries, target-not-found repair; all exploration machinery off |
+| `search` | long-running metric search | conditional reflect, brainstorm after repeated rejections, novelty/axis/region gates, adaptive gate controller, candidate history + artifacts, continue-after-improvement, profiling |
+| `structural` | multi-step refactors | `search` + run-spec task graph, semantic analysis, structural scaffold/probe/expand lifecycle, structural checkpoints |
+| `spec` | build a spec through a task graph | `structural` + strict spec-mode scheduling: task-scoped READ, synthesized acceptance, dependency gates, recovery rounds, progress/report artifacts |
+
+Preset values are defaults, not a mode switch: any key set explicitly in
+`workflow` wins. The expanded workflow records preset-supplied keys in
+`preset_defaulted_keys` so the controller can tell preset defaults apart from
+caller-supplied values (for example when deriving the loop budget).
+
+Without a preset, the shipped `config/*.json` profiles run the plain
+`PLAN -> READ -> (CODE -> TEST)*` path: `reflect_before_retry` is false,
+`brainstorm_after_rejections` is 0, and the exploration machinery stays
+dormant. Use `search`, `structural`, or `spec` when a run should actually
+exercise it.
+
+## Spec Mode
+
+`workflow.spec_mode=true` promotes the run-local spec from advisory context to
+the controller's task scheduler.
+
+### Scheduler
+
+`SCHEDULE` is deterministic and never calls a model. Each visit it persists
+`run_spec.json` and progress, then:
+
+1. all tasks closed → `DONE`; global CODE/TEST cap reached → `FAILED`
+   (`stop_reason=max_code_test_loops`).
+2. picks the next `open` task whose `depends_on` are all closed. Selection
+   order: revisited tasks first, then most-depended-on, then declaration
+   order. `depends_on` edges are hard gates — the controller never relaxes
+   business dependencies to spend budget.
+3. if nothing is runnable: restores `deferred` tasks once, then reopens failed
+   prerequisite tasks that block downstream work for up to
+   `spec_task_recovery_rounds` (default 2) fresh recovery rounds (per-round
+   `attempts_used=0`, prior totals preserved for reporting). Only if neither
+   applies does it exit `FAILED` (`stop_reason=no_recovery_possible`) with a
+   blocked-task diagnosis such as `task-003 waiting on task-002`.
+
+`max_code_test_loops` counts only CODE/TEST attempts; PLAN, READ, SPEC_SYNTH,
+SCHEDULE, TASK_READ, and ACCEPT_SYNTH do not consume it. Tasks with no
+deliverables and no acceptance commands are treated as context-only and close
+automatically after `TASK_READ` without consuming budget.
+
+On cold start (no v2 `run_spec.json`), SCHEDULE routes through `SPEC_SYNTH`
+once: the reasoner lane synthesizes the graph from the request, plan, read
+source, and semantic facts, with a fallback model role
+(`spec_synth_fallback_model_role`) after reasoning-only or parse failures.
+With `spec_resume=true` (default) an existing v2 graph is resumed instead, so
+interrupted runs skip already-closed tasks.
+
+### Task schema (run_spec v2)
+
+```jsonc
 {
-  "workflow": {
-    "seed_files": ["src/target.py"],
-    "context_symbols": {
-      "src/target.py": ["parse_request", "TargetService.apply"]
+  "version": 2,
+  "spec_id": "feature-or-optimization",
+  "objective": "...",
+  "invariants": ["..."],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "title": "Implement parser",
+      "depends_on": [],
+      "deliverables": ["src/parser.py"],      // task-scoped writable files
+      "read_hints": ["src/parser.py", "docs/spec.md"],
+      "acceptance": { "kind": "synthesized", "commands": [] },
+      "budget": { "attempts_max": 8, "attempts_used": 0 },
+      "status": "open"                         // open|in_progress|closed|deferred|failed
     }
-  }
+  ]
 }
 ```
+
+`deliverables` become the active task's writable set, intersected with the
+global `workflow.writable_files` upper bound. `TASK_READ` loads `read_hints`,
+the deliverables of dependency tasks, and the task's own deliverables.
+
+### Acceptance
+
+- `synthesized` (default in the `spec` preset): `ACCEPT_SYNTH` asks the coder
+  lane for test files only — the model cannot emit shell commands. Files are
+  syntax-preflighted, executed red-first (a brand-new task's tests must fail;
+  zero-test suites are rejected), then frozen by SHA-256. The execution
+  command always comes from the controller template
+  `spec_acceptance_command_template` (default
+  `{quoted_python} -m unittest discover -s {quoted_dir} -p 'test*.py'`, where
+  `{quoted_python}` is the running interpreter). CODE can never write under
+  `spec_acceptance_dir` (default `.lma_acceptance`), and frozen hashes are
+  re-verified before every TEST and inside the regression gate. After
+  `spec_acceptance_synth_retries` failures the task downgrades to `command`
+  acceptance. `spec_force_default_acceptance_kind=true` overrides
+  model-declared kinds.
+- `command`: human-supplied shell commands (task-level or `test_commands`).
+- `metric`: existing metric rules drive acceptance for performance tasks.
+
+### Closing a task
+
+A task closes only when its acceptance is green, the spec regression gate
+passes (re-runs the acceptance of already-closed tasks —
+`spec_regression_scope`: `all` (default) | `dependents` | `none` — plus
+optional `spec_invariant_commands`), and frozen acceptance hashes still match.
+A regression failure keeps the current task's changes for in-task repair; if
+the task's budget is then exhausted, the task-boundary snapshot is restored
+and the task is deferred. Patch-application misses (stale search blocks) do
+not consume the task budget, mirroring
+`todo_ignore_patch_failures_for_budget`.
+
+### Progress and reports
+
+Spec mode appends every scheduling event to
+`.local_micro_agent/spec_progress.jsonl` and writes
+`.local_micro_agent/spec_report.md` at DONE/FAILED with graph progress,
+`code_test_loop_count` vs `max_code_test_loops`, `stop_reason`, per-task
+attempts and recovery rounds, deliverables, and acceptance state. This
+distinguishes a true loop-cap exit from dependency blocking or no-recovery
+termination.
+
+## Search Machinery (classic mode)
+
+These features drive long metric-search runs; the `search` preset enables the
+validated combination.
+
+**Retry feedback.** Each retry carries compact notes (`target not found`,
+`no-op`, `comment-only`, failed metrics, restore events) into the next CODE
+prompt. With `reflect_before_retry=true`, `reflect_conditionally=true`
+(default) keeps REFLECT off the hot path: structured simple failures
+(`patch_miss`, `duplicate_variant`, axis/family/contract mismatches) go
+straight back to CODE, and REFLECT runs once per
+`reflect_after_repeated_failure_class` (default 3) repeats of the same class.
+
+**Novelty and cooldowns.** `candidate_novelty_gate=true` rejects byte-identical
+retries of rejected candidates before tests run. `adaptive_search_memory=true`
+tags candidates with domain-neutral strategy axes, tracks per-axis and
+per-region statistics (`file::symbol` via AST, 50-line buckets as fallback,
+combined with axis+family), and cools down axes/regions that keep failing.
+`adaptive_search_reject_cooled_axes` / `adaptive_search_reject_cooled_regions`
+turn cooldowns into pre-test gates (`rejected_cooled_axis`,
+`rejected_cooled_region`). `adaptive_search_force_strategy_axis` makes the
+controller choose a required axis per CODE loop. Domain-specific axis
+vocabulary belongs in the request, not the harness.
+
+**Adaptive gate controller.** `adaptive_gate_controller=true` makes failed
+tactic-family gates evidence-aware: weakly evidenced gates run in `shadow`
+mode, repeated all-skipped brainstorm pressure reopens families in `soft`
+mode, and well-evidenced gates stay `hard`. Decisions are logged to
+`.local_micro_agent/gate_decisions.jsonl` and summarized into CODE prompts.
+
+**Durable todos.** An active todo keeps its tactic in the CODE prompt until
+`todo_attempt_budget` is exhausted. Patch-application misses do not consume
+the budget (`todo_ignore_patch_failures_for_budget=true`). Active-todo
+contracts are controller-enforced (`todo_enforce_active_contract=true`):
+candidates that drift from the declared axis/family are rejected pre-test;
+same-todo duplicate variants are rejected
+(`todo_reject_duplicate_variants=true`). Todos carry an observation chain of
+recent attempts, failure classes, and recovery hints into CODE and REFLECT
+(`observation_backed_todo_continuation=true`).
+
+**Brainstorm.** Runs from REFLECT when the search is stuck. Tactics are scored
+on current-run evidence (`brainstorm_score_tactics=true`), can be steered with
+`brainstorm_open_novelty_lanes`, and selected tactics become active todos with
+`spec_task_id` lineage when an advisory run spec is enabled
+(`run_spec_after_read=true`).
+
+**Structural tactics.** `structural_tactic_lifecycle=true` gives
+scaffold/probe/expand tactics non-budgeted structural learning failures
+(`scope_too_broad`, `invariant_broken`) before normal budgeting resumes.
+`structural_state_checkpoint=true` retains correctness-preserving structural
+patches separately from the metric-winning best state so long refactors can
+continue from validated intermediate structure.
+
+**Improvement loop.** `continue_after_improvement=true` persists
+`.local_micro_agent/best_state.json` and `best.patch` on every metric
+improvement and keeps searching until `max_code_test_loops`.
+`validated_pattern_followup=true` first tries a narrow extension of the latest
+validated pattern before exploring unrelated families.
+
+## Model Lanes And Token Budgets
+
+**Role lanes.** Map `models.{planner,coder,tester,reasoner,reflector,brainstorm}`
+to providers with different sampling/thinking settings. Two routing layers:
+
+- `model_role_overrides_by_call_site`: pin a call site to a role, e.g.
+  `{"reflect": "reflector", "brainstorm": "brainstorm", "spec_synth": "reasoner"}`.
+- `deep_reasoning_enabled=true`: escalate selected call sites (default
+  `reflect`) from their fast lane to `deep_reasoning_model_role` only when
+  triggered — same failure class repeated
+  (`deep_reasoning_after_same_failure_class`), no improvement for N loops
+  (`deep_reasoning_after_no_improvement_loops`), or consecutive invariant
+  failures (`deep_reasoning_after_invariant_failures`). This keeps reflect and
+  brainstorm on cheap no-think lanes by default.
+
+The legacy `reasoning_lane_enabled` routing for `plan`/`semantic_analysis`
+call sites still applies; exact JSON/patch roles (`coder`, `brainstorm`,
+`tester`) are excluded from both layers unless reconfigured.
+
+**Reasoning-only responses are failures.** If a thinking provider returns
+reasoning with empty final content, the call fails and the node takes its
+normal fallback path. Keep iterative output budgets small: the tuned configs
+cap JSON/patch and reasoning lanes at 8K tokens and exploration lanes at 16K —
+a large `max_tokens` on a short controller call invites a full reasoning-only
+burn (`num_predict` includes thinking tokens on Ollama).
+
+**Input token budget.** For providers that declare `num_ctx`, the usable input
+budget is `num_ctx - max_tokens`. Calls near the budget
+(`prompt_token_budget_warn_ratio`, default 0.9) are flagged in profile records
+with a once-per-loop note, and `auto_shrink_dynamic_context=true` (default)
+shrinks oversized CODE dynamic suffixes to
+`prompt_token_budget_target_ratio` (default 0.85) so silent `num_ctx`
+truncation cannot eat the stable prefix instructions.
+
+**OpenAI-compatible passthrough.** `think` adds common thinking-control keys
+to the request; `extra_body` merges custom fields (useful for LM Studio). For
+servers that ignore per-request thinking flags, set
+`disable_thinking_with_assistant_prefill=true` with `think=false`. Verify with
+a smoke request before trusting thinking-off for benchmarks.
+
+## Grounding And Context
+
+**Project instructions first.** `PLAN` auto-detects `AGENTS.md`, `CLAUDE.md`,
+`INSTRUCTIONS.md`, then `README.md` variants, and receives the workflow
+constraints (`writable_files`, `test_commands`, metric settings) next to the
+project context. Override with `project_instruction_files` /
+`project_context_files`, or disable with `readme_first=false`.
+
+**Semantic analysis.** `semantic_analysis_after_read=true` writes a
+domain-neutral analysis artifact after READ (data visibility, read/write
+hazards, API contracts, lifecycle ordering, safe hooks), filters it, and feeds
+only the curated copy into CODE/BRAINSTORM prompts.
+
+**External context packs.** `external_context_paths` injects read-only
+advisory documents with source/hash/trust metadata, labeled as advisory in all
+prompts; local source and tests stay authoritative. Bound with
+`external_context_char_limit` / `external_context_item_char_limit`.
+
+**Focused symbols.** `context_symbols` replaces full-file CODE context with
+exact function/class excerpts for narrow Python edits.
+
+**Prompt-cache friendly layout.** `prompt_cache_friendly_layout=true` keeps a
+stable prefix (system instruction, request, plan, source) and merges all
+runtime feedback into one trailing dynamic message, so serving-layer prefix
+caches (vLLM/SGLang, provider implicit caching) stay warm.
+
+**Fresh, line-numbered source.** `current_source_context_before_code=true`
+rereads writable files before each CODE attempt and appends a line-numbered
+excerpt to the dynamic suffix (the prompt states that `N: ` prefixes are not
+file content).
+
+**Candidate preflight.** Before tests run, changed Python files are
+`ast.parse`d and scanned for HTML-entity escaping
+(`candidate_syntax_preflight`, `candidate_html_entity_preflight`); failures
+become structured test results without spending a real test run.
+
+**Patch-miss recovery.** After `Replacement target not found` or comment-only
+edits, an exact context refresh
+(`exact_context_refresh_after_patch_miss=true`) injects the current source of
+the missed region into the next CODE attempt, and
+`repair_target_not_found=true` runs a narrow same-candidate repair: the prompt
+quotes the stale search text next to the best-matching current-source region
+(`repair_anchor_context_lines`, default 18), and repaired candidates are
+preflighted for existence and uniqueness before evaluation. Whitespace-only
+misses are retargeted automatically.
+
+**Output format.** For models that struggle to JSON-escape multi-line code,
+`code_output_format="xml"` switches CODE to raw `<search>`/`<replace>` blocks.
+`log_raw_model_outputs=true` saves malformed outputs for diagnosis.
+
+## Telemetry
+
+`profile_agent=true` writes `.local_micro_agent/profile_events.jsonl`: phase
+spans, model-call spans (prompt/completion tokens, tok/s, provider timings,
+token-budget fields), and command spans. Streaming providers also write
+`.local_micro_agent/model_streams/*.txt` with separate `.reasoning.txt`
+artifacts and `reasoning_only_response` markers.
+
+`record_candidate_artifacts=true` persists per-candidate metadata, unified
+diffs, and test transcripts under `.local_micro_agent/candidate_artifacts`,
+including concrete no-change reasons. `diagnostic_commands` attaches advisory
+observation commands (e.g. an `EXPLAIN` summary or generated-IR stats) to each
+evaluated candidate; outputs feed back into REFLECT/CODE without changing
+pass/fail.
+
+Candidate history (`candidate_history_path`) persists accepted/rejected
+directions as JSONL across runs.
+
+## Safety And Clean Evaluation
+
+- `TEST` trusts exit codes (`deterministic_test_decision=true` in all shipped
+  configs; always enforced in spec mode) — an LLM tester cannot reject green
+  tests.
+- Every edit is checked against the writable set; failed candidates are rolled
+  back from snapshots; `.lma_acceptance` is never writable by CODE.
+- Seeded options (`plan_markdown`, `seed_files`, `seed_changes`) are for
+  resume/harness experiments only.
+- For clean model evaluation, do not inject prior-run winning patches or
+  human-discovered ladders into prompts; advisory context must carry
+  provenance (`external_context_paths`).
 
 ## Files
 
 - `config.example.json`: provider and workflow configuration.
 - `config/`: ready-to-use local model provider configs.
-- `src/local_micro_agent/orchestrator.py`: FSM core (run/plan/read/code/test/
-  reflect), snapshot/patch application, command execution, CLI.
-- `src/local_micro_agent/mixins/model_runtime.py`: model calls, JSON repair,
-  token budget warnings, response normalization.
-- `src/local_micro_agent/mixins/telemetry.py`: profiling spans, stream
-  artifacts, run logging.
-- `src/local_micro_agent/mixins/tactics.py`: brainstorm generation, scoring,
-  gates, tactic-to-todo creation.
-- `src/local_micro_agent/mixins/search_memory.py`: adaptive search memory,
-  axis and region cooldowns, candidate contracts, failure memory.
-- `src/local_micro_agent/mixins/todos.py`: durable todo lifecycle, run-spec
-  task graph, structural checkpoints.
-- `src/local_micro_agent/mixins/context.py`: project/external context, source
-  excerpts, slicing and line numbering.
-- `src/local_micro_agent/mixins/candidates.py`: candidate history,
-  observations, artifacts, target-not-found repair.
+- `src/local_micro_agent/orchestrator.py`: FSM core, snapshot/patch
+  application, command execution, CLI.
 - `src/local_micro_agent/presets.py`: named workflow flag bundles.
-- `src/local_micro_agent/state.py`: single global state bag.
+- `src/local_micro_agent/state.py`: state enum and the single state bag.
 - `src/local_micro_agent/models.py`: model-manager abstraction.
-- `src/local_micro_agent/mcp_client.py`: async tool boundary.
 - `src/local_micro_agent/prompts.py`: micro system prompts per state.
-- `src/local_micro_agent/validators.py`: JSON validation/retry helpers.
+- `src/local_micro_agent/validators.py`: JSON/XML validation and repair.
+- `src/local_micro_agent/mcp_client.py`: async tool boundary.
+- `src/local_micro_agent/mixins/`: stateless domain mixins composed into
+  `MicroAgent` —
+  `model_runtime` (model calls, JSON repair, token budgets),
+  `telemetry` (profiling, streams, logging),
+  `tactics` (brainstorm generation/scoring/gates),
+  `search_memory` (axis/region cooldowns, contracts, failure memory),
+  `todos` (todo lifecycle, run-spec graph, spec scheduler, structural
+  checkpoints),
+  `context` (project/external context, excerpts, slicing),
+  `candidates` (history, observations, artifacts, repair).
 
-The domain modules under `src/local_micro_agent/mixins/` are stateless mixins
-composed into `MicroAgent`; the public entry point remains
-`local_micro_agent.orchestrator.MicroAgent`. `tests/test_mixin_modules.py`
-guards the structure: independent module imports, no method collisions across
-mixins, no shadowing by the FSM core, and no mutable class state in mixins.
-
-## Smoke
-
-```bash
-python3 -m compileall src
-```
-
-## Next Practical Step
-
-Copy `config.example.json`, point `models.default` at the preferred local
-model server, and set `workflow.seed_files` / `workflow.writable_files` for
-narrow experiments. Existing tuned profiles live under `config/`, for example:
-
-```bash
-local-micro-agent --config config/config.qwen36-27b-mlx-ollama.json --repo . --request "..."
-```
+The public entry point remains `local_micro_agent.orchestrator.MicroAgent`.
+`tests/test_mixin_modules.py` guards the structure: independent imports, no
+method collisions, no shadowing by the FSM core, no mutable mixin state.
