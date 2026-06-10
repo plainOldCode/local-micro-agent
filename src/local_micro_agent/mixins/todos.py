@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import shlex
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,14 @@ class TodoLifecycleMixin:
                     return
         if workflow.get("run_spec_after_read") or force:
             self.state.scratch.pop("run_spec", None)
-            focus = self._focused_read_model_context(str(workflow.get("run_spec_focus", "")))
+            focus = "\n\n".join(
+                part
+                for part in (
+                    self._focused_read_model_context(str(workflow.get("run_spec_focus", ""))),
+                    self._spec_acceptance_policy_context(),
+                )
+                if part.strip()
+            )
             role_default = "reasoner" if self._spec_mode_enabled() and force else "planner"
             role = str(workflow.get("run_spec_model_role", role_default))
             call_site = "spec_synth" if self._spec_mode_enabled() and force else "run_spec"
@@ -178,7 +186,10 @@ class TodoLifecycleMixin:
         if not isinstance(acceptance, dict):
             acceptance = {}
         default_kind = workflow.get("spec_default_acceptance_kind", "command")
-        kind = str(acceptance.get("kind") or default_kind).strip() or "command"
+        if workflow.get("spec_force_default_acceptance_kind"):
+            kind = str(default_kind).strip() or "command"
+        else:
+            kind = str(acceptance.get("kind") or default_kind).strip() or "command"
         commands = acceptance.get("commands")
         if not isinstance(commands, list):
             commands = workflow.get("test_commands", [])
@@ -721,16 +732,37 @@ class TodoLifecycleMixin:
         template = str(
             workflow.get(
                 "spec_acceptance_command_template",
-                "python3 -m unittest discover -s {quoted_dir} -p 'test*.py'",
+                "{quoted_python} -m unittest discover -s {quoted_dir} -p 'test*.py'",
             )
         ).strip()
         if not template:
-            template = "python3 -m unittest discover -s {quoted_dir} -p 'test*.py'"
+            template = "{quoted_python} -m unittest discover -s {quoted_dir} -p 'test*.py'"
+        python = sys.executable or "python3"
         command = template.format(
             dir=rel_task_dir,
             quoted_dir=shlex.quote(rel_task_dir),
+            python=python,
+            quoted_python=shlex.quote(python),
         ).strip()
         return [command] if command else []
+
+    def _spec_acceptance_policy_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        default_kind = str(workflow.get("spec_default_acceptance_kind", "") or "").strip()
+        force_default = bool(workflow.get("spec_force_default_acceptance_kind"))
+        if not default_kind and not force_default:
+            return ""
+        lines = ["Spec acceptance policy:"]
+        if default_kind:
+            lines.append(f"- Default acceptance kind: {default_kind}")
+        if force_default:
+            lines.append("- The controller will force every task to the default acceptance kind.")
+        if default_kind == "metric":
+            lines.append("- Use metric acceptance for performance tasks; do not synthesize unit tests for metric optimization tasks.")
+            lines.append("- Leave commands empty when the configured workflow metric/test commands should be used.")
+        elif default_kind == "command":
+            lines.append("- Use command acceptance unless a task explicitly requires synthesized tests.")
+        return "\n".join(lines)
 
     async def _preflight_acceptance_files(self, paths: list[str]) -> list[TestResult]:
         candidate = CodeCandidate(

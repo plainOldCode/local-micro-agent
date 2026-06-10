@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import io
 import json
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -2186,7 +2188,10 @@ Background / non-constraints
             )
             self.assertEqual(
                 acceptance["commands"],
-                ["python3 -m unittest discover -s .lma_acceptance/task-001 -p 'test*.py'"],
+                [
+                    f"{shlex.quote(sys.executable)} -m unittest discover "
+                    "-s .lma_acceptance/task-001 -p 'test*.py'"
+                ],
             )
             self.assertFalse((repo / "pwned").exists())
 
@@ -2668,6 +2673,62 @@ Background / non-constraints
             self.assertIn("SPEC node", messages[0]["content"])
             self.assertIn("task_graph", messages[0]["content"])
             self.assertIn("target.py", messages[1]["content"])
+
+    def test_spec_force_default_acceptance_kind_overrides_model_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_default_acceptance_kind": "metric",
+                        "spec_force_default_acceptance_kind": True,
+                    },
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "perf",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "optimize metric",
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "synthesized", "commands": []},
+                        }
+                    ],
+                }
+            )
+
+            self.assertIsNotNone(spec)
+            task = spec["task_graph"][0]
+            self.assertEqual(task["acceptance"]["kind"], "metric")
+            self.assertEqual(task["acceptance"]["commands"], [])
+
+    def test_spec_acceptance_policy_context_guides_metric_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_default_acceptance_kind": "metric",
+                        "spec_force_default_acceptance_kind": True,
+                    },
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            context = agent._spec_acceptance_policy_context()
+
+            self.assertIn("Default acceptance kind: metric", context)
+            self.assertIn("force every task", context)
+            self.assertIn("do not synthesize unit tests", context)
 
     def test_structural_tactic_creates_structural_probe_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

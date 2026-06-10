@@ -86,7 +86,7 @@ _SPEC: dict[str, Any] = {
     "spec_max_tasks": 24,
     "spec_task_attempt_budget": 8,
     "spec_acceptance_dir": ".lma_acceptance",
-    "spec_acceptance_command_template": "python3 -m unittest discover -s {quoted_dir} -p 'test*.py'",
+    "spec_acceptance_command_template": "{quoted_python} -m unittest discover -s {quoted_dir} -p 'test*.py'",
     "spec_acceptance_review": False,
     "spec_default_acceptance_kind": "synthesized",
     "spec_acceptance_synth_retries": 1,
