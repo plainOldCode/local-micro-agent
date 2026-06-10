@@ -1516,6 +1516,16 @@ class MicroAgent(
                 "Retargeted replacement target to exact current source whitespace "
                 f"in {path}"
             )
+            if target == replacement:
+                self.state.notes.append(f"Replacement is a no-op after retarget: {path}")
+                return False
+            if self._without_comment_lines(target) == self._without_comment_lines(
+                replacement
+            ):
+                self.state.notes.append(
+                    f"Replacement only changes comments or blank lines after retarget: {path}"
+                )
+                return False
         if original.count(target) != 1:
             self.state.notes.append(f"Replacement target is ambiguous: {path}")
             return False

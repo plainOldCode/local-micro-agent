@@ -4308,6 +4308,38 @@ value = 'fast'
                 "\n".join(agent.state.notes),
             )
 
+    def test_apply_replacement_retargeted_noop_is_not_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "class Builder:\n"
+                "    def build(self):\n"
+                "        return []\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                reason="near miss noop",
+                target="    def build(self):\n         return []\n",
+                replacement="    def build(self):\n        return []\n",
+            )
+
+            async def apply_once() -> int:
+                await agent.mcp.start()
+                try:
+                    return await agent._apply_changes([change], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            applied = asyncio.run(apply_once())
+
+            self.assertEqual(applied, 0)
+            self.assertIn("no-op after retarget", "\n".join(agent.state.notes))
+
     def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
