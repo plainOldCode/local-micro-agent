@@ -2919,6 +2919,104 @@ value = 'fast'
                 "\n".join(state.notes),
             )
 
+    def test_target_not_found_repair_retargets_unique_whitespace_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "class Builder:\n"
+                "    def build(self):\n"
+                "        # Simple slot packing\n"
+                "        return []\n"
+                "\n"
+                "    def add(self):\n"
+                "        return None\n"
+            )
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "t=Path('target.py').read_text(); "
+                            "print('cycles: 80' if 'return [1]' in t else 'cycles: 120')\""
+                        )
+                    ],
+                    "candidate_queue": True,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "record_candidate_artifacts": True,
+                    "repair_target_not_found": True,
+                    "code_output_format": "xml",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            agent.models = _StaticModelManager(
+                """
+<candidates>
+<candidate id="fixed">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Repair near-exact whitespace miss.</reason>
+<change>
+<path>target.py</path>
+<search>
+    def build(self):
+         # Simple slot packing
+        return []
+</search>
+<replace>
+    def build(self):
+        # Simple slot packing
+        return [1]
+</replace>
+</change>
+</candidate>
+</candidates>
+"""
+            )
+            candidate = CodeCandidate(
+                "miss",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="make it fast",
+                        target="missing",
+                        replacement="new",
+                    )
+                ],
+                "make it fast",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertIn("return [1]", target.read_text())
+            self.assertIn(
+                "Retargeted repaired search block to exact current source whitespace",
+                "\n".join(state.notes),
+            )
+            rows = [
+                json.loads(line)
+                for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(rows[0]["candidate_id"], "miss-repair1")
+            self.assertEqual(rows[0]["status"], "improved")
+
     def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

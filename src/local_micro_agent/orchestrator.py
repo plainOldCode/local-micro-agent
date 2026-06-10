@@ -5662,10 +5662,36 @@ class MicroAgent:
             except FileNotFoundError:
                 return f"repaired change targets missing file {change.path}"
             if change.target not in content:
-                return f"repaired target still not found in {change.path}"
+                retargeted = self._unique_stripped_line_match(content, change.target)
+                if retargeted is None:
+                    return f"repaired target still not found in {change.path}"
+                change.target = retargeted
+                if retargeted.endswith("\n") and not change.replacement.endswith("\n"):
+                    change.replacement += "\n"
+                self.state.notes.append(
+                    "Retargeted repaired search block to exact current source "
+                    f"whitespace in {change.path}"
+                )
             if content.count(change.target) != 1:
                 return f"repaired target is ambiguous in {change.path}"
         return ""
+
+    @staticmethod
+    def _unique_stripped_line_match(content: str, target: str) -> str | None:
+        target_lines = target.splitlines()
+        if not target_lines:
+            return None
+        target_key = [line.strip() for line in target_lines]
+        content_lines = content.splitlines(keepends=True)
+        width = len(target_lines)
+        matches: list[str] = []
+        for index in range(0, len(content_lines) - width + 1):
+            window = content_lines[index : index + width]
+            if [line.strip() for line in window] == target_key:
+                matches.append("".join(window))
+                if len(matches) > 1:
+                    return None
+        return matches[0] if matches else None
 
     async def _target_not_found_repair_prompt(
         self,
