@@ -2030,6 +2030,44 @@ Background / non-constraints
             self.assertEqual(result.loop_count, 1)
             self.assertEqual(target.read_text(), "value = 'old'\n")
 
+    def test_reflect_before_retry_skips_structured_patch_miss_until_repeated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.notes.append("Replacement target not found: target.py")
+            state.scratch["applied_changes"] = 0
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reflect_before_retry": True,
+                    "reflect_after_repeated_failure_class": 3,
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            self.assertFalse(agent._should_reflect_after_failure())
+            self.assertFalse(agent._should_reflect_after_failure())
+            self.assertTrue(agent._should_reflect_after_failure())
+            self.assertIn("Skipping REFLECT for structured retry failure patch_miss", "\n".join(state.notes))
+
+    def test_reflect_conditionally_false_preserves_legacy_reflect_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            state.notes.append("Replacement target not found: target.py")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "reflect_before_retry": True,
+                    "reflect_conditionally": False,
+                },
+            }
+            agent = MicroAgent(config, state)
+
+            self.assertTrue(agent._should_reflect_after_failure())
+
     def test_shipped_deterministic_configs_enable_rejected_candidate_retries(self) -> None:
         for config_path in Path("config").glob("*.json"):
             with self.subTest(config=str(config_path)):

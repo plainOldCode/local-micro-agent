@@ -3484,11 +3484,7 @@ class MicroAgent:
         if self.config.get("workflow", {}).get("deterministic_test_decision"):
             if failed and self._should_retry_rejected_candidate():
                 self.state.loop_count += 1
-                self.state.current = (
-                    AgentStateName.REFLECT
-                    if self.config.get("workflow", {}).get("reflect_before_retry")
-                    else AgentStateName.CODE
-                )
+                self.state.current = self._retry_state_after_failure()
                 return
             if not failed and self._should_continue_after_improvement():
                 self._create_validated_pattern_followup_todo()
@@ -3531,10 +3527,8 @@ class MicroAgent:
             return
 
         self.state.notes.append(f"Retry focus: {decision.next_focus or decision.reason}")
-        self.state.current = (
-            AgentStateName.REFLECT
-            if self.config.get("workflow", {}).get("reflect_before_retry")
-            else AgentStateName.CODE
+        self.state.current = self._retry_state_after_failure(
+            decision.next_focus or decision.reason
         )
 
     def _writable_files(self) -> set[str]:
@@ -3619,6 +3613,57 @@ class MicroAgent:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("retry_rejected_candidates")) and (
             self.state.loop_count + 1 < self.state.max_loops
+        )
+
+    def _retry_state_after_failure(self, retry_focus: str = "") -> AgentStateName:
+        if self._should_reflect_after_failure(retry_focus):
+            return AgentStateName.REFLECT
+        return AgentStateName.CODE
+
+    def _should_reflect_after_failure(self, retry_focus: str = "") -> bool:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("reflect_before_retry"):
+            return False
+        if workflow.get("reflect_conditionally", True) is False:
+            return True
+        failure_class = self._retry_failure_class(retry_focus)
+        counts = self.state.scratch.setdefault("retry_failure_class_counts", {})
+        if not isinstance(counts, dict):
+            counts = {}
+            self.state.scratch["retry_failure_class_counts"] = counts
+        count = int(counts.get(failure_class, 0) or 0) + 1
+        counts[failure_class] = count
+
+        simple_failures = {
+            "patch_miss",
+            "duplicate_variant",
+            "axis_mismatch",
+            "family_mismatch",
+            "contract_mismatch",
+        }
+        if failure_class in simple_failures:
+            threshold = int(
+                workflow.get("reflect_after_repeated_failure_class", 3) or 3
+            )
+            if count < threshold:
+                self.state.notes.append(
+                    "Skipping REFLECT for structured retry failure "
+                    f"{failure_class} count={count}/{threshold}"
+                )
+                return False
+        return True
+
+    def _retry_failure_class(self, retry_focus: str = "") -> str:
+        recent_notes = " | ".join(self.state.notes[-8:])
+        detail = " | ".join(part for part in (recent_notes, retry_focus) if part)
+        return self._candidate_failure_class(
+            status="rejected",
+            metric=self.state.scratch.get("last_metric"),
+            applied=int(self.state.scratch.get("applied_changes", 0) or 0),
+            failed=True,
+            results=self.state.test_results,
+            failure_detail=detail,
+            no_change_reason=detail if self.state.scratch.get("applied_changes", 0) == 0 else "",
         )
 
     def _should_continue_after_improvement(self) -> bool:
