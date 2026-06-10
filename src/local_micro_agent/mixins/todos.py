@@ -543,8 +543,45 @@ class TodoLifecycleMixin:
             content = self._context_for_file(rel_path, content)
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
         await self._load_external_contexts()
+        if self._spec_task_is_context_only(task):
+            self._close_context_only_spec_task(task)
+            return
         await self._ensure_spec_task_boundary_snapshot(task)
         self.state.current = AgentStateName.ACCEPT_SYNTH
+
+    def _spec_task_is_context_only(self, task: dict[str, Any]) -> bool:
+        deliverables = task.get("deliverables")
+        if isinstance(deliverables, list) and any(str(item).strip() for item in deliverables):
+            return False
+        acceptance = task.get("acceptance")
+        commands = acceptance.get("commands") if isinstance(acceptance, dict) else None
+        if isinstance(commands, list) and any(str(command).strip() for command in commands):
+            return False
+        return True
+
+    def _close_context_only_spec_task(self, task: dict[str, Any]) -> None:
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict):
+            self.state.current = AgentStateName.SCHEDULE
+            return
+        task["status"] = "closed"
+        task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        task["decision_hint"] = "context_only"
+        task["last_observation"] = {
+            "loop": self.state.loop_count,
+            "failed": False,
+            "budget_counted": False,
+            "summary": "Context-only spec task closed after TASK_READ.",
+        }
+        self.state.notes.append(f"Closed context-only spec task: {task.get('task_id')}")
+        self._persist_run_spec(spec)
+        self._append_spec_progress_event(
+            "closed",
+            spec,
+            task,
+            extra={"reason": "context_only"},
+        )
+        self.state.current = AgentStateName.SCHEDULE
 
     def _spec_task_read_paths(self, task: dict[str, Any]) -> list[str]:
         paths: list[str] = []

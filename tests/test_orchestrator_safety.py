@@ -1871,6 +1871,70 @@ Background / non-constraints
             self.assertEqual(spec["task_graph"][0]["budget"]["attempts_used"], 1)
             self.assertEqual(spec["task_graph"][1]["budget"]["attempts_used"], 1)
 
+    def test_spec_mode_closes_context_only_task_without_code_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "Readme.md").write_text("context\n")
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "run_spec.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "context-then-code",
+                        "objective": "Read context then write deliverable.",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "read context",
+                                "read_hints": ["Readme.md"],
+                                "deliverables": [],
+                                "acceptance": {"kind": "metric", "commands": []},
+                                "budget": {"attempts_max": 1},
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "write target",
+                                "depends_on": ["task-001"],
+                                "deliverables": ["target.txt"],
+                                "read_hints": ["target.txt"],
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": [
+                                        "python3 -c \"from pathlib import Path; assert Path('target.txt').read_text() == 'done'\""
+                                    ],
+                                },
+                                "budget": {"attempts_max": 1},
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            result = run_agent(
+                repo,
+                {
+                    "spec_mode": True,
+                    "run_spec_enabled": True,
+                    "run_spec_path": ".local_micro_agent/run_spec.json",
+                    "max_code_test_loops": 3,
+                    "writable_files": ["*.txt"],
+                    "seed_files": [],
+                    "seed_changes": [{"path": "target.txt", "content": "done"}],
+                },
+            )
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertEqual(result.loop_count, 1)
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual([task["status"] for task in spec["task_graph"]], ["closed", "closed"])
+            self.assertEqual(spec["task_graph"][0]["budget"]["attempts_used"], 0)
+            self.assertEqual(spec["task_graph"][0]["decision_hint"], "context_only")
+            self.assertIn("Closed context-only spec task: task-001", "\n".join(result.notes))
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"reason": "context_only"', progress_events)
+
     def test_spec_mode_cold_start_synthesizes_v2_run_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
