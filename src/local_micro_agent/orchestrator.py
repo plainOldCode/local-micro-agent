@@ -1361,6 +1361,7 @@ class MicroAgent(
             failure_detail=failure_detail,
             no_change_reason=no_change_reason,
         )
+        self.state.scratch["last_candidate_observation"] = extra
         if correctness_passed and applied > 0:
             extra.update(
                 self._persist_correct_survivor(

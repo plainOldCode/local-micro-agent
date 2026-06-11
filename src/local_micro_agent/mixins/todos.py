@@ -44,6 +44,8 @@ class TodoLifecycleMixin:
                 for part in (
                     self._focused_read_model_context(str(workflow.get("run_spec_focus", ""))),
                     self._spec_acceptance_policy_context(),
+                    self._spec_rewrite_focus_context(),
+                    self._correct_survivor_spec_context(),
                 )
                 if part.strip()
             )
@@ -118,6 +120,7 @@ class TodoLifecycleMixin:
             self.state.scratch["run_spec"] = spec
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+            self.state.scratch.pop("spec_rewrite_focus", None)
             self.state.notes.append(f"Persisted run spec: {path}")
             return
         if path.exists():
@@ -288,12 +291,49 @@ class TodoLifecycleMixin:
             "depends_on": depends_on,
             "deliverables": deliverables,
             "read_hints": read_hints,
+            "target_symbols": self._normalize_string_list(task.get("target_symbols")),
+            "target_regions": self._normalize_string_list(task.get("target_regions")),
+            "preserved_invariants": self._normalize_string_list(
+                task.get("preserved_invariants")
+            ),
+            "edit_scope": self._normalize_task_text_field(task.get("edit_scope")),
+            "validator": self._normalize_task_validator(task.get("validator")),
+            "correctness_rationale": self._normalize_task_text_field(
+                task.get("correctness_rationale")
+            ),
+            "fallback_plan": self._normalize_task_text_field(task.get("fallback_plan")),
             "acceptance": normalized_acceptance,
             "budget": {"attempts_max": attempts_max, "attempts_used": attempts_used},
             "closed_at": task.get("closed_at"),
             "recovery_rounds": int(task.get("recovery_rounds", 0) or 0),
             "attempts_total": int(task.get("attempts_total", 0) or 0),
         }
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            items = [value]
+        elif isinstance(value, list):
+            items = value
+        else:
+            return []
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    @staticmethod
+    def _normalize_task_text_field(value: Any) -> str:
+        return str(value or "").strip()
+
+    def _normalize_task_validator(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        normalized = {
+            "kind": str(value.get("kind") or "").strip(),
+            "failure_condition": str(value.get("failure_condition") or "").strip(),
+        }
+        command = str(value.get("command") or "").strip()
+        if command:
+            normalized["command"] = command
+        return {key: item for key, item in normalized.items() if item}
 
     def _todo_soft_until_first_improvement_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -356,6 +396,183 @@ class TodoLifecycleMixin:
             "deferred": statuses.count("deferred"),
             "failed": statuses.count("failed"),
         }
+
+    def _spec_design_contract_gate_enabled(self) -> bool:
+        return bool(self.config.get("workflow", {}).get("spec_design_contract_gate"))
+
+    def _spec_task_design_contract_issues(
+        self, spec: dict[str, Any], task: dict[str, Any]
+    ) -> list[str]:
+        if not self._spec_design_contract_gate_enabled():
+            return []
+        if self._spec_task_is_context_only(task):
+            return []
+        issues: list[str] = []
+        if (
+            not self._normalize_string_list(task.get("target_symbols"))
+            and not self._normalize_string_list(task.get("target_regions"))
+        ):
+            issues.append("missing target_symbols or target_regions")
+        task_invariants = self._normalize_string_list(task.get("preserved_invariants"))
+        spec_invariants = self._normalize_string_list(spec.get("invariants"))
+        if not task_invariants and not spec_invariants:
+            issues.append("missing preserved_invariants")
+        edit_scope = str(task.get("edit_scope") or "").strip()
+        if not edit_scope:
+            issues.append("missing edit_scope")
+        elif self._spec_edit_scope_too_broad(edit_scope):
+            issues.append("edit_scope too broad")
+        validator = task.get("validator")
+        failure_condition = (
+            str(validator.get("failure_condition") or "").strip()
+            if isinstance(validator, dict)
+            else ""
+        )
+        if not failure_condition:
+            issues.append("missing validator.failure_condition")
+        if not str(task.get("correctness_rationale") or "").strip():
+            issues.append("missing correctness_rationale")
+        if not str(task.get("fallback_plan") or "").strip():
+            issues.append("missing fallback_plan")
+        return issues
+
+    @staticmethod
+    def _spec_edit_scope_too_broad(edit_scope: str) -> bool:
+        text = edit_scope.lower()
+        broad_patterns = (
+            r"\brewrite\b",
+            r"\bentire\b",
+            r"\bwhole\b",
+            r"\ball\b",
+            r"\boptimi[sz]e (the )?(algorithm|program|codebase|hot path)\b",
+        )
+        return any(re.search(pattern, text) for pattern in broad_patterns)
+
+    def _reject_spec_task_for_design_contract(
+        self, spec: dict[str, Any], task: dict[str, Any], issues: list[str]
+    ) -> None:
+        workflow = self.config.get("workflow", {})
+        max_rewrites = int(workflow.get("spec_design_contract_rewrite_attempts", 2) or 0)
+        prior_contract = task.get("design_contract")
+        persisted_attempts = (
+            int(prior_contract.get("rewrite_attempts", 0) or 0)
+            if isinstance(prior_contract, dict)
+            else 0
+        )
+        attempts = max(
+            int(self.state.scratch.get("spec_design_contract_rewrite_attempts", 0) or 0),
+            persisted_attempts,
+        )
+        task["status"] = "needs_design"
+        task["design_contract"] = {
+            "status": "rejected",
+            "issues": issues,
+            "rewrite_attempts": attempts + 1,
+            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        task["decision_hint"] = (
+            "spec_design_contract_incomplete: rewrite this task with target symbols/"
+            "regions, preserved invariants, a small edit scope, validator failure "
+            "condition, correctness rationale, and fallback plan before CODE."
+        )
+        spec["active_task_id"] = None
+        spec["last_design_contract_issues"] = {
+            "task_id": task.get("task_id"),
+            "issues": issues,
+        }
+        self._persist_run_spec(spec)
+        self._append_spec_progress_event(
+            "design_rejected",
+            spec,
+            task,
+            extra={"issues": issues, "rewrite_attempt": attempts + 1},
+        )
+        self.state.notes.append(
+            f"Spec task {task.get('task_id')} failed design contract gate: "
+            + "; ".join(issues)
+        )
+        if attempts < max_rewrites:
+            self.state.scratch["spec_design_contract_rewrite_attempts"] = attempts + 1
+            self.state.scratch["spec_rewrite_focus"] = self._spec_design_rewrite_focus(
+                task,
+                issues,
+            )
+            self.state.current = AgentStateName.SPEC_SYNTH
+            return
+        spec["last_stop_reason"] = "spec_design_contract_incomplete"
+        self._persist_run_spec(spec)
+        self.state.current = AgentStateName.FAILED
+
+    def _spec_design_rewrite_focus(
+        self, task: dict[str, Any], issues: list[str], failure_summary: str = ""
+    ) -> str:
+        compact_task = {
+            "task_id": task.get("task_id"),
+            "title": task.get("title"),
+            "strategy_axis": task.get("strategy_axis"),
+            "family_key": task.get("family_key"),
+            "expected_signal": task.get("expected_signal"),
+            "issues": issues,
+            "last_observation": task.get("last_observation"),
+        }
+        parts = [
+            "The previous run-local spec was rejected before CODE because one task "
+            "was not an executable design contract.",
+            "Rewrite the spec tasks so every implementation task names concrete "
+            "target_symbols or target_regions, preserved_invariants, edit_scope, "
+            "validator.failure_condition, correctness_rationale, and fallback_plan.",
+            "Rejected task:",
+            json.dumps(compact_task, ensure_ascii=False, indent=2),
+        ]
+        if failure_summary.strip():
+            parts.extend(["Latest failure summary:", failure_summary.strip()])
+        return "\n\n".join(parts)
+
+    def _spec_rewrite_focus_context(self) -> str:
+        focus = self.state.scratch.get("spec_rewrite_focus")
+        if not isinstance(focus, str) or not focus.strip():
+            return ""
+        return "Spec rewrite focus:\n" + focus.strip()
+
+    def _correct_survivor_spec_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("spec_include_correct_survivor_context", True) is False:
+            return ""
+        state_path = self._workflow_artifact_path(
+            "last_correct_state_path",
+            ".local_micro_agent/last_correct_state.json",
+        )
+        try:
+            record = json.loads(state_path.read_text(errors="replace"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return ""
+        if not isinstance(record, dict):
+            return ""
+        compact = {
+            "candidate_id": record.get("candidate_id"),
+            "status": record.get("status"),
+            "metric": record.get("metric"),
+            "reason": record.get("reason"),
+            "strategy_axis": record.get("strategy_axis"),
+            "strategy_axes": record.get("strategy_axes"),
+            "region_keys": record.get("region_keys"),
+            "changes": record.get("changes"),
+            "failure_class": record.get("failure_class"),
+            "stage_result": record.get("stage_result"),
+            "summary": self._truncate_text(str(record.get("summary", "")), 600),
+            "patch_path": record.get("patch_path"),
+        }
+        return (
+            "Correctness-preserving survivor from this run follows. Treat it as "
+            "safe composition evidence, not as a completed optimization. Later SPEC "
+            "tasks should explicitly decide whether to build on it, narrow it, or "
+            "discard it.\n"
+            + json.dumps(
+                {key: value for key, value in compact.items() if value not in (None, "", [], {})},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
     def _schedule_spec_task(self) -> None:
         spec = self.state.scratch.get("run_spec")
@@ -449,6 +666,10 @@ class TodoLifecycleMixin:
             self.state.current = AgentStateName.FAILED
             return
         task = self._select_spec_task(tasks, open_candidates)
+        design_issues = self._spec_task_design_contract_issues(spec, task)
+        if design_issues:
+            self._reject_spec_task_for_design_contract(spec, task, design_issues)
+            return
         task["status"] = "in_progress"
         task["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         spec["active_task_id"] = task.get("task_id")
@@ -522,11 +743,14 @@ class TodoLifecycleMixin:
             for task in tasks
             if isinstance(task, dict) and str(task.get("status")) == "closed"
         }
+        open_statuses = {"open"}
+        if self._spec_design_contract_gate_enabled():
+            open_statuses.add("needs_design")
         candidates = []
         for task in tasks:
             if not isinstance(task, dict):
                 continue
-            if str(task.get("status", "open")) != "open":
+            if str(task.get("status", "open")) not in open_statuses:
                 continue
             deps = task.get("depends_on")
             if isinstance(deps, list) and any(str(dep) not in closed for dep in deps):
@@ -836,6 +1060,12 @@ class TodoLifecycleMixin:
                 "Try this independent metric tactic and improve the configured "
                 "benchmark metric without breaking correctness."
             )
+        edit_scope = str(task.get("edit_scope") or "").strip()
+        if edit_scope:
+            micro_goal = (
+                "Implement the scheduled design contract within this scope: "
+                f"{edit_scope}"
+            )
         return {
             "todo_id": str(task.get("task_id")),
             "spec_task_id": str(task.get("task_id")),
@@ -848,6 +1078,17 @@ class TodoLifecycleMixin:
             "implementation_hint": str(task.get("decision_hint") or ""),
             "allowed_files": list(task.get("deliverables") or []),
             "expected_signal": str(task.get("expected_signal") or ""),
+            "target_symbols": self._normalize_string_list(task.get("target_symbols")),
+            "target_regions": self._normalize_string_list(task.get("target_regions")),
+            "preserved_invariants": self._normalize_string_list(
+                task.get("preserved_invariants")
+            ),
+            "edit_scope": edit_scope,
+            "validator": task.get("validator")
+            if isinstance(task.get("validator"), dict)
+            else {},
+            "correctness_rationale": str(task.get("correctness_rationale") or ""),
+            "fallback_plan": str(task.get("fallback_plan") or ""),
             "attempts": int(task.get("attempts", 0) or 0),
             "budget": budget,
             "source": "spec_scheduler",
@@ -1414,11 +1655,47 @@ class TodoLifecycleMixin:
             metric_summary = str(metric_observation.get("summary") or "").strip()
             if metric_summary:
                 task["last_observation"]["summary"] = metric_summary
+        candidate_observation = self.state.scratch.get("last_candidate_observation")
+        if isinstance(candidate_observation, dict):
+            for key in ("failure_class", "stage_result", "recovery_hint"):
+                value = candidate_observation.get(key)
+                if value not in (None, "", [], {}):
+                    task["last_observation"][key] = value
+            candidate_summary = str(candidate_observation.get("summary") or "").strip()
+            if candidate_summary and not metric_observation:
+                task["last_observation"]["summary"] = candidate_summary
         if failed and metric_observation.get("failure_class") == "no_improvement":
             task["decision_hint"] = (
                 "metric_no_improvement: tests passed but the measured metric did not "
                 "improve. Ensure any new branch or helper is called by the benchmark path."
             )
+        if self._should_rewrite_spec_after_task_failure(task, failed):
+            await self._restore_spec_task_boundary_snapshot()
+            self.state.scratch.pop("spec_task_boundary_snapshot", None)
+            task["status"] = "needs_design"
+            task["decision_hint"] = (
+                "repeated_correctness_failure_requires_design_rewrite: do not retry "
+                "the same tactic family. Rewrite this task as a smaller executable "
+                "design contract before CODE."
+            )
+            self.state.loop_count += 1
+            self._persist_run_spec(spec)
+            self._append_spec_progress_event(
+                "needs_design",
+                spec,
+                task,
+                extra={
+                    "reason": "repeated_correctness_failure",
+                    "failure_class": task["last_observation"].get("failure_class"),
+                },
+            )
+            self.state.scratch["spec_rewrite_focus"] = self._spec_design_rewrite_focus(
+                task,
+                ["repeated correctness_failure"],
+                failure_summary=self.state.latest_test_summary(),
+            )
+            self.state.current = AgentStateName.SPEC_SYNTH
+            return
         if not failed:
             task["status"] = "closed"
             task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -1466,6 +1743,31 @@ class TodoLifecycleMixin:
             self.state.current = AgentStateName.FAILED
             return
         self.state.current = self._retry_state_after_failure()
+
+    def _should_rewrite_spec_after_task_failure(
+        self, task: dict[str, Any], failed: bool
+    ) -> bool:
+        if not failed or not self._spec_design_contract_gate_enabled():
+            return False
+        observation = task.get("last_observation")
+        failure_class = (
+            str(observation.get("failure_class") or "")
+            if isinstance(observation, dict)
+            else ""
+        )
+        if failure_class != "correctness_failure":
+            task.pop("correctness_failure_streak", None)
+            return False
+        streak = int(task.get("correctness_failure_streak", 0) or 0) + 1
+        task["correctness_failure_streak"] = streak
+        threshold = int(
+            self.config.get("workflow", {}).get(
+                "spec_redesign_after_correctness_failures",
+                2,
+            )
+            or 0
+        )
+        return threshold > 0 and streak >= threshold
 
     def _spec_current_attempt_counts_toward_budget(self, failed: bool) -> bool:
         if not failed:
@@ -1819,6 +2121,13 @@ class TodoLifecycleMixin:
                 "title": active_todo.get("title"),
                 "context": self._truncate_text(str(active_todo.get("context", "")), 700),
                 "micro_goal": active_todo.get("micro_goal"),
+                "target_symbols": active_todo.get("target_symbols", []),
+                "target_regions": active_todo.get("target_regions", []),
+                "preserved_invariants": active_todo.get("preserved_invariants", []),
+                "edit_scope": active_todo.get("edit_scope", ""),
+                "validator": active_todo.get("validator", {}),
+                "correctness_rationale": active_todo.get("correctness_rationale", ""),
+                "fallback_plan": active_todo.get("fallback_plan", ""),
             },
             "recent_attempts": compact_attempts,
             "continuation_focus": continuation_focus,

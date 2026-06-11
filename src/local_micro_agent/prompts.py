@@ -59,6 +59,16 @@ Output strict JSON with:
       "strategy_axis": "axis_or_general_edit",
       "family_key": "lowercase_snake_case_or_empty",
       "expected_signal": "observable test/metric/diagnostic signal",
+      "target_symbols": ["symbol_or_function_name"],
+      "target_regions": ["relative/path.py::symbol_or_local_region"],
+      "preserved_invariants": ["specific behavior, API, ordering, or data invariant"],
+      "edit_scope": "one-sentence maximum edit boundary",
+      "validator": {
+        "kind": "metric|command|synthesized",
+        "failure_condition": "observable condition that rejects the attempt"
+      },
+      "correctness_rationale": "why this task can preserve behavior",
+      "fallback_plan": "how to shrink, repair, or abandon this task after failure",
       "status": "open",
       "depends_on": [],
       "deliverables": ["relative/path.py"],
@@ -86,10 +96,17 @@ Rules:
   chain just because tactics are listed in an order.
 - Make each implementation task one independent optimization hypothesis that
   can fail without blocking sibling hypotheses.
+- Make each implementation task an executable design contract, not a broad
+  idea label. It must name the target symbol/region, the invariants CODE must
+  preserve, a small edit scope, a validator/failure condition, and why the
+  task should preserve correctness.
 - Set deliverables to the smallest writable file paths or globs the task may change.
 - Set read_hints to the source paths the task needs before CODE.
 - Set expected_signal to a concrete command, metric, diagnostic, or source-level
   observation the controller can use as feedback.
+- Do not emit abstract tasks such as "optimize algorithm", "reduce memory
+  accesses", "loop unrolling", or "rewrite hot path" unless the task also
+  provides concrete target_symbols/target_regions and preserved_invariants.
 - Use acceptance.kind "synthesized" for implementation tasks unless the request supplies
   an explicit command or metric acceptance.
 - For command acceptance, include only human-supplied commands from the request or config.

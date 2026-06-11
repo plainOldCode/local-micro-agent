@@ -3231,6 +3231,204 @@ Background / non-constraints
             self.assertEqual(task["acceptance"]["kind"], "metric")
             self.assertEqual(task["acceptance"]["commands"], [])
 
+    def test_run_spec_normalization_preserves_design_contract_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {},
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "design-contract",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                        }
+                    ],
+                }
+            )
+
+            task = spec["task_graph"][0]
+            self.assertEqual(task["target_symbols"], ["parse_item"])
+            self.assertEqual(task["target_regions"], ["target.py::parse_item"])
+            self.assertEqual(task["preserved_invariants"], ["existing parse outputs stay unchanged"])
+            self.assertEqual(task["validator"]["failure_condition"], "pytest fails")
+            self.assertIn("fallback branch", task["correctness_rationale"])
+
+    def test_spec_design_contract_gate_routes_abstract_task_to_spec_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "perf",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Optimize hot path",
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "metric"},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            task = persisted["task_graph"][0]
+            self.assertEqual(task["status"], "needs_design")
+            self.assertIn("missing target_symbols", task["design_contract"]["issues"][0])
+            self.assertIn("Spec rewrite focus", agent._spec_rewrite_focus_context())
+
+    def test_valid_spec_design_contract_becomes_active_todo_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "perf",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            todo = agent.state.scratch["active_todo"]
+            self.assertEqual(todo["target_symbols"], ["parse_item"])
+            self.assertEqual(todo["target_regions"], ["target.py::parse_item"])
+            self.assertIn("one guarded branch", todo["micro_goal"])
+            self.assertEqual(todo["validator"]["failure_condition"], "pytest fails")
+
+    def test_repeated_correctness_failure_routes_task_to_design_rewrite(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                task = {
+                    "task_id": "task-001",
+                    "title": "guard parser branch",
+                    "strategy_axis": "general_edit",
+                    "status": "in_progress",
+                    "deliverables": ["target.py"],
+                    "target_symbols": ["parse_item"],
+                    "target_regions": ["target.py::parse_item"],
+                    "preserved_invariants": ["existing parse outputs stay unchanged"],
+                    "edit_scope": "Change one guarded branch in parse_item.",
+                    "validator": {
+                        "kind": "command",
+                        "failure_condition": "pytest fails",
+                    },
+                    "correctness_rationale": "The fallback branch is unchanged.",
+                    "fallback_plan": "Revert the guarded branch.",
+                    "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                    "budget": {"attempts_max": 4, "attempts_used": 0},
+                }
+                spec = {"version": 2, "spec_id": "perf", "task_graph": [task]}
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_design_contract_gate": True,
+                            "spec_redesign_after_correctness_failures": 2,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", max_loops=10),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.scratch["last_candidate_observation"] = {
+                    "failure_class": "correctness_failure",
+                    "summary": "assertion failed",
+                }
+                agent.state.test_results = [
+                    TestResult(command="python -m pytest", exit_code=1, stderr="assertion failed")
+                ]
+
+                await agent._handle_spec_task_test_result(True)
+                self.assertNotEqual(task["status"], "needs_design")
+
+                agent.state.scratch["last_candidate_observation"] = {
+                    "failure_class": "correctness_failure",
+                    "summary": "assertion failed again",
+                }
+                await agent._handle_spec_task_test_result(True)
+
+                self.assertEqual(task["status"], "needs_design")
+                self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+                self.assertIn("repeated correctness_failure", agent._spec_rewrite_focus_context())
+
+        asyncio.run(run_case())
+
     def test_spec_acceptance_policy_context_guides_metric_specs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             agent = MicroAgent(

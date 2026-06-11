@@ -159,6 +159,16 @@ exhausted or the metric improves.
       "depends_on": [],
       "deliverables": ["src/parser.py"],      // task-scoped writable files
       "read_hints": ["src/parser.py", "docs/spec.md"],
+      "target_symbols": ["parse_item"],
+      "target_regions": ["src/parser.py::parse_item"],
+      "preserved_invariants": ["existing accepted inputs keep their parsed shape"],
+      "edit_scope": "Change only the parse_item branch that handles tagged items.",
+      "validator": {
+        "kind": "command",
+        "failure_condition": "configured tests fail or expected metric is missing"
+      },
+      "correctness_rationale": "The edit is limited to one branch and keeps fallback behavior.",
+      "fallback_plan": "Revert to the previous branch and add a narrower guard.",
       "acceptance": { "kind": "synthesized", "commands": [] },
       "budget": { "attempts_max": 8, "attempts_used": 0 },
       "status": "open"                         // open|in_progress|closed|deferred|failed
@@ -170,6 +180,17 @@ exhausted or the metric improves.
 `deliverables` become the active task's writable set, intersected with the
 global `workflow.writable_files` upper bound. `TASK_READ` loads `read_hints`,
 the deliverables of dependency tasks, and the task's own deliverables.
+
+When `spec_design_contract_gate=true`, implementation tasks must be executable
+design contracts before CODE can run. The scheduler rejects tasks that only
+name broad ideas, or that omit target symbols/regions, invariants, edit scope,
+validator failure condition, correctness rationale, or fallback plan. Rejected
+tasks are marked `needs_design` and routed back through `SPEC_SYNTH` with the
+contract issues as rewrite focus. After repeated correctness failures, the
+current task is also marked `needs_design` so the next attempt rewrites the
+design instead of retrying the same tactic family. Correctness-preserving
+`last_correct` survivor artifacts are summarized into SPEC context as safe
+composition evidence.
 
 ### Acceptance
 
