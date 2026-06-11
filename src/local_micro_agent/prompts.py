@@ -172,6 +172,12 @@ Rules:
   only from writable allowed_target_regions. Read-only or imported symbols may
   be cited as context, hazards, invariants, or read_hints, but must not be
   changed targets.
+- When a SPEC_IDEA advisory brief is supplied, do not silently drift away from
+  its first feasible writable target. Either make that target the first runnable
+  task, or add an `idea_rejection_reason:` entry to known_facts or
+  decision_rules that cites deterministic grounding facts or recent failure
+  memory. Do not reject a SPEC_IDEA target just because another idea "seems
+  better"; performance quality is decided only by the metric gate.
 - Do not include historical prior-run winners unless they are present in this run's input.
 - When Spec focus includes an existing task graph and one rewrite target, treat
   the call as a targeted graph rewrite. Preserve sibling tasks by default; do
@@ -273,6 +279,8 @@ Rules:
 - Do not invent or paraphrase a replacement target; stale targets will be rejected.
 - Use "patch" only if target/replacement is impossible.
 - Use full-file "content" only for very small files.
+- When the active task names one target_region, emit one change for that target
+  unless the prompt explicitly asks for a queued multi-candidate format.
 - Preserve existing public behavior unless the plan says otherwise.
 - Do not output comment-only, formatting-only, or explanatory placeholder changes.
 - No markdown fences, no commentary outside JSON."""

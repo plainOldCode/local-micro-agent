@@ -213,6 +213,34 @@ class _RoleModelManager:
         return _RoleModel(self.outputs, self.seen, role)
 
 
+class _RoleSequenceModel:
+    def __init__(
+        self,
+        outputs: dict[str, list[str]],
+        seen: dict[str, list[list[dict[str, str]]]],
+        role: str,
+    ):
+        self.outputs = outputs
+        self.seen = seen
+        self.role = role
+
+    async def chat(self, messages):
+        self.seen.setdefault(self.role, []).append(messages)
+        outputs = self.outputs[self.role]
+        if len(outputs) > 1:
+            return outputs.pop(0)
+        return outputs[0]
+
+
+class _RoleSequenceModelManager:
+    def __init__(self, outputs: dict[str, list[str]]):
+        self.outputs = outputs
+        self.seen: dict[str, list[list[dict[str, str]]]] = {}
+
+    def get(self, role):
+        return _RoleSequenceModel(self.outputs, self.seen, role)
+
+
 class _SpecIdeaReasoningOnlyManager:
     def __init__(self, finalizer_output: str):
         self.finalizer_output = finalizer_output
@@ -4914,6 +4942,131 @@ Background / non-constraints
 
             self.assertIsNone(agent._active_todo_change_scope_rejection([change]))
 
+    def test_local_task_one_change_allows_single_target_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "spec_local_task_one_change": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "tactic_stage": "local_edit",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            change = CodeChange(
+                "target.py",
+                "guard active parser target",
+                target="def parse_item(value):\n    return value\n",
+                replacement="def parse_item(value):\n    return value\n",
+            )
+
+            self.assertIsNone(agent._active_todo_change_scope_rejection([change]))
+
+    def test_local_task_one_change_can_be_disabled_for_legacy_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "spec_local_task_one_change": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "tactic_stage": "local_edit",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            changes = [
+                CodeChange(
+                    "target.py",
+                    "first parser change",
+                    target="def parse_item(value):\n    return value\n",
+                    replacement="def parse_item(value):\n    return value\n",
+                ),
+                CodeChange(
+                    "target.py",
+                    "second parser change",
+                    target="def parse_item(value):\n    return value\n",
+                    replacement="def parse_item(value):\n    return value\n",
+                ),
+            ]
+
+            self.assertIsNone(agent._active_todo_change_scope_rejection(changes))
+
+    def test_local_task_one_change_rejects_multi_change_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "spec_local_task_one_change": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "tactic_stage": "local_edit",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            changes = [
+                CodeChange(
+                    "target.py",
+                    "first parser change",
+                    target="def parse_item(value):\n    return value\n",
+                    replacement="def parse_item(value):\n    return value\n",
+                ),
+                CodeChange(
+                    "target.py",
+                    "second parser change",
+                    target="def parse_item(value):\n    return value\n",
+                    replacement="def parse_item(value):\n    return value\n",
+                ),
+            ]
+
+            rejection = agent._active_todo_change_scope_rejection(changes)
+
+            self.assertIsNotNone(rejection)
+            self.assertEqual(rejection[0], "rejected_todo_scope_drift")
+            self.assertIn("one change", rejection[1])
+
     def test_structural_probe_change_scope_rejects_broad_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -5890,6 +6043,385 @@ Background / non-constraints
                 self.assertEqual(spec["spec_id"], "facts-only")
                 self.assertFalse((repo / ".local_micro_agent" / "spec_idea.md").exists())
                 self.assertIn("Spec idea model call failed", "\n".join(agent.state.notes))
+
+        asyncio.run(run_case())
+
+    def test_spec_quality_gate_accepts_single_target_spec(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                final_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "quality-normal",
+                        "invariants": ["parse_item return contract stays unchanged"],
+                        "known_facts": ["target.py::parse_item is writable"],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "guard parse branch",
+                                "strategy_axis": "general_edit",
+                                "expected_signal": "python -m pytest stays green",
+                                "deliverables": ["target.py"],
+                                "read_hints": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "preserved_invariants": ["return value remains unchanged"],
+                                "edit_scope": "Add one guarded branch inside parse_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "single guarded local edit",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The original return path is preserved.",
+                                "fallback_plan": "Revert the guarded branch.",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": ["python -m pytest"],
+                                },
+                            }
+                        ],
+                    }
+                )
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": "Ranked ideas:\n1. target.py::parse_item - writable.",
+                        "spec_synth": final_spec,
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_quality_gate": True,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                            "test_commands": ["python -m pytest"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                report = json.loads(
+                    (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
+                )
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(report["status"], "pass")
+                self.assertEqual(spec["task_graph"][0]["target_regions"], ["target.py::parse_item"])
+
+        asyncio.run(run_case())
+
+    def test_spec_quality_gate_allows_missing_idea_brief(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                final_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "quality-edge",
+                        "invariants": ["parse_item return contract stays unchanged"],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "guard parse branch",
+                                "strategy_axis": "general_edit",
+                                "expected_signal": "pytest stays green",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "preserved_invariants": ["return value remains unchanged"],
+                                "edit_scope": "Add one guarded branch inside parse_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "single guarded local edit",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The original return path is preserved.",
+                                "fallback_plan": "Revert the guarded branch.",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": ["python -m pytest"],
+                                },
+                            }
+                        ],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_quality_gate": True,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                            "test_commands": ["python -m pytest"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = _SpecIdeaReasoningOnlyManager(final_spec)
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                report = json.loads(
+                    (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
+                )
+                self.assertEqual(report["status"], "pass")
+                self.assertFalse((repo / ".local_micro_agent" / "spec_idea.md").exists())
+
+        asyncio.run(run_case())
+
+    def test_spec_quality_gate_ignores_failed_design_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                        "test_commands": ["python -m pytest"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-failed-task-edge",
+                    "invariants": ["parse_item return contract stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-000",
+                            "title": "failed broad rewrite",
+                            "status": "failed_design",
+                            "deliverables": ["target.py", "other.py"],
+                            "target_regions": [],
+                            "edit_scope": "Optimize the codebase.",
+                            "fallback_plan": "pass",
+                        },
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parse branch",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["return value remains unchanged"],
+                            "edit_scope": "Add one guarded branch inside parse_item.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "one guarded branch",
+                                "explanation": "single guarded local edit",
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The original return path is preserved.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {
+                                "kind": "command",
+                                "commands": ["python -m pytest"],
+                            },
+                        },
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            self.assertEqual(report["status"], "pass")
+
+    def test_spec_quality_gate_retries_after_silent_idea_drift(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text(
+                    "def parse_item(value):\n    return value\n\n"
+                    "def format_item(value):\n    return str(value)\n"
+                )
+                bad_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "quality-retry",
+                        "invariants": ["public behavior stays unchanged"],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "format branch",
+                                "strategy_axis": "general_edit",
+                                "expected_signal": "pytest stays green",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["format_item"],
+                                "target_regions": ["target.py::format_item"],
+                                "preserved_invariants": ["return value remains unchanged"],
+                                "edit_scope": "Add one guarded branch inside format_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "single guarded local edit",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The original return path is preserved.",
+                                "fallback_plan": "Revert the guarded branch.",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": ["python -m pytest"],
+                                },
+                            }
+                        ],
+                    }
+                )
+                fixed_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "quality-retry",
+                        "invariants": ["public behavior stays unchanged"],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "parse branch",
+                                "strategy_axis": "general_edit",
+                                "expected_signal": "pytest stays green",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "preserved_invariants": ["return value remains unchanged"],
+                                "edit_scope": "Add one guarded branch inside parse_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "single guarded local edit",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The original return path is preserved.",
+                                "fallback_plan": "Revert the guarded branch.",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": ["python -m pytest"],
+                                },
+                            }
+                        ],
+                    }
+                )
+                manager = _RoleSequenceModelManager(
+                    {
+                        "reasoner": [
+                            "Ranked ideas:\n1. target.py::parse_item - writable.",
+                        ],
+                        "spec_synth": [bad_spec, fixed_spec],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 1,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                            "test_commands": ["python -m pytest"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                report = json.loads(
+                    (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
+                )
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                second_prompt = manager.seen["spec_synth"][1][-1]["content"]
+                self.assertEqual(spec["task_graph"][0]["target_regions"], ["target.py::parse_item"])
+                self.assertEqual(report["status"], "pass")
+                self.assertIn("quality_rejected", progress)
+                self.assertIn("idea_alignment_failed", second_prompt)
 
         asyncio.run(run_case())
 

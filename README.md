@@ -241,6 +241,29 @@ The final `SPEC_SYNTH` call uses the no-think JSON finalizer role
 pass returns a reasoning-only or empty response, the controller records the
 failure and continues with the finalizer using facts and failure memory only.
 
+`spec_quality_gate=true` adds a domain-neutral quality gate between
+`SPEC_FINALIZE` and `run_spec.json` persistence. The gate does not decide which
+optimization idea is likely to improve the metric. It only rejects experiment
+designs that are hard to execute or inconsistent with deterministic evidence:
+too many deliverables or read hints, not exactly one runnable target region,
+target spans that are too large to patch reliably, vague edit scopes, synthesized
+acceptance when configured command/metric validation exists, unsafe fallback
+plans, structural probes with more than one expected changed region, and silent
+drift away from the first feasible `SPEC_IDEA` target. If the finalizer chooses
+not to use that advisory target as the first runnable task, it must add an
+`idea_rejection_reason:` in `known_facts` or `decision_rules` that cites
+grounding facts or recent failure memory. Failed quality checks are written to
+`.local_micro_agent/spec_quality_report.json`, logged as `quality_rejected` in
+`spec_progress.jsonl`, and fed back into a bounded finalizer rewrite attempt.
+
+For local spec tasks, `spec_local_task_one_change=true` keeps CODE patch shape
+small after the quality gate has selected one runnable target. A `local_edit`
+active todo is rejected before apply when it emits more than
+`local_task_max_changes` changes, while structural probes continue to use the
+stricter structural probe limits and post-apply diff contract. This is still
+domain-neutral: the controller does not know which edit should be faster; it
+only requires the candidate to be a small, measurable experiment.
+
 Candidate failure memory is also scoped before it reaches CODE or SPEC. Records
 carry `failure_origin`, `issue_scope`, `repo_valid_after_restore`,
 `repair_task_eligible`, and `memory_use`. Only `current_repo` issues may become

@@ -84,7 +84,6 @@ class TodoLifecycleMixin:
             role_key = "spec_finalize_model_role" if two_call else "run_spec_model_role"
             role = str(workflow.get(role_key) or workflow.get("run_spec_model_role", role_default))
             call_site = "spec_synth" if self._spec_mode_enabled() and force else "run_spec"
-            prompt = spec_prompt(self.state, focus=focus)
             fallback_role = str(
                 workflow.get(
                     "spec_synth_fallback_model_role",
@@ -92,106 +91,97 @@ class TodoLifecycleMixin:
                 )
                 or ""
             ).strip()
-            used_role = role
-            try:
-                output = await self._model_chat(
-                    role,
-                    prompt,
+            quality_attempts = self._spec_quality_rewrite_attempts()
+            quality_feedback = ""
+            for quality_attempt in range(quality_attempts + 1):
+                prompt_focus = "\n\n".join(
+                    part for part in (focus, quality_feedback) if part.strip()
+                )
+                prompt = spec_prompt(self.state, focus=prompt_focus)
+                spec = await self._request_run_spec_from_model(
+                    role=role,
+                    prompt=prompt,
                     call_site=call_site,
+                    fallback_role=fallback_role,
                 )
-            except Exception as exc:
-                self.state.notes.append(
-                    f"Run spec model call failed: {type(exc).__name__}: {exc}"
-                )
-                if not fallback_role or fallback_role == role:
+                if not spec:
                     return
-                try:
-                    output = await self._model_chat(
-                        fallback_role,
-                        prompt,
-                        call_site=f"{call_site}_fallback",
-                    )
-                    self.state.notes.append(
-                        f"Run spec model fallback succeeded: {fallback_role}"
-                    )
-                    used_role = fallback_role
-                except Exception as fallback_exc:
-                    self.state.notes.append(
-                        "Run spec fallback model call failed: "
-                        f"{type(fallback_exc).__name__}: {fallback_exc}"
-                    )
-                    return
-            try:
-                spec = parse_json_object(output)
-            except Exception as exc:
-                self.state.notes.append(
-                    f"Run spec JSON parse failed: {type(exc).__name__}: {exc}"
-                )
-                if not fallback_role or fallback_role == used_role:
-                    return
-                try:
-                    output = await self._model_chat(
-                        fallback_role,
-                        prompt,
-                        call_site=f"{call_site}_fallback",
-                    )
-                    self.state.notes.append(
-                        f"Run spec model fallback succeeded: {fallback_role}"
-                    )
-                    spec = parse_json_object(output)
-                except Exception as fallback_exc:
-                    self.state.notes.append(
-                        "Run spec fallback parse failed: "
-                        f"{type(fallback_exc).__name__}: {fallback_exc}"
-                    )
-                    return
-            spec = self._normalize_run_spec(spec)
-            if not spec:
-                self.state.notes.append("Run spec discarded: no task_graph")
-                return
-            preserved_task_ids: list[str] = []
-            if targeted_rewrite:
-                spec, preserved_task_ids = self._merge_targeted_spec_rewrite(
-                    previous_spec,
-                    spec,
-                    rewrite_target_task_id,
-                )
-                graph_issues = self._spec_rewrite_graph_contract_issues(
-                    previous_spec,
-                    spec,
-                    rewrite_target_task_id,
-                )
-                if graph_issues:
-                    self._reject_spec_graph_rewrite(
+                preserved_task_ids: list[str] = []
+                if targeted_rewrite:
+                    spec, preserved_task_ids = self._merge_targeted_spec_rewrite(
                         previous_spec,
+                        spec,
                         rewrite_target_task_id,
-                        graph_issues,
                     )
+                    graph_issues = self._spec_rewrite_graph_contract_issues(
+                        previous_spec,
+                        spec,
+                        rewrite_target_task_id,
+                    )
+                    if graph_issues:
+                        self._reject_spec_graph_rewrite(
+                            previous_spec,
+                            rewrite_target_task_id,
+                            graph_issues,
+                        )
+                        self.state.scratch.pop("spec_rewrite_focus", None)
+                        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        return
+                    spec["last_rewrite_mode"] = "targeted_design_rewrite"
+                    spec["last_rewrite_target_task_id"] = rewrite_target_task_id
+                    if preserved_task_ids:
+                        spec["last_rewrite_preserved_task_ids"] = preserved_task_ids
+                quality_report = self._spec_quality_report(
+                    spec,
+                    attempt=quality_attempt,
+                )
+                self._persist_spec_quality_report(quality_report)
+                if not self._spec_quality_report_failed(quality_report):
+                    self._persist_run_spec(spec)
                     self.state.scratch.pop("spec_rewrite_focus", None)
                     self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                    if targeted_rewrite:
+                        self._append_spec_progress_event(
+                            "rewrite_merged",
+                            spec,
+                            extra={
+                                "rewrite_mode": "targeted_design_rewrite",
+                                "target_task_id": rewrite_target_task_id,
+                                "preserved_task_ids": preserved_task_ids,
+                                "runnable_tasks_after_merge": len(
+                                    self._schedulable_spec_tasks(
+                                        spec.get("task_graph", [])
+                                    )
+                                ),
+                            },
+                        )
+                    self.state.notes.append(f"Persisted run spec: {path}")
                     return
-                spec["last_rewrite_mode"] = "targeted_design_rewrite"
-                spec["last_rewrite_target_task_id"] = rewrite_target_task_id
-                if preserved_task_ids:
-                    spec["last_rewrite_preserved_task_ids"] = preserved_task_ids
-            self._persist_run_spec(spec)
-            self.state.scratch.pop("spec_rewrite_focus", None)
-            self.state.scratch.pop("spec_rewrite_target_task_id", None)
-            if targeted_rewrite:
+                issue_codes = [
+                    str(issue.get("code") or "")
+                    for issue in quality_report.get("issues", [])
+                    if isinstance(issue, dict)
+                ]
+                self.state.notes.append(
+                    "Run spec quality gate rejected finalizer output: "
+                    + ", ".join(code for code in issue_codes if code)
+                )
                 self._append_spec_progress_event(
-                    "rewrite_merged",
+                    "quality_rejected",
                     spec,
                     extra={
-                        "rewrite_mode": "targeted_design_rewrite",
-                        "target_task_id": rewrite_target_task_id,
-                        "preserved_task_ids": preserved_task_ids,
-                        "runnable_tasks_after_merge": len(
-                            self._schedulable_spec_tasks(spec.get("task_graph", []))
-                        ),
+                        "quality_attempt": quality_attempt,
+                        "quality_issue_codes": issue_codes,
                     },
                 )
-            self.state.notes.append(f"Persisted run spec: {path}")
-            return
+                if quality_attempt >= quality_attempts:
+                    self.state.scratch.pop("spec_rewrite_focus", None)
+                    self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                    self.state.notes.append(
+                        "Run spec discarded: quality gate issues remain"
+                    )
+                    return
+                quality_feedback = self._spec_quality_feedback_context(quality_report)
         if path.exists():
             spec = self._load_run_spec(path)
             if spec:
@@ -225,6 +215,73 @@ class TodoLifecycleMixin:
             and workflow.get("metric_regex")
             and workflow.get("spec_metric_requires_improvement", True) is not False
         )
+
+    async def _request_run_spec_from_model(
+        self,
+        *,
+        role: str,
+        prompt: list[dict[str, str]],
+        call_site: str,
+        fallback_role: str,
+    ) -> dict[str, Any]:
+        used_role = role
+        try:
+            output = await self._model_chat(
+                role,
+                prompt,
+                call_site=call_site,
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"Run spec model call failed: {type(exc).__name__}: {exc}"
+            )
+            if not fallback_role or fallback_role == role:
+                return {}
+            try:
+                output = await self._model_chat(
+                    fallback_role,
+                    prompt,
+                    call_site=f"{call_site}_fallback",
+                )
+                self.state.notes.append(
+                    f"Run spec model fallback succeeded: {fallback_role}"
+                )
+                used_role = fallback_role
+            except Exception as fallback_exc:
+                self.state.notes.append(
+                    "Run spec fallback model call failed: "
+                    f"{type(fallback_exc).__name__}: {fallback_exc}"
+                )
+                return {}
+        try:
+            spec = parse_json_object(output)
+        except Exception as exc:
+            self.state.notes.append(
+                f"Run spec JSON parse failed: {type(exc).__name__}: {exc}"
+            )
+            if not fallback_role or fallback_role == used_role:
+                return {}
+            try:
+                output = await self._model_chat(
+                    fallback_role,
+                    prompt,
+                    call_site=f"{call_site}_fallback",
+                )
+                self.state.notes.append(
+                    f"Run spec model fallback succeeded: {fallback_role}"
+                )
+                spec = parse_json_object(output)
+            except Exception as fallback_exc:
+                self.state.notes.append(
+                    "Run spec fallback parse failed: "
+                    f"{type(fallback_exc).__name__}: {fallback_exc}"
+                )
+                return {}
+        spec = self._normalize_run_spec(spec)
+        if not spec:
+            self.state.notes.append("Run spec discarded: no task_graph")
+            return {}
+        return spec
 
     def _spec_two_call_synthesis_enabled(self, force: bool) -> bool:
         workflow = self.config.get("workflow", {})
@@ -515,6 +572,389 @@ class TodoLifecycleMixin:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(facts, ensure_ascii=False, indent=2) + "\n")
         return facts
+
+    def _spec_quality_gate_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("spec_quality_gate"))
+
+    def _spec_quality_rewrite_attempts(self) -> int:
+        if not self._spec_quality_gate_enabled():
+            return 0
+        workflow = self.config.get("workflow", {})
+        return max(0, int(workflow.get("spec_quality_rewrite_attempts", 1) or 0))
+
+    def _spec_quality_report_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_quality_report_path",
+            ".local_micro_agent/spec_quality_report.json",
+        )
+
+    def _persist_spec_quality_report(self, report: dict[str, Any]) -> None:
+        if not self._spec_quality_gate_enabled():
+            return
+        path = self._spec_quality_report_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        self.state.scratch["spec_quality_report"] = report
+
+    @staticmethod
+    def _spec_quality_report_failed(report: dict[str, Any]) -> bool:
+        return str(report.get("status") or "") == "fail"
+
+    def _spec_quality_report(
+        self,
+        spec: dict[str, Any],
+        *,
+        attempt: int = 0,
+    ) -> dict[str, Any]:
+        issues = self._spec_quality_issues(spec)
+        report = {
+            "version": 1,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "status": "fail" if issues else "pass",
+            "attempt": attempt,
+            "spec_id": spec.get("spec_id"),
+            "issues": issues,
+            "issue_codes": [
+                issue.get("code")
+                for issue in issues
+                if isinstance(issue, dict) and issue.get("code")
+            ],
+        }
+        return report
+
+    def _spec_quality_issues(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
+        if not self._spec_quality_gate_enabled():
+            return []
+        tasks = [
+            task
+            for task in self._schedulable_spec_tasks(spec.get("task_graph", []))
+            if isinstance(task, dict) and not self._spec_task_is_context_only(task)
+        ]
+        issues: list[dict[str, Any]] = []
+        for task in tasks:
+            issues.extend(self._spec_task_quality_issues(task))
+        preferred = self._spec_idea_preferred_target_region()
+        if preferred:
+            runnable = self._schedulable_spec_tasks(spec.get("task_graph", []))
+            first = next(
+                (
+                    task
+                    for task in runnable
+                    if isinstance(task, dict)
+                    and not self._spec_task_is_context_only(task)
+                ),
+                None,
+            )
+            first_targets = (
+                self._normalize_string_list(first.get("target_regions"))
+                if isinstance(first, dict)
+                else []
+            )
+            if (
+                preferred not in first_targets
+                and not self._spec_has_supported_idea_rejection(spec, preferred)
+            ):
+                issues.append(
+                    {
+                        "code": "idea_alignment_failed",
+                        "severity": "error",
+                        "task_id": first.get("task_id") if isinstance(first, dict) else "",
+                        "preferred_target_region": preferred,
+                        "detail": (
+                            "SPEC_FINALIZE silently ignored the first feasible "
+                            "SPEC_IDEA target instead of making it the first "
+                            "runnable task or citing a deterministic rejection reason."
+                        ),
+                        "rewrite_hint": (
+                            "Either make the preferred SPEC_IDEA target the first "
+                            "runnable task, or add an idea_rejection_reason in "
+                            "known_facts/decision_rules citing grounding facts or "
+                            "failure memory."
+                        ),
+                    }
+                )
+        return issues
+
+    def _spec_task_quality_issues(self, task: dict[str, Any]) -> list[dict[str, Any]]:
+        workflow = self.config.get("workflow", {})
+        task_id = str(task.get("task_id") or "")
+        issues: list[dict[str, Any]] = []
+        max_deliverables = int(workflow.get("spec_quality_max_deliverables", 1) or 1)
+        deliverables = self._normalize_string_list(task.get("deliverables"))
+        if max_deliverables > 0 and len(deliverables) > max_deliverables:
+            issues.append(
+                self._spec_quality_issue(
+                    "too_many_deliverables",
+                    task_id,
+                    f"deliverables has {len(deliverables)} entries",
+                    "Use one writable deliverable per implementation task.",
+                )
+            )
+        max_read_hints = int(workflow.get("spec_quality_max_read_hints", 3) or 3)
+        read_hints = self._normalize_string_list(task.get("read_hints"))
+        if max_read_hints >= 0 and len(read_hints) > max_read_hints:
+            issues.append(
+                self._spec_quality_issue(
+                    "too_many_read_hints",
+                    task_id,
+                    f"read_hints has {len(read_hints)} entries",
+                    "Keep read_hints focused on the source needed by this task.",
+                )
+            )
+        target_regions = self._normalize_string_list(task.get("target_regions"))
+        stage = str(task.get("tactic_stage") or "").strip().lower()
+        if len(target_regions) != 1:
+            issues.append(
+                self._spec_quality_issue(
+                    "target_region_count",
+                    task_id,
+                    f"target_regions has {len(target_regions)} entries",
+                    "Use exactly one primary target region per runnable task.",
+                )
+            )
+        max_target_lines = int(workflow.get("spec_quality_max_target_lines", 160) or 160)
+        if max_target_lines > 0:
+            for region in target_regions:
+                line_count = self._spec_region_line_count(region)
+                if line_count is not None and line_count > max_target_lines:
+                    issues.append(
+                        self._spec_quality_issue(
+                            "target_span_too_large",
+                            task_id,
+                            f"{region} spans {line_count} lines",
+                            "Split the task or choose a smaller nested target region.",
+                        )
+                    )
+        edit_scope = str(task.get("edit_scope") or "").strip()
+        if self._spec_quality_edit_scope_too_vague(edit_scope):
+            issues.append(
+                self._spec_quality_issue(
+                    "vague_edit_scope",
+                    task_id,
+                    edit_scope or "missing edit_scope",
+                    "State the exact operation boundary; do not use only optimize/refactor/improve.",
+                )
+            )
+        acceptance = task.get("acceptance")
+        kind = (
+            str(acceptance.get("kind") or "").strip()
+            if isinstance(acceptance, dict)
+            else ""
+        )
+        if (
+            (workflow.get("metric_regex") or workflow.get("test_commands"))
+            and kind == "synthesized"
+        ):
+            issues.append(
+                self._spec_quality_issue(
+                    "acceptance_not_configured_command_or_metric",
+                    task_id,
+                    "acceptance.kind=synthesized despite configured test/metric",
+                    "Use metric or command acceptance when workflow supplies deterministic validation.",
+                )
+            )
+        fallback_text = " ".join(
+            str(task.get(key) or "")
+            for key in ("fallback_plan", "rollback_or_shrink_plan")
+        )
+        if not self._spec_quality_fallback_is_safe(fallback_text):
+            issues.append(
+                self._spec_quality_issue(
+                    "unsafe_or_missing_fallback",
+                    task_id,
+                    fallback_text.strip() or "missing fallback plan",
+                    "Fallback must say revert, restore, shrink, guard, or probe.",
+                )
+            )
+        contract = task.get("probe_diff_contract")
+        if stage == "structural_probe" and isinstance(contract, dict):
+            expected = self._normalize_string_list(contract.get("expected_changed_regions"))
+            if len(expected) != 1:
+                issues.append(
+                    self._spec_quality_issue(
+                        "structural_probe_expected_region_count",
+                        task_id,
+                        f"expected_changed_regions has {len(expected)} entries",
+                        "A structural probe must name one expected changed region.",
+                    )
+                )
+        return issues
+
+    @staticmethod
+    def _spec_quality_issue(
+        code: str,
+        task_id: str,
+        detail: str,
+        rewrite_hint: str,
+    ) -> dict[str, Any]:
+        return {
+            "code": code,
+            "severity": "error",
+            "task_id": task_id,
+            "detail": detail,
+            "rewrite_hint": rewrite_hint,
+        }
+
+    def _spec_region_line_count(self, region: str) -> int | None:
+        facts = self._current_spec_grounding_facts()
+        region_path = self._region_path(region)
+        file_record = facts.get("files", {}).get(region_path)
+        if not isinstance(file_record, dict):
+            return None
+        for record in file_record.get("defined_regions", []) or []:
+            if not isinstance(record, dict) or str(record.get("region") or "") != region:
+                continue
+            start = record.get("start_line")
+            end = record.get("end_line")
+            if isinstance(start, int) and isinstance(end, int) and end >= start:
+                return end - start + 1
+        return None
+
+    @staticmethod
+    def _spec_quality_edit_scope_too_vague(edit_scope: str) -> bool:
+        text = edit_scope.strip().lower()
+        if not text:
+            return True
+        vague_patterns = (
+            r"^optimi[sz]e\b",
+            r"^improve\b",
+            r"^refactor\b",
+            r"^rewrite\b",
+            r"^clean up\b",
+            r"^make .* faster\b",
+        )
+        concrete_markers = (
+            "add ",
+            "remove ",
+            "replace ",
+            "guard",
+            "branch",
+            "call",
+            "loop",
+            "constant",
+            "cache",
+            "check",
+            "return",
+            "condition",
+            "assignment",
+            "one ",
+            "single ",
+        )
+        return any(re.search(pattern, text) for pattern in vague_patterns) and not any(
+            marker in text for marker in concrete_markers
+        )
+
+    @staticmethod
+    def _spec_quality_fallback_is_safe(text: str) -> bool:
+        lowered = text.lower()
+        if not lowered.strip():
+            return False
+        unsafe_patterns = (
+            r"\bpass\b",
+            r"\breplace\s+whole\b",
+            r"\breplace\s+entire\b",
+            r"\brewrite\s+whole\b",
+            r"\brewrite\s+entire\b",
+            r"\bfull\s+rewrite\b",
+            r"\bdelete\s+the\s+function\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in unsafe_patterns):
+            return False
+        return any(
+            marker in lowered
+            for marker in (
+                "revert",
+                "restore",
+                "rollback",
+                "shrink",
+                "smaller",
+                "guard",
+                "probe",
+                "abandon",
+            )
+        )
+
+    def _spec_idea_preferred_target_region(self) -> str:
+        if not self._spec_two_call_synthesis_enabled(True):
+            return ""
+        brief = str(self.state.scratch.get("spec_idea_brief") or "")
+        if not brief:
+            try:
+                brief = self._spec_idea_path().read_text(errors="replace")
+            except FileNotFoundError:
+                return ""
+        facts = self._current_spec_grounding_facts()
+        allowed = {
+            str(region)
+            for region in facts.get("allowed_target_regions", []) or []
+            if str(region)
+        }
+        if not allowed:
+            return ""
+        pattern = r"[\w./-]+\.py::[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*"
+        for match in re.finditer(pattern, brief):
+            candidate = match.group(0)
+            if candidate in allowed:
+                return candidate
+        return ""
+
+    @staticmethod
+    def _spec_has_supported_idea_rejection(
+        spec: dict[str, Any],
+        preferred_region: str,
+    ) -> bool:
+        preferred_symbol = preferred_region.split("::", 1)[-1]
+        text = "\n".join(
+            str(item)
+            for field in ("known_facts", "decision_rules")
+            for item in (spec.get(field, []) if isinstance(spec.get(field), list) else [])
+        ).lower()
+        if "idea_rejection" not in text and "rejected idea" not in text:
+            return False
+        if preferred_region.lower() not in text and preferred_symbol.lower() not in text:
+            return False
+        supported_markers = (
+            "non_writable",
+            "unresolvable",
+            "read_only",
+            "imported",
+            "failed",
+            "no_improvement",
+            "patch_miss",
+            "too broad",
+            "ambiguous",
+            "scope",
+            "grounding",
+        )
+        return any(marker in text for marker in supported_markers)
+
+    @staticmethod
+    def _spec_quality_feedback_context(report: dict[str, Any]) -> str:
+        issues = [
+            issue
+            for issue in report.get("issues", [])
+            if isinstance(issue, dict)
+        ]
+        compact = [
+            {
+                "code": issue.get("code"),
+                "task_id": issue.get("task_id"),
+                "detail": issue.get("detail"),
+                "preferred_target_region": issue.get("preferred_target_region"),
+                "rewrite_hint": issue.get("rewrite_hint"),
+            }
+            for issue in issues[:12]
+        ]
+        return (
+            "SPEC quality gate rejected the previous finalizer output. Rewrite "
+            "the JSON spec to fix only these domain-neutral experiment-design "
+            "issues. Do not invent benchmark-specific tactics. If you do not "
+            "use the first feasible SPEC_IDEA target, add an "
+            "idea_rejection_reason in known_facts or decision_rules that cites "
+            "grounding facts or failure memory.\n"
+            + json.dumps(compact, ensure_ascii=False, indent=2)
+        )
 
     @staticmethod
     def _load_run_spec(path: Path) -> dict[str, Any]:

@@ -501,6 +501,13 @@ class AdaptiveSearchMixin:
                         "structural_probe change is too broad; use a smaller "
                         "reversible probe inside the active target region",
                     )
+        elif workflow.get("spec_local_task_one_change"):
+            max_changes = int(workflow.get("local_task_max_changes", 1) or 1)
+            if max_changes > 0 and len(changes) > max_changes:
+                return (
+                    "rejected_todo_scope_drift",
+                    "local_edit task must emit one change for the active target",
+                )
 
         allowed_paths = {
             region.split("::", 1)[0]

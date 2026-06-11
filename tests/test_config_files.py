@@ -80,6 +80,8 @@ class ConfigFileTests(unittest.TestCase):
         self.assertTrue(workflow["spec_reopen_failed_portfolio_tasks"])
         self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 50)
         self.assertTrue(workflow["spec_grounding_gate"])
+        self.assertTrue(workflow["spec_quality_gate"])
+        self.assertEqual(workflow["spec_quality_rewrite_attempts"], 1)
         self.assertTrue(workflow["spec_two_call_synthesis"])
         self.assertEqual(workflow["spec_idea_model_role"], "reasoner")
         self.assertEqual(workflow["spec_finalize_model_role"], "spec_synth")
@@ -88,6 +90,8 @@ class ConfigFileTests(unittest.TestCase):
             ".local_micro_agent/candidates.jsonl",
         )
         self.assertTrue(workflow["preserve_correct_survivors"])
+        self.assertTrue(workflow["spec_local_task_one_change"])
+        self.assertEqual(workflow["local_task_max_changes"], 1)
 
 
 if __name__ == "__main__":
