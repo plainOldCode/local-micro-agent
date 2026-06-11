@@ -45,6 +45,12 @@ class CodeChange:
     patch: str | None = None
     target: str | None = None
     replacement: str | None = None
+    target_region: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    anchor_before: str | None = None
+    anchor_after: str | None = None
+    target_hash: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CodeChange":
@@ -55,7 +61,22 @@ class CodeChange:
             patch=data.get("patch"),
             target=data.get("target"),
             replacement=data.get("replacement"),
+            target_region=data.get("target_region"),
+            start_line=cls._optional_int(data.get("start_line")),
+            end_line=cls._optional_int(data.get("end_line")),
+            anchor_before=data.get("anchor_before"),
+            anchor_after=data.get("anchor_after"),
+            target_hash=data.get("target_hash"),
         )
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass

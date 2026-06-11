@@ -745,7 +745,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
             async def apply_once() -> int:
                 await agent.mcp.start()
                 try:
-                    return await agent._apply_changes([change], {"target.py"})
+                    result = await agent._apply_changes([change], {"target.py"})
+                    return result.applied
                 finally:
                     await agent.mcp.close()
 
@@ -781,7 +782,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
             async def apply_once() -> int:
                 await agent.mcp.start()
                 try:
-                    return await agent._apply_changes([change], {"target.py"})
+                    result = await agent._apply_changes([change], {"target.py"})
+                    return result.applied
                 finally:
                     await agent.mcp.close()
 
@@ -6658,7 +6660,8 @@ value = 'fast'
             async def apply_once() -> int:
                 await agent.mcp.start()
                 try:
-                    return await agent._apply_changes([change], {"target.py"})
+                    result = await agent._apply_changes([change], {"target.py"})
+                    return result.applied
                 finally:
                     await agent.mcp.close()
 
@@ -6670,6 +6673,550 @@ value = 'fast'
                 "Retargeted replacement target to exact current source whitespace",
                 "\n".join(agent.state.notes),
             )
+
+    def test_patch_miss_retarget_normal_uses_line_anchor_for_repeated_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def first():\n"
+                "    value = 1\n"
+                "    return value\n"
+                "\n"
+                "def second():\n"
+                "    value = 1\n"
+                "    return value\n"
+            )
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                reason="edit second only",
+                target="    value = 1\n",
+                replacement="    value = 2\n",
+                target_region="target.py::second",
+                start_line=6,
+                end_line=6,
+                anchor_before="def second():\n",
+                anchor_after="    return value\n",
+            )
+
+            async def apply_once() -> int:
+                await agent.mcp.start()
+                try:
+                    result = await agent._apply_changes([change], {"target.py"})
+                    return result.applied
+                finally:
+                    await agent.mcp.close()
+
+            applied = asyncio.run(apply_once())
+
+            self.assertEqual(applied, 1)
+            self.assertIn("def first():\n    value = 1", target.read_text())
+            self.assertIn("def second():\n    value = 2", target.read_text())
+            self.assertIn("via line_anchor", "\n".join(agent.state.notes))
+
+    def test_patch_miss_retarget_edge_recovers_from_stale_line_with_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def first():\n"
+                "    value = 1\n"
+                "    return value\n"
+                "\n"
+                "def second():\n"
+                "    value = 1\n"
+                "    return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"patch_line_anchor_context_lines": 0},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                reason="edit second with stale line hint",
+                target="    value = 1\n",
+                replacement="    value = 3\n",
+                target_region="target.py::second",
+                start_line=2,
+                end_line=2,
+                anchor_before="def second():\n",
+                anchor_after="    return value\n",
+            )
+
+            async def apply_once() -> int:
+                await agent.mcp.start()
+                try:
+                    result = await agent._apply_changes([change], {"target.py"})
+                    return result.applied
+                finally:
+                    await agent.mcp.close()
+
+            applied = asyncio.run(apply_once())
+
+            self.assertEqual(applied, 1)
+            self.assertIn("def first():\n    value = 1", target.read_text())
+            self.assertIn("def second():\n    value = 3", target.read_text())
+            self.assertIn("via anchor", "\n".join(agent.state.notes))
+
+    def test_patch_miss_retarget_error_records_ambiguous_anchor_reject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "def target():\n"
+                "    value = 1\n"
+                "    value = 1\n"
+                "    return value\n"
+            )
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "candidate_queue": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "ambiguous",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="ambiguous bounded edit",
+                        target="    value = 1\n",
+                        replacement="    value = 2\n",
+                        target_region="target.py::target",
+                        anchor_before="def target():\n",
+                        anchor_after="    return value\n",
+                    )
+                ],
+                "ambiguous bounded edit",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text().count("value = 1"), 2)
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["failure_class"], "patch_miss")
+            self.assertEqual(record["patch_miss_kind"], "ambiguous_target")
+            self.assertEqual(record["patch_miss_path"], "target.py")
+            self.assertEqual(record["matches_found"], 2)
+            self.assertFalse(record["repair_attempted"])
+            self.assertEqual(record["target_region"], "target.py::target")
+
+    def test_patch_miss_partial_apply_is_restored_before_candidate_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\nflag = 'old'\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "candidate_queue": True,
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "print('cycles: 50' if 'value = \\'new\\'' in "
+                            "Path('target.py').read_text() else 'cycles: 120')\""
+                        )
+                    ],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": False,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "partial",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="valid edit",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    ),
+                    CodeChange(
+                        path="target.py",
+                        reason="missing edit",
+                        target="flag = 'missing'\n",
+                        replacement="flag = 'new'\n",
+                    ),
+                ],
+                "partial should not be tested",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\nflag = 'old'\n")
+            self.assertIn("partial apply; restored before repair", "\n".join(state.notes))
+            rows = [
+                json.loads(line)
+                for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["candidate_id"], "partial")
+            self.assertEqual(rows[0]["status"], "rejected_no_changes")
+            self.assertEqual(rows[0]["failure_class"], "patch_miss")
+            self.assertEqual(rows[0]["patch_miss_kind"], "target_not_found")
+
+    def test_patch_miss_partial_patch_failure_is_restored_before_candidate_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\nflag = 'old'\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "candidate_queue": True,
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "print('cycles: 50' if 'value = \\'new\\'' in "
+                            "Path('target.py').read_text() else 'cycles: 120')\""
+                        )
+                    ],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": False,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "partial-patch",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="valid edit",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    ),
+                    CodeChange(
+                        path="target.py",
+                        reason="stale patch edit",
+                        patch=(
+                            "diff --git a/target.py b/target.py\n"
+                            "--- a/target.py\n"
+                            "+++ b/target.py\n"
+                            "@@ -1,2 +1,2 @@\n"
+                            " value = 'old'\n"
+                            "-flag = 'missing'\n"
+                            "+flag = 'new'\n"
+                        ),
+                    ),
+                ],
+                "partial patch should not be tested",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\nflag = 'old'\n")
+            self.assertIn("partial apply; restored before repair", "\n".join(state.notes))
+            rows = [
+                json.loads(line)
+                for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["candidate_id"], "partial-patch")
+            self.assertEqual(rows[0]["status"], "rejected_no_changes")
+            self.assertEqual(rows[0]["failure_class"], "patch_miss")
+            self.assertEqual(rows[0]["patch_miss_kind"], "patch_rejected")
+
+    def test_patch_miss_patch_reject_records_actual_touched_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            forbidden = repo / "forbidden.py"
+            target.write_text("value = 'old'\n")
+            forbidden.write_text("secret = 'old'\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "candidate_queue": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": False,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "patch-forbidden",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="valid edit before bad patch",
+                        target="value = 'old'\n",
+                        replacement="value = 'new'\n",
+                    ),
+                    CodeChange(
+                        path="target.py",
+                        reason="patch touches a different file",
+                        patch=(
+                            "diff --git a/forbidden.py b/forbidden.py\n"
+                            "--- a/forbidden.py\n"
+                            "+++ b/forbidden.py\n"
+                            "@@ -1 +1 @@\n"
+                            "-secret = 'old'\n"
+                            "+secret = 'new'\n"
+                        ),
+                    ),
+                ],
+                "patch path should report actual touched file",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+            self.assertEqual(forbidden.read_text(), "secret = 'old'\n")
+            rows = [
+                json.loads(line)
+                for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["candidate_id"], "patch-forbidden")
+            self.assertEqual(rows[0]["failure_class"], "patch_miss")
+            self.assertEqual(rows[0]["patch_miss_kind"], "patch_rejected")
+            self.assertEqual(rows[0]["patch_miss_path"], "forbidden.py")
+            self.assertEqual(rows[0]["patch_touched_files"], ["forbidden.py"])
+            self.assertEqual(rows[0]["patch_rejected_files"], ["forbidden.py"])
+
+    def test_single_candidate_partial_apply_is_restored_before_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\nflag = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "print('cycles: 50' if 'value = \\'new\\'' in "
+                            "Path('target.py').read_text() else 'cycles: 120')\""
+                        )
+                    ],
+                    "deterministic_test_decision": True,
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": False,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.planned_files = ["target.py"]
+            agent = MicroAgent(config, state)
+            agent.models = _SequenceModelManager(
+                [
+                    json.dumps(
+                        {
+                            "changes": [
+                                {
+                                    "path": "target.py",
+                                    "reason": "valid edit",
+                                    "target": "value = 'old'\n",
+                                    "replacement": "value = 'new'\n",
+                                },
+                                {
+                                    "path": "target.py",
+                                    "reason": "missing edit",
+                                    "target": "flag = 'missing'\n",
+                                    "replacement": "flag = 'new'\n",
+                                },
+                            ]
+                        }
+                    )
+                ]
+            )
+
+            async def code_and_test() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                    await agent.test()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_and_test())
+
+            self.assertEqual(target.read_text(), "value = 'old'\nflag = 'old'\n")
+            self.assertIn(
+                "Single CODE candidate had patch miss after partial apply; "
+                "restored before repair",
+                "\n".join(state.notes),
+            )
+            rows = [
+                json.loads(line)
+                for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "rejected")
+            self.assertEqual(rows[0]["applied"], 0)
+            self.assertEqual(rows[0]["failure_class"], "patch_miss")
+            self.assertEqual(rows[0]["patch_miss_kind"], "target_not_found")
+
+    def test_single_candidate_patch_miss_runs_same_loop_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "t=Path('target.py').read_text(); "
+                            "print('cycles: 80' if 'fast' in t else 'cycles: 120')\""
+                        )
+                    ],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": True,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.planned_files = ["target.py"]
+            agent = MicroAgent(config, state)
+            agent.models = _SequenceModelManager(
+                [
+                    json.dumps(
+                        {
+                            "changes": [
+                                {
+                                    "path": "target.py",
+                                    "reason": "stale edit",
+                                    "target": "value = 'missing'\n",
+                                    "replacement": "value = 'fast'\n",
+                                }
+                            ]
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "candidates": [
+                                {
+                                    "id": "fixed",
+                                    "reason": "same intent with current target",
+                                    "changes": [
+                                        {
+                                            "path": "target.py",
+                                            "reason": "current edit",
+                                            "target": "value = 'old'\n",
+                                            "replacement": "value = 'fast'\n",
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            )
+
+            async def code_and_test() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                    await agent.test()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_and_test())
+
+            self.assertEqual(target.read_text(), "value = 'fast'\n")
+            self.assertIn(
+                "Single CODE candidate target-not-found repair generated",
+                "\n".join(state.notes),
+            )
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["status"], "improved")
+            self.assertEqual(record["repair_parent_id"], "single")
+            self.assertTrue(record["repair_attempted"])
+            self.assertEqual(record["repair_status"], "applied")
+            self.assertEqual(record["repair_parent_patch_miss_kind"], "target_not_found")
+            self.assertEqual(record["repair_parent_patch_miss_path"], "target.py")
 
     def test_apply_replacement_retargeted_noop_is_not_counted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6694,7 +7241,8 @@ value = 'fast'
             async def apply_once() -> int:
                 await agent.mcp.start()
                 try:
-                    return await agent._apply_changes([change], {"target.py"})
+                    result = await agent._apply_changes([change], {"target.py"})
+                    return result.applied
                 finally:
                     await agent.mcp.close()
 

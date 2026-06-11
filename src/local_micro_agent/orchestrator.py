@@ -4,11 +4,13 @@ import argparse
 import ast
 import asyncio
 import difflib
+import hashlib
 import json
 import re
 import shlex
 import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,25 @@ from .mixins import (
     TelemetryMixin,
     TodoLifecycleMixin,
 )
+
+
+@dataclass
+class ApplyResult:
+    applied: int = 0
+    failed_changes: list[dict[str, Any]] = field(default_factory=list)
+    patch_miss_events: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def has_failures(self) -> bool:
+        return bool(self.failed_changes)
+
+
+@dataclass
+class PatchApplyResult:
+    applied: bool = False
+    touched_files: set[str] = field(default_factory=set)
+    rejected_files: list[str] = field(default_factory=list)
+    failure_detail: str = ""
 
 
 class MicroAgent(
@@ -276,6 +297,7 @@ class MicroAgent(
                 self.state.current = AgentStateName.REFLECT
             return
         seeded_changes = self.config.get("workflow", {}).get("seed_changes")
+        seeded_change_mode = bool(seeded_changes)
         if seeded_changes:
             decision = CodeDecision(changes=[CodeChange.from_dict(c) for c in seeded_changes])
         else:
@@ -481,8 +503,72 @@ class MicroAgent(
             self.state.scratch["applied_changes"] = 0
             self.state.current = AgentStateName.TEST
             return
-        applied = await self._apply_changes(decision.changes, allowed)
         previous_snapshot = self.state.scratch.get("pre_code_snapshot")
+        self.state.scratch["patch_miss_repair_attempted"] = False
+        self.state.scratch["patch_miss_repair_status"] = "not_attempted"
+        self.state.scratch.pop("repair_parent_patch_miss_events", None)
+        note_start = len(self.state.notes)
+        apply_result = await self._apply_changes(
+            decision.changes,
+            allowed,
+            skip_disallowed=seeded_change_mode,
+        )
+        applied = apply_result.applied
+        parent_patch_miss_events = apply_result.patch_miss_events
+        if apply_result.has_failures:
+            if applied > 0 and isinstance(previous_snapshot, dict):
+                self.state.notes.append(
+                    "Single CODE candidate had patch miss after partial apply; "
+                    "restored before repair"
+                )
+                await self._restore_snapshot(previous_snapshot)
+                self.state.scratch["applied_changes"] = 0
+                applied = 0
+        if applied == 0:
+            previous_notes = self.state.notes[note_start:]
+            failure_detail = self._candidate_failure_detail(
+                previous_notes,
+                [],
+                failed=True,
+            )
+            repaired = await self._repair_target_not_found_candidate(
+                self._single_code_candidate(decision.changes),
+                failure_detail=failure_detail,
+                allowed=allowed,
+            )
+            if repaired is not None:
+                self.state.notes.append(
+                    "Single CODE candidate target-not-found repair generated "
+                    f"{repaired.candidate_id}"
+                )
+                if isinstance(previous_snapshot, dict):
+                    await self._restore_snapshot(previous_snapshot)
+                if parent_patch_miss_events:
+                    self.state.scratch["repair_parent_patch_miss_events"] = (
+                        parent_patch_miss_events
+                    )
+                self.state.proposed_changes = repaired.changes
+                self.state.scratch["single_repair_parent_id"] = "single"
+                repair_apply_result = await self._apply_changes(repaired.changes, allowed)
+                applied = repair_apply_result.applied
+                if (
+                    repair_apply_result.has_failures
+                    and applied > 0
+                    and isinstance(previous_snapshot, dict)
+                ):
+                    self.state.notes.append(
+                        "Single CODE repair candidate had patch miss after partial apply; "
+                        "restored before test"
+                    )
+                    await self._restore_snapshot(previous_snapshot)
+                    self.state.scratch["applied_changes"] = 0
+                    applied = 0
+                if applied > 0:
+                    self.state.scratch["patch_miss_repair_status"] = "applied"
+                elif repair_apply_result.has_failures:
+                    self.state.scratch["patch_miss_repair_status"] = "apply_failed"
+                elif self.state.scratch.get("patch_miss_repair_status") == "generated":
+                    self.state.scratch["patch_miss_repair_status"] = "still_missing"
         if isinstance(previous_snapshot, dict):
             probe_rejection = self._active_probe_diff_contract_rejection(
                 previous_snapshot,
@@ -506,28 +592,100 @@ class MicroAgent(
                 self.state.scratch["applied_changes"] = 0
         self.state.current = AgentStateName.TEST
 
-    async def _apply_changes(self, changes: list[CodeChange], allowed: set[str]) -> int:
-        applied = 0
+    async def _apply_changes(
+        self,
+        changes: list[CodeChange],
+        allowed: set[str],
+        *,
+        skip_disallowed: bool = False,
+    ) -> ApplyResult:
+        result = ApplyResult()
+        self.state.scratch["patch_miss_events"] = []
         self.state.proposed_changes = changes
         for change in changes:
             if change.path not in allowed:
+                if skip_disallowed and not self._is_spec_acceptance_path(change.path):
+                    self.state.notes.append(
+                        f"Skipped out-of-plan seed change: {change.path}"
+                    )
+                    continue
+                event = self._record_patch_miss_event(
+                    change, "out_of_plan", matches_found=0
+                )
+                result.failed_changes.append(event)
                 self.state.notes.append(f"Rejected out-of-plan change: {change.path}")
                 continue
             if change.target is not None and change.replacement is not None:
-                if await self._apply_replacement(change.path, change.target, change.replacement):
-                    applied += 1
+                before_events = len(self._patch_miss_events())
+                if await self._apply_replacement(change):
+                    result.applied += 1
+                else:
+                    event = self._latest_patch_miss_event_since(before_events)
+                    if event is None:
+                        event = self._record_patch_miss_event(
+                            change, "replacement_failed", matches_found=0
+                        )
+                    result.failed_changes.append(event)
                 continue
             if change.patch:
-                if await self._apply_patch(change.patch, allowed):
-                    applied += 1
+                patch_result = await self._apply_patch(change.patch, allowed)
+                if patch_result.applied:
+                    result.applied += 1
+                else:
+                    patch_path = (
+                        patch_result.rejected_files[0]
+                        if patch_result.rejected_files
+                        else next(iter(sorted(patch_result.touched_files)), None)
+                    )
+                    event = self._record_patch_miss_event(
+                        change,
+                        "patch_rejected",
+                        matches_found=0,
+                        patch_miss_path=patch_path,
+                        patch_touched_files=sorted(patch_result.touched_files),
+                        patch_rejected_files=patch_result.rejected_files,
+                        failure_detail=patch_result.failure_detail,
+                    )
+                    result.failed_changes.append(event)
                 continue
             if change.content is not None:
                 await self.mcp.write_file(str(self.state.repo_root / change.path), change.content)
-                applied += 1
+                result.applied += 1
                 continue
+            event = self._record_patch_miss_event(
+                change, "empty_change", matches_found=0
+            )
+            result.failed_changes.append(event)
             self.state.notes.append(f"Skipped empty change: {change.path}")
-        self.state.scratch["applied_changes"] = applied
-        return applied
+        result.patch_miss_events = self._patch_miss_events()
+        self.state.scratch["applied_changes"] = result.applied
+        self.state.scratch["apply_failed_changes"] = result.failed_changes
+        return result
+
+    def _single_code_candidate(self, changes: list[CodeChange]) -> CodeCandidate:
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+        strategy_axis = ""
+        reason = "single CODE candidate"
+        if isinstance(active_todo, dict):
+            strategy_axis = self._normalize_strategy_axis(
+                str(active_todo.get("strategy_axis", ""))
+            )
+            reason = str(active_todo.get("title", "") or reason)
+        return CodeCandidate("single", changes, reason, strategy_axis=strategy_axis)
+
+    def _patch_miss_events(self) -> list[dict[str, Any]]:
+        events = self.state.scratch.get("patch_miss_events")
+        if not isinstance(events, list):
+            return []
+        return [event for event in events if isinstance(event, dict)]
+
+    def _latest_patch_miss_event_since(self, previous_count: int) -> dict[str, Any] | None:
+        events = self._patch_miss_events()
+        if len(events) <= previous_count:
+            return None
+        return events[-1]
 
     async def _evaluate_code_candidates(
         self, candidates: list[CodeCandidate], allowed: set[str]
@@ -725,9 +883,26 @@ class MicroAgent(
             candidate_for_record = candidate
             repair_parent_id = ""
             note_start = len(self.state.notes)
-            applied = await self._apply_changes(candidate.changes, allowed)
+            self.state.scratch["patch_miss_repair_attempted"] = False
+            self.state.scratch["patch_miss_repair_status"] = "not_attempted"
+            self.state.scratch.pop("repair_parent_patch_miss_events", None)
+            apply_result = await self._apply_changes(candidate.changes, allowed)
+            applied = apply_result.applied
             current_snapshot = await self._snapshot_files(sorted(allowed))
             patch_text = self._snapshot_patch(baseline_snapshot, current_snapshot)
+            parent_patch_miss_events = apply_result.patch_miss_events
+            if apply_result.has_failures:
+                if applied > 0:
+                    self.state.notes.append(
+                        "Candidate "
+                        f"{candidate.candidate_id} had patch miss after partial apply; "
+                        "restored before repair"
+                    )
+                    await self._restore_snapshot(baseline_snapshot)
+                    current_snapshot = await self._snapshot_files(sorted(allowed))
+                    patch_text = self._snapshot_patch(baseline_snapshot, current_snapshot)
+                    self.state.scratch["applied_changes"] = 0
+                    applied = 0
             if applied == 0:
                 failure_detail = self._candidate_failure_detail(
                     self.state.notes[note_start:],
@@ -749,10 +924,36 @@ class MicroAgent(
                         f"{repaired_candidate.candidate_id}"
                     )
                     await self._restore_snapshot(baseline_snapshot)
+                    if parent_patch_miss_events:
+                        self.state.scratch["repair_parent_patch_miss_events"] = (
+                            parent_patch_miss_events
+                        )
                     note_start = len(self.state.notes)
-                    applied = await self._apply_changes(repaired_candidate.changes, allowed)
+                    repair_apply_result = await self._apply_changes(
+                        repaired_candidate.changes, allowed
+                    )
+                    applied = repair_apply_result.applied
                     current_snapshot = await self._snapshot_files(sorted(allowed))
                     patch_text = self._snapshot_patch(baseline_snapshot, current_snapshot)
+                    if repair_apply_result.has_failures and applied > 0:
+                        self.state.notes.append(
+                            "Candidate "
+                            f"{repaired_candidate.candidate_id} had patch miss after "
+                            "partial apply; restored before test"
+                        )
+                        await self._restore_snapshot(baseline_snapshot)
+                        current_snapshot = await self._snapshot_files(sorted(allowed))
+                        patch_text = self._snapshot_patch(
+                            baseline_snapshot, current_snapshot
+                        )
+                        self.state.scratch["applied_changes"] = 0
+                        applied = 0
+                    if applied > 0:
+                        self.state.scratch["patch_miss_repair_status"] = "applied"
+                    elif repair_apply_result.has_failures:
+                        self.state.scratch["patch_miss_repair_status"] = "apply_failed"
+                    elif self.state.scratch.get("patch_miss_repair_status") == "generated":
+                        self.state.scratch["patch_miss_repair_status"] = "still_missing"
                     if applied == 0:
                         failure_detail = self._candidate_failure_detail(
                             self.state.notes[note_start:],
@@ -1280,8 +1481,10 @@ class MicroAgent(
             "content": (
                 "Candidate queue mode is enabled. Output strict JSON with a top-level "
                 '"candidates" array, not a top-level "changes" array. Example: '
-                '{"candidates":[{"id":"1","strategy_axis":"general_edit","reason":"short","changes":[{"path":"file.py",'
-                '"target":"exact text","replacement":"new text","reason":"short"}]}]}. '
+                '{"candidates":[{"id":"1","strategy_axis":"general_edit",'
+                '"reason":"short","changes":[{"path":"file.py",'
+                '"target":"exact text","replacement":"new text","reason":"short",'
+                '"start_line":12,"end_line":14,"anchor_before":"exact nearby text"}]}]}. '
                 "Each candidate must be independent and safe to apply from the same baseline."
             ),
         }
@@ -1456,6 +1659,7 @@ class MicroAgent(
             if rejected_patch_text:
                 patch_text = rejected_patch_text
         no_change_reason = failure_detail if applied == 0 else ""
+        repair_parent_id = str(self.state.scratch.pop("single_repair_parent_id", ""))
         extra = self._candidate_history_extra(
             candidate,
             status=status,
@@ -1466,6 +1670,7 @@ class MicroAgent(
             results=self.state.test_results,
             failure_detail=failure_detail,
             no_change_reason=no_change_reason,
+            repair_parent_id=repair_parent_id,
         )
         if isinstance(pre_apply_rejection, dict):
             extra.update(
@@ -1813,42 +2018,329 @@ class MicroAgent(
         except ValueError:
             return None
 
-    async def _apply_replacement(self, path: str, target: str, replacement: str) -> bool:
+    async def _apply_replacement(self, change: CodeChange) -> bool:
+        path = change.path
+        target = change.target or ""
+        replacement = change.replacement or ""
         abs_path = self.state.repo_root / path
         if target == replacement:
+            self._record_patch_miss_event(change, "patch_noop", matches_found=0)
             self.state.notes.append(f"Replacement is a no-op: {path}")
             return False
         if self._without_comment_lines(target) == self._without_comment_lines(replacement):
+            self._record_patch_miss_event(change, "patch_noop", matches_found=0)
             self.state.notes.append(f"Replacement only changes comments or blank lines: {path}")
             return False
         original = await self.mcp.read_file(str(abs_path))
-        if target not in original:
-            retargeted = self._unique_stripped_line_match(original, target)
-            if retargeted is None:
-                self.state.notes.append(f"Replacement target not found: {path}")
-                return False
-            target = retargeted
-            if retargeted.endswith("\n") and not replacement.endswith("\n"):
+        resolved = self._resolve_replacement_target(original, change)
+        if resolved is None:
+            return False
+        start, end, target, retarget_mode = resolved
+        if retarget_mode:
+            if target.endswith("\n") and not replacement.endswith("\n"):
                 replacement += "\n"
-            self.state.notes.append(
-                "Retargeted replacement target to exact current source whitespace "
-                f"in {path}"
-            )
             if target == replacement:
+                self._record_patch_miss_event(change, "patch_noop", matches_found=1)
                 self.state.notes.append(f"Replacement is a no-op after retarget: {path}")
                 return False
             if self._without_comment_lines(target) == self._without_comment_lines(
                 replacement
             ):
+                self._record_patch_miss_event(change, "patch_noop", matches_found=1)
                 self.state.notes.append(
                     f"Replacement only changes comments or blank lines after retarget: {path}"
                 )
                 return False
-        if original.count(target) != 1:
-            self.state.notes.append(f"Replacement target is ambiguous: {path}")
-            return False
-        await self.mcp.write_file(str(abs_path), original.replace(target, replacement, 1))
+        await self.mcp.write_file(str(abs_path), original[:start] + replacement + original[end:])
         return True
+
+    def _resolve_replacement_target(
+        self, content: str, change: CodeChange
+    ) -> tuple[int, int, str, str] | None:
+        target = change.target or ""
+        path = change.path
+        exact_spans = self._literal_spans(content, target)
+        if len(exact_spans) == 1:
+            start, end = exact_spans[0]
+            return start, end, content[start:end], ""
+
+        line_ranges = self._line_hint_ranges(content, change)
+        anchor_ranges, anchor_before_found, anchor_after_found = self._anchor_hint_ranges(
+            content, change
+        )
+        range_sets = self._retarget_range_sets(line_ranges, anchor_ranges)
+
+        for mode, ranges in range_sets:
+            span_matches = self._literal_spans_in_ranges(content, target, ranges)
+            if len(span_matches) == 1:
+                start, end = span_matches[0]
+                self.state.notes.append(
+                    f"Retargeted replacement target via {mode} in {path}"
+                )
+                return start, end, content[start:end], mode
+            if len(span_matches) > 1:
+                self._record_patch_miss_event(
+                    change,
+                    "ambiguous_target",
+                    matches_found=len(span_matches),
+                    anchor_before_found=anchor_before_found,
+                    anchor_after_found=anchor_after_found,
+                )
+                self.state.notes.append(f"Replacement target is ambiguous: {path}")
+                return None
+
+        if len(exact_spans) > 1:
+            self._record_patch_miss_event(
+                change,
+                "ambiguous_target",
+                matches_found=len(exact_spans),
+                anchor_before_found=anchor_before_found,
+                anchor_after_found=anchor_after_found,
+            )
+            self.state.notes.append(f"Replacement target is ambiguous: {path}")
+            return None
+
+        for mode, ranges in range_sets:
+            stripped_matches = self._stripped_line_spans_in_ranges(content, target, ranges)
+            if len(stripped_matches) == 1:
+                start, end = stripped_matches[0]
+                self.state.notes.append(
+                    f"Retargeted replacement target via {mode} whitespace in {path}"
+                )
+                return start, end, content[start:end], f"{mode}_whitespace"
+            if len(stripped_matches) > 1:
+                self._record_patch_miss_event(
+                    change,
+                    "ambiguous_target",
+                    matches_found=len(stripped_matches),
+                    anchor_before_found=anchor_before_found,
+                    anchor_after_found=anchor_after_found,
+                )
+                self.state.notes.append(f"Replacement target is ambiguous: {path}")
+                return None
+
+        fallback = self._stripped_line_spans_in_ranges(content, target, [(0, len(content))])
+        if len(fallback) == 1:
+            start, end = fallback[0]
+            self.state.notes.append(
+                "Retargeted replacement target to exact current source whitespace "
+                f"in {path}"
+            )
+            return start, end, content[start:end], "stripped_whitespace"
+        if len(fallback) > 1:
+            self._record_patch_miss_event(
+                change,
+                "ambiguous_target",
+                matches_found=len(fallback),
+                anchor_before_found=anchor_before_found,
+                anchor_after_found=anchor_after_found,
+            )
+            self.state.notes.append(f"Replacement target is ambiguous: {path}")
+            return None
+
+        miss_kind = (
+            "line_anchor_mismatch"
+            if line_ranges or change.anchor_before or change.anchor_after
+            else "target_not_found"
+        )
+        self._record_patch_miss_event(
+            change,
+            miss_kind,
+            matches_found=0,
+            anchor_before_found=anchor_before_found,
+            anchor_after_found=anchor_after_found,
+        )
+        self.state.notes.append(f"Replacement target not found: {path}")
+        return None
+
+    def _retarget_range_sets(
+        self,
+        line_ranges: list[tuple[int, int]],
+        anchor_ranges: list[tuple[int, int]],
+    ) -> list[tuple[str, list[tuple[int, int]]]]:
+        ranges: list[tuple[str, list[tuple[int, int]]]] = []
+        if line_ranges and anchor_ranges:
+            intersections = self._intersect_ranges(line_ranges, anchor_ranges)
+            if intersections:
+                ranges.append(("line_anchor", intersections))
+            ranges.append(("anchor", anchor_ranges))
+            return ranges
+        if anchor_ranges:
+            ranges.append(("anchor", anchor_ranges))
+        if line_ranges:
+            ranges.append(("line_window", line_ranges))
+        return ranges
+
+    @staticmethod
+    def _literal_spans(content: str, target: str) -> list[tuple[int, int]]:
+        if not target:
+            return []
+        spans: list[tuple[int, int]] = []
+        start = 0
+        while True:
+            index = content.find(target, start)
+            if index == -1:
+                break
+            spans.append((index, index + len(target)))
+            start = index + 1
+        return spans
+
+    def _literal_spans_in_ranges(
+        self,
+        content: str,
+        target: str,
+        ranges: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        spans: set[tuple[int, int]] = set()
+        for range_start, range_end in ranges:
+            for start, end in self._literal_spans(content[range_start:range_end], target):
+                spans.add((range_start + start, range_start + end))
+        return sorted(spans)
+
+    def _stripped_line_spans_in_ranges(
+        self,
+        content: str,
+        target: str,
+        ranges: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        target_lines = target.splitlines()
+        if not target_lines:
+            return []
+        target_key = [line.strip() for line in target_lines]
+        lines = content.splitlines(keepends=True)
+        if not lines:
+            return []
+        starts: list[int] = []
+        offset = 0
+        for line in lines:
+            starts.append(offset)
+            offset += len(line)
+        width = len(target_lines)
+        spans: set[tuple[int, int]] = set()
+        for index in range(0, len(lines) - width + 1):
+            window = lines[index : index + width]
+            if [line.strip() for line in window] != target_key:
+                continue
+            start = starts[index]
+            end = starts[index + width - 1] + len(lines[index + width - 1])
+            if any(start >= range_start and end <= range_end for range_start, range_end in ranges):
+                spans.add((start, end))
+        return sorted(spans)
+
+    def _line_hint_ranges(
+        self, content: str, change: CodeChange
+    ) -> list[tuple[int, int]]:
+        if change.start_line is None and change.end_line is None:
+            return []
+        lines = content.splitlines(keepends=True)
+        if not lines:
+            return []
+        start_line = change.start_line or change.end_line or 1
+        end_line = change.end_line or change.start_line or start_line
+        if start_line > end_line:
+            start_line, end_line = end_line, start_line
+        if end_line < 1 or start_line > len(lines):
+            return []
+        context_lines = int(
+            self.config.get("workflow", {}).get("patch_line_anchor_context_lines", 8)
+        )
+        start_index = max(0, start_line - 1 - context_lines)
+        end_index = min(len(lines), end_line + context_lines)
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line))
+        return [(offsets[start_index], offsets[end_index])]
+
+    def _anchor_hint_ranges(
+        self, content: str, change: CodeChange
+    ) -> tuple[list[tuple[int, int]], bool, bool]:
+        before = change.anchor_before or ""
+        after = change.anchor_after or ""
+        before_spans = self._literal_spans(content, before) if before else []
+        after_spans = self._literal_spans(content, after) if after else []
+        ranges: list[tuple[int, int]] = []
+        context_chars = int(
+            self.config.get("workflow", {}).get("patch_anchor_context_chars", 4000)
+        )
+        if before and after and before_spans and after_spans:
+            for before_start, before_end in before_spans:
+                next_after = next(
+                    (
+                        (after_start, after_end)
+                        for after_start, after_end in after_spans
+                        if after_start >= before_end
+                    ),
+                    None,
+                )
+                if next_after is not None:
+                    ranges.append((before_start, next_after[1]))
+        elif before and before_spans:
+            for before_start, before_end in before_spans:
+                ranges.append((before_start, min(len(content), before_end + context_chars)))
+        elif after and after_spans:
+            for after_start, after_end in after_spans:
+                ranges.append((max(0, after_start - context_chars), after_end))
+        return ranges, (not before or bool(before_spans)), (not after or bool(after_spans))
+
+    @staticmethod
+    def _intersect_ranges(
+        left: list[tuple[int, int]], right: list[tuple[int, int]]
+    ) -> list[tuple[int, int]]:
+        intersections: set[tuple[int, int]] = set()
+        for left_start, left_end in left:
+            for right_start, right_end in right:
+                start = max(left_start, right_start)
+                end = min(left_end, right_end)
+                if start < end:
+                    intersections.add((start, end))
+        return sorted(intersections)
+
+    def _record_patch_miss_event(
+        self,
+        change: CodeChange,
+        patch_miss_kind: str,
+        *,
+        matches_found: int,
+        anchor_before_found: bool | None = None,
+        anchor_after_found: bool | None = None,
+        patch_miss_path: str | None = None,
+        patch_touched_files: list[str] | None = None,
+        patch_rejected_files: list[str] | None = None,
+        failure_detail: str = "",
+    ) -> dict[str, Any]:
+        target = change.target or ""
+        event: dict[str, Any] = {
+            "patch_miss_path": patch_miss_path or change.path,
+            "patch_miss_kind": patch_miss_kind,
+            "target_line_count": len(target.splitlines()),
+            "target_hash": change.target_hash
+            or hashlib.sha256(target.encode("utf-8")).hexdigest()[:16],
+            "matches_found": matches_found,
+            "repair_attempted": False,
+            "repair_status": "not_attempted",
+        }
+        if patch_touched_files:
+            event["patch_touched_files"] = patch_touched_files
+        if patch_rejected_files:
+            event["patch_rejected_files"] = patch_rejected_files
+        if failure_detail:
+            event["patch_failure_detail"] = self._truncate_text(failure_detail, 500)
+        if change.start_line is not None or change.end_line is not None:
+            event["line_range"] = {
+                "start_line": change.start_line,
+                "end_line": change.end_line,
+            }
+        if change.target_region:
+            event["fresh_context_region"] = change.target_region
+            event["target_region"] = change.target_region
+        if change.anchor_before is not None:
+            event["anchor_before_found"] = bool(anchor_before_found)
+        if change.anchor_after is not None:
+            event["anchor_after_found"] = bool(anchor_after_found)
+        events = self.state.scratch.setdefault("patch_miss_events", [])
+        if isinstance(events, list):
+            events.append(event)
+        return event
 
     @staticmethod
     def _without_comment_lines(text: str) -> str:
@@ -1860,18 +2352,22 @@ class MicroAgent(
             lines.append(line)
         return "\n".join(lines)
 
-    async def _apply_patch(self, patch: str, allowed: set[str]) -> bool:
+    async def _apply_patch(self, patch: str, allowed: set[str]) -> PatchApplyResult:
         touched_files = self._patch_touched_files(patch)
         if not touched_files:
             self.state.notes.append("Patch rejected: no changed files detected")
-            return False
+            return PatchApplyResult(failure_detail="no changed files detected")
         rejected_files = sorted(path for path in touched_files if path not in allowed)
         if rejected_files:
+            detail = "touches out-of-plan files: " + ", ".join(rejected_files[:8])
             self.state.notes.append(
-                "Patch rejected: touches out-of-plan files: "
-                + ", ".join(rejected_files[:8])
+                "Patch rejected: " + detail
             )
-            return False
+            return PatchApplyResult(
+                touched_files=touched_files,
+                rejected_files=rejected_files,
+                failure_detail=detail,
+            )
         with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as handle:
             handle.write(patch)
             patch_path = handle.name
@@ -1881,15 +2377,23 @@ class MicroAgent(
                 f"git apply --check {patch_arg}", cwd=str(self.state.repo_root)
             )
             if result["exit_code"] != 0:
-                self.state.notes.append(f"Patch rejected: {result['stderr'][-1000:]}")
-                return False
+                detail = str(result["stderr"][-1000:])
+                self.state.notes.append(f"Patch rejected: {detail}")
+                return PatchApplyResult(
+                    touched_files=touched_files,
+                    failure_detail=detail,
+                )
             result = await self.mcp.run_command(
                 f"git apply {patch_arg}", cwd=str(self.state.repo_root)
             )
             if result["exit_code"] != 0:
-                self.state.notes.append(f"Patch apply failed: {result['stderr'][-1000:]}")
-                return False
-            return True
+                detail = str(result["stderr"][-1000:])
+                self.state.notes.append(f"Patch apply failed: {detail}")
+                return PatchApplyResult(
+                    touched_files=touched_files,
+                    failure_detail=detail,
+                )
+            return PatchApplyResult(applied=True, touched_files=touched_files)
         finally:
             Path(patch_path).unlink(missing_ok=True)
 

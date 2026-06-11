@@ -475,9 +475,15 @@ the missed region into the next CODE attempt, and
 `repair_target_not_found=true` runs a narrow same-candidate repair: the prompt
 quotes the stale search text next to the best-matching current-source region
 (`repair_anchor_context_lines`, default 18), and repaired candidates are
-preflighted for existence and uniqueness before evaluation. Whitespace-only
-misses with a single stripped-line match are retargeted automatically even in
-single-candidate mode.
+preflighted for existence and uniqueness before evaluation. Replacement edits
+may also carry optional `target_region`, `start_line`, `end_line`,
+`anchor_before`, and `anchor_after` hints. The controller treats line numbers
+as hints, not authority: it first applies a unique exact match, then retargets
+through line/anchor-bounded windows, then falls back to the legacy stripped-line
+whitespace match. A supplied `target_hash` is stored as diagnostic metadata only.
+Ambiguous, missing, and no-op targets are recorded as structured `patch_miss_*`
+fields in candidate history. Whitespace misses with a single stripped-line match
+are still retargeted automatically.
 
 **Output format.** For models that struggle to JSON-escape multi-line code,
 `code_output_format="xml"` switches CODE to raw `<search>`/`<replace>` blocks.

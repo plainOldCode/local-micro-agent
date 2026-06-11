@@ -232,11 +232,26 @@ CODE_SYSTEM = """You are the CODE node in a local coding-agent FSM.
 Use only the supplied plan, source files, external advisory context, and latest
 test failure.
 Output strict JSON:
-{"changes":[{"path":"relative/path.py","target":"exact existing text","replacement":"new text","reason":"why"}]}
+{
+  "changes": [{
+    "path": "relative/path.py",
+    "target": "exact existing text",
+    "replacement": "new text",
+    "reason": "why",
+    "target_region": "relative/path.py::symbol",
+    "start_line": 10,
+    "end_line": 14,
+    "anchor_before": "nearby exact text before target",
+    "anchor_after": "nearby exact text after target"
+  }]
+}
 Rules:
 - Modify only listed files.
 - Prefer exact target/replacement snippets.
 - For every replacement edit, copy the target verbatim from the current supplied source.
+- For every replacement edit, include start_line/end_line and small anchor_before/anchor_after
+  hints when available. Line numbers are hints only; never include line-number prefixes
+  inside target or replacement.
 - Do not invent or paraphrase a replacement target; stale targets will be rejected.
 - Use "patch" only if target/replacement is impossible.
 - Use full-file "content" only for very small files.

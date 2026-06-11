@@ -159,6 +159,8 @@ class CandidateRecordsMixin:
         )
         observation.update(failure_scope)
         extra.update(observation)
+        if observation.get("failure_class") == "patch_miss" or repair_parent_id:
+            extra.update(self._patch_miss_history_extra())
         if diagnostic_results:
             extra["diagnostics"] = self._compact_diagnostic_results(diagnostic_results)
             diagnostic_summary = self._diagnostic_summary(diagnostic_results)
@@ -195,6 +197,50 @@ class CandidateRecordsMixin:
                 diagnostic_results=diagnostic_results or [],
             )
         )
+        return extra
+
+    def _patch_miss_history_extra(self) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        events = self.state.scratch.get("patch_miss_events")
+        if isinstance(events, list) and events:
+            latest = events[-1]
+            if isinstance(latest, dict):
+                extra.update(
+                    {
+                        key: value
+                        for key, value in latest.items()
+                        if value not in (None, "", [], {})
+                    }
+                )
+                compact_events = [
+                    event
+                    for event in events[-3:]
+                    if isinstance(event, dict)
+                ]
+                if len(compact_events) > 1:
+                    extra["patch_miss_events"] = compact_events
+        parent_events = self.state.scratch.get("repair_parent_patch_miss_events")
+        if isinstance(parent_events, list) and parent_events:
+            parent_records = [
+                event for event in parent_events[-3:] if isinstance(event, dict)
+            ]
+            if parent_records:
+                latest_parent = parent_records[-1]
+                extra["repair_parent_patch_miss"] = latest_parent
+                extra["repair_parent_patch_miss_kind"] = latest_parent.get(
+                    "patch_miss_kind"
+                )
+                extra["repair_parent_patch_miss_path"] = latest_parent.get(
+                    "patch_miss_path"
+                )
+                if len(parent_records) > 1:
+                    extra["repair_parent_patch_miss_events"] = parent_records
+        repair_attempted = self.state.scratch.get("patch_miss_repair_attempted")
+        repair_status = self.state.scratch.get("patch_miss_repair_status")
+        if repair_attempted is not None:
+            extra["repair_attempted"] = bool(repair_attempted)
+        if repair_status:
+            extra["repair_status"] = str(repair_status)
         return extra
 
     def _candidate_observation(
@@ -516,6 +562,8 @@ class CandidateRecordsMixin:
             return None
         if "Replacement target not found" not in failure_detail:
             return None
+        self.state.scratch["patch_miss_repair_attempted"] = True
+        self.state.scratch["patch_miss_repair_status"] = "requested"
         messages = await self._target_not_found_repair_prompt(
             candidate,
             failure_detail=failure_detail,
@@ -524,11 +572,13 @@ class CandidateRecordsMixin:
         try:
             decision = await self._target_not_found_repair_call(candidate, messages)
         except JsonValidationError as exc:
+            self.state.scratch["patch_miss_repair_status"] = "parse_failed"
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} target-not-found repair rejected: {exc}"
             )
             return None
         if not decision.candidates:
+            self.state.scratch["patch_miss_repair_status"] = "empty"
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} target-not-found repair returned no candidate"
             )
@@ -546,17 +596,21 @@ class CandidateRecordsMixin:
         )
         if rejection is not None:
             _status, note = rejection
+            self.state.scratch["patch_miss_repair_status"] = "scope_rejected"
             self.state.notes.append(
                 f"Candidate {candidate.candidate_id} target-not-found repair rejected: {note}"
             )
             return None
         target_miss = await self._candidate_current_target_miss(repaired, allowed)
         if target_miss:
+            repair_status = "ambiguous" if "ambiguous" in target_miss else "still_missing"
+            self.state.scratch["patch_miss_repair_status"] = repair_status
             self.state.notes.append(
                 "Candidate "
                 f"{candidate.candidate_id} target-not-found repair rejected: {target_miss}"
             )
             return None
+        self.state.scratch["patch_miss_repair_status"] = "generated"
         return repaired
 
     async def _candidate_current_target_miss(
@@ -571,18 +625,34 @@ class CandidateRecordsMixin:
                 content = await self.mcp.read_file(str(self.state.repo_root / change.path))
             except FileNotFoundError:
                 return f"repaired change targets missing file {change.path}"
-            if change.target not in content:
-                retargeted = self._unique_stripped_line_match(content, change.target)
-                if retargeted is None:
-                    return f"repaired target still not found in {change.path}"
+            resolved = self._resolve_replacement_target(content, change)
+            if resolved is None:
+                latest_kind = ""
+                events = self.state.scratch.get("patch_miss_events")
+                if isinstance(events, list) and events and isinstance(events[-1], dict):
+                    latest_kind = str(events[-1].get("patch_miss_kind", ""))
+                if latest_kind == "ambiguous_target":
+                    return f"repaired target is ambiguous in {change.path}"
+                return f"repaired target still not found in {change.path}"
+            _start, _end, retargeted, retarget_mode = resolved
+            if retarget_mode:
                 change.target = retargeted
                 if retargeted.endswith("\n") and not change.replacement.endswith("\n"):
                     change.replacement += "\n"
+                qualifier = " whitespace" if "whitespace" in retarget_mode else ""
                 self.state.notes.append(
-                    "Retargeted repaired search block to exact current source "
-                    f"whitespace in {change.path}"
+                    f"Retargeted repaired search block to exact current source{qualifier} "
+                    f"in {change.path}"
                 )
-            if content.count(change.target) != 1:
+            has_location_hint = any(
+                (
+                    change.start_line is not None,
+                    change.end_line is not None,
+                    bool(change.anchor_before),
+                    bool(change.anchor_after),
+                )
+            )
+            if content.count(change.target) != 1 and not has_location_hint:
                 return f"repaired target is ambiguous in {change.path}"
         return ""
 
@@ -622,6 +692,11 @@ class CandidateRecordsMixin:
                     "reason": change.reason,
                     "target": self._truncate_text(change.target or "", 4000),
                     "replacement": self._truncate_text(change.replacement or "", 4000),
+                    "target_region": change.target_region,
+                    "start_line": change.start_line,
+                    "end_line": change.end_line,
+                    "anchor_before": self._truncate_text(change.anchor_before or "", 1000),
+                    "anchor_after": self._truncate_text(change.anchor_after or "", 1000),
                     "patch": self._truncate_text(change.patch or "", 4000),
                     "content": self._truncate_text(change.content or "", 4000),
                 }
@@ -636,7 +711,9 @@ class CandidateRecordsMixin:
                 "exactly one <candidate> in the same XML-like CODE format, with one "
                 "<change>. Do not invent a new tactic. Preserve the strategy_axis and "
                 "todo context. The new <search> block must be copied verbatim from the "
-                "current source below and must match exactly."
+                "current source below and must match exactly. Preserve or add line/anchor "
+                "location hints when the output format supports them; line numbers are "
+                "hints only and must not appear inside <search> or <replace>."
             )
         else:
             system = (
@@ -645,7 +722,9 @@ class CandidateRecordsMixin:
                 "JSON with a top-level candidates array containing exactly one candidate "
                 "and one change. Do not invent a new tactic. Preserve the strategy_axis "
                 "and todo context. The new target must be copied verbatim from the "
-                "current source below and must match exactly."
+                "current source below and must match exactly. Include start_line/end_line "
+                "and anchor_before/anchor_after hints when available, without copying "
+                "line-number prefixes into target or replacement."
             )
         user = (
             f"Failure detail:\n{failure_detail}\n\n"
@@ -1092,7 +1171,7 @@ class CandidateRecordsMixin:
         self._update_run_spec_from_candidate_record(record)
 
     @staticmethod
-    def _summarize_changes(changes: list[CodeChange]) -> list[dict[str, str]]:
+    def _summarize_changes(changes: list[CodeChange]) -> list[dict[str, Any]]:
         summary = []
         for change in changes:
             mode = "empty"
@@ -1102,11 +1181,17 @@ class CandidateRecordsMixin:
                 mode = "patch"
             elif change.content is not None:
                 mode = "content"
-            summary.append(
-                {
-                    "path": change.path,
-                    "reason": change.reason,
-                    "mode": mode,
+            item = {
+                "path": change.path,
+                "reason": change.reason,
+                "mode": mode,
+            }
+            if change.target_region:
+                item["target_region"] = change.target_region
+            if change.start_line is not None or change.end_line is not None:
+                item["line_range"] = {
+                    "start_line": change.start_line,
+                    "end_line": change.end_line,
                 }
-            )
+            summary.append(item)
         return summary
