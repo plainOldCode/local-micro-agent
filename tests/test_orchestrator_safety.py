@@ -6521,7 +6521,7 @@ Background / non-constraints
                             },
                             "correctness_rationale": "The fallback parser path is unchanged.",
                             "fallback_plan": "Disable the guarded branch.",
-                            "rollback_or_shrink_plan": "Revert the patch.",
+                            "rollback_or_shrink_plan": "Revert the single patch.",
                             "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
                         }
                     ],
@@ -6535,6 +6535,23 @@ Background / non-constraints
                 "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
                 report["issue_codes"],
             )
+
+    def test_shrink_probe_plan_rejects_rollback_only_single_phrases(self) -> None:
+        self.assertFalse(MicroAgent._plan_mentions_shrink_or_probe("Revert the single patch."))
+        self.assertFalse(
+            MicroAgent._plan_mentions_shrink_or_probe("Restore the single changed branch.")
+        )
+        self.assertFalse(
+            MicroAgent._plan_mentions_shrink_or_probe("Roll back to a single previous branch.")
+        )
+        self.assertTrue(
+            MicroAgent._plan_mentions_shrink_or_probe(
+                "Use a single guarded branch and keep fallback behavior."
+            )
+        )
+        self.assertTrue(
+            MicroAgent._plan_mentions_shrink_or_probe("Revert if the smaller probe fails.")
+        )
 
     def test_spec_quality_gate_rejects_local_signature_callsite_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2045,13 +2045,15 @@ class TodoLifecycleMixin:
             "fallback branch",
             "feature flag",
             "isolate",
-            "single",
         )
         if any(marker in lowered for marker in strong_markers):
             return True
-        if "guard" not in lowered:
+        if re.search(r"\b(revert|restore|rollback|roll\s+back)\b", lowered):
             return False
-        return not re.search(r"\b(revert|restore|rollback)\b", lowered)
+        return bool(
+            re.search(r"\bsingle\b.*\b(guard(?:ed)?|branch|path|probe)\b", lowered)
+            or re.search(r"\b(guard(?:ed)?|branch|path|probe)\b.*\bsingle\b", lowered)
+        )
 
     def _reject_spec_task_for_design_contract(
         self, spec: dict[str, Any], task: dict[str, Any], issues: list[str]
