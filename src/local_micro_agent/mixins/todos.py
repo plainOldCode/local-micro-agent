@@ -5039,6 +5039,15 @@ class TodoLifecycleMixin:
             ]
         return any(str(indicator).lower() in reason for indicator in indicators)
 
+    @staticmethod
+    def _is_active_todo_drift_record(record: dict[str, Any]) -> bool:
+        status = str(record.get("status", ""))
+        return status in {
+            "rejected_todo_axis_drift",
+            "rejected_todo_family_drift",
+            "rejected_todo_scope_drift",
+        }
+
     def _append_todo_outcome_artifact(self, todo: dict[str, Any], status: str) -> None:
         if status == "validated":
             path = self._workflow_artifact_path(

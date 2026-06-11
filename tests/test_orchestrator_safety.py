@@ -5057,6 +5057,95 @@ Background / non-constraints
             self.assertEqual(rejection[0], "rejected_todo_scope_drift")
             self.assertIn("Parser.parse_item", rejection[1])
 
+    def test_active_todo_scope_drift_is_non_budget_candidate_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text(
+                "class Parser:\n"
+                "    def parse_item(self, value):\n"
+                "        return value.strip()\n\n"
+                "    def build(self, value):\n"
+                "        return value\n"
+            )
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["Parser.parse_item"],
+                "target_regions": ["target.py::Parser.parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+                "attempts": 1,
+            }
+            plan = {
+                "version": 1,
+                "active_todo_id": todo["todo_id"],
+                "todos": [todo],
+            }
+            (artifact_dir / "todo_plan.json").write_text(json.dumps(plan) + "\n")
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {"default": "static"},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": takehome_workflow(
+                        writable_files=["target.py"],
+                        test_commands=["python3 -c \"print('cycles: 80')\""],
+                        candidate_queue=True,
+                        candidate_history_path=".local_micro_agent/candidates.jsonl",
+                        todo_attempt_budget=3,
+                        todo_soft_until_first_improvement=False,
+                    ),
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
+            candidate = CodeCandidate(
+                "scope-drift",
+                [
+                    CodeChange(
+                        "target.py",
+                        "local parser edit in Parser.parse_item",
+                        target="    def build(self, value):\n        return value\n",
+                        replacement="    def build(self, value):\n        return value + 1\n",
+                    )
+                ],
+                "local parser edit in Parser.parse_item",
+                strategy_axis="general_edit",
+            )
+
+            async def evaluate_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([candidate], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(evaluate_once())
+
+            self.assertIn("return value\n", target.read_text())
+            history = [
+                json.loads(line)
+                for line in (artifact_dir / "candidates.jsonl").read_text().splitlines()
+            ]
+            attempts = [
+                json.loads(line)
+                for line in (artifact_dir / "todo_attempts.jsonl").read_text().splitlines()
+            ]
+            updated = json.loads((artifact_dir / "todo_plan.json").read_text())
+            self.assertEqual(history[0]["status"], "rejected_todo_scope_drift")
+            self.assertFalse(history[0]["budget_counted"])
+            self.assertEqual(history[0]["failure_class"], "active_task_drift")
+            self.assertEqual(history[0]["issue_scope"], "candidate_delta")
+            self.assertFalse(attempts[0]["budget_counted"])
+            self.assertEqual(updated["todos"][0]["attempts"], 1)
+            self.assertEqual(updated["todos"][0]["non_budget_attempts"], 1)
+
     def test_active_todo_contract_does_not_duplicate_scope_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -12197,14 +12286,25 @@ value = 'fast'
             asyncio.run(evaluate_once())
 
             self.assertEqual(target.read_text(), "value = 'old'\n")
-            history = (artifact_dir / "candidates.jsonl").read_text()
-            attempts = (artifact_dir / "todo_attempts.jsonl").read_text()
+            history_records = [
+                json.loads(line)
+                for line in (artifact_dir / "candidates.jsonl").read_text().splitlines()
+            ]
+            attempts = [
+                json.loads(line)
+                for line in (artifact_dir / "todo_attempts.jsonl").read_text().splitlines()
+            ]
             updated = json.loads((artifact_dir / "todo_plan.json").read_text())
-            self.assertIn('"status": "rejected_todo_axis_drift"', history)
-            self.assertIn("todo-001-phase_interleave", attempts)
+            self.assertEqual(history_records[0]["status"], "rejected_todo_axis_drift")
+            self.assertFalse(history_records[0]["budget_counted"])
+            self.assertEqual(history_records[0]["failure_class"], "active_task_drift")
+            self.assertEqual(history_records[0]["failure_origin"], "pre_apply_contract")
+            self.assertEqual(attempts[0]["todo_id"], "todo-001-phase_interleave")
+            self.assertFalse(attempts[0]["budget_counted"])
             self.assertEqual(updated["active_todo_id"], "todo-001-phase_interleave")
             self.assertEqual(updated["todos"][0]["status"], "attempted")
-            self.assertEqual(updated["todos"][0]["attempts"], 2)
+            self.assertEqual(updated["todos"][0]["attempts"], 1)
+            self.assertEqual(updated["todos"][0]["non_budget_attempts"], 1)
             self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
 
     def test_active_todo_contract_allows_axis_word_variants(self) -> None:
@@ -12389,12 +12489,23 @@ value = 'fast'
             asyncio.run(evaluate_once())
 
             self.assertEqual(target.read_text(), "value = 'old'\n")
-            history = (artifact_dir / "candidates.jsonl").read_text()
+            history_records = [
+                json.loads(line)
+                for line in (artifact_dir / "candidates.jsonl").read_text().splitlines()
+            ]
+            attempts = [
+                json.loads(line)
+                for line in (artifact_dir / "todo_attempts.jsonl").read_text().splitlines()
+            ]
             updated = json.loads((artifact_dir / "todo_plan.json").read_text())
-            self.assertIn('"status": "rejected_todo_family_drift"', history)
+            self.assertEqual(history_records[0]["status"], "rejected_todo_family_drift")
+            self.assertFalse(history_records[0]["budget_counted"])
+            self.assertEqual(history_records[0]["failure_class"], "active_task_drift")
+            self.assertFalse(attempts[0]["budget_counted"])
             self.assertEqual(updated["active_todo_id"], "todo-001-phase_interleave")
             self.assertEqual(updated["todos"][0]["status"], "attempted")
-            self.assertEqual(updated["todos"][0]["attempts"], 2)
+            self.assertEqual(updated["todos"][0]["attempts"], 1)
+            self.assertEqual(updated["todos"][0]["non_budget_attempts"], 1)
             self.assertFalse((artifact_dir / "failed_tactics.jsonl").exists())
 
     def test_active_todo_duplicate_variant_rejected_before_apply(self) -> None:

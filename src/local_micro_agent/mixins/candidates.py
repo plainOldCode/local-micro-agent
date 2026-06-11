@@ -1165,6 +1165,16 @@ class CandidateRecordsMixin:
             record["budget_counted"] = False
         if self._is_structural_learning_record(record):
             record["budget_counted"] = False
+        if self._is_active_todo_drift_record(record):
+            record["budget_counted"] = False
+            record["failure_class"] = "active_task_drift"
+            record["failure_origin"] = "pre_apply_contract"
+            record["issue_scope"] = "candidate_delta"
+            record["repair_task_eligible"] = False
+            record["memory_use"] = "avoid_shape"
+            record["recovery_hint"] = (
+                "Retry the same active task using only its declared contract."
+            )
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         self._append_todo_attempt(record)
