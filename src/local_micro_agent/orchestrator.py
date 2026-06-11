@@ -1215,6 +1215,7 @@ class MicroAgent(
         if self.state.scratch.get("applied_changes", 0) == 0:
             failed = True
             self.state.notes.append("No code changes were applied")
+        correctness_failed = failed
         metric_failed = self._evaluate_metric_acceptance()
         failed = failed or metric_failed
         if self._spec_mode_enabled() and not failed:
@@ -1224,6 +1225,11 @@ class MicroAgent(
                 failed = any(result.exit_code != 0 for result in regression_results)
                 if failed:
                     self.state.scratch["spec_regression_failed"] = True
+                    correctness_failed = True
+        await self._record_single_candidate_observation(
+            failed=failed,
+            correctness_passed=not correctness_failed,
+        )
         if failed:
             if not self.state.scratch.get("spec_regression_failed"):
                 await self._restore_pre_code_snapshot()
@@ -1284,6 +1290,102 @@ class MicroAgent(
         self.state.notes.append(f"Retry focus: {decision.next_focus or decision.reason}")
         self.state.current = self._retry_state_after_failure(
             decision.next_focus or decision.reason
+        )
+
+    async def _record_single_candidate_observation(
+        self, failed: bool, correctness_passed: bool
+    ) -> None:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("candidate_queue"):
+            return
+        if self._candidate_history_path() is None:
+            return
+        changes = self.state.proposed_changes
+        if not changes:
+            return
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        strategy_axis = ""
+        reason = "single CODE candidate"
+        if isinstance(active_todo, dict):
+            strategy_axis = self._normalize_strategy_axis(
+                str(active_todo.get("strategy_axis", ""))
+            )
+            title = str(active_todo.get("title", "")).strip()
+            if title:
+                reason = title
+        candidate = CodeCandidate(
+            f"loop-{self.state.loop_count:03d}-single",
+            changes,
+            reason,
+            strategy_axis=strategy_axis,
+        )
+        applied = int(self.state.scratch.get("applied_changes", 0) or 0)
+        metric = self.state.scratch.get("last_metric")
+        if not isinstance(metric, int):
+            metric_acceptance = self.state.scratch.get("metric_acceptance")
+            if isinstance(metric_acceptance, dict) and isinstance(
+                metric_acceptance.get("metric"), int
+            ):
+                metric = metric_acceptance["metric"]
+            else:
+                metric = None
+        previous_snapshot = self.state.scratch.get("pre_code_snapshot")
+        patch_text = ""
+        if isinstance(previous_snapshot, dict):
+            current_snapshot = await self._snapshot_files(sorted(self._writable_files()))
+            patch_text = self._snapshot_patch(previous_snapshot, current_snapshot)
+        status = (
+            "improved"
+            if self.state.scratch.get("metric_improved") is True and not failed
+            else "rejected"
+        )
+        history_failed = failed and (not correctness_passed or metric is None)
+        failure_detail = self._candidate_failure_detail(
+            self.state.notes[-12:],
+            self.state.test_results,
+            failed=history_failed,
+        )
+        no_change_reason = failure_detail if applied == 0 else ""
+        extra = self._candidate_history_extra(
+            candidate,
+            status=status,
+            metric=metric,
+            applied=applied,
+            failed=history_failed,
+            patch_text=patch_text,
+            results=self.state.test_results,
+            failure_detail=failure_detail,
+            no_change_reason=no_change_reason,
+        )
+        if correctness_passed and applied > 0:
+            extra.update(
+                self._persist_correct_survivor(
+                    candidate,
+                    status=status,
+                    metric=metric,
+                    patch_text=patch_text,
+                    results=self.state.test_results,
+                    observation=extra,
+                )
+            )
+        self._append_candidate_history(
+            candidate,
+            status=status,
+            metric=metric,
+            applied=applied,
+            failed=history_failed,
+            extra=extra,
+        )
+        self._record_strategy_attempt(
+            candidate,
+            status=status,
+            metric=metric,
+            applied=applied,
+            failed=history_failed,
         )
 
     def _writable_files(self) -> set[str]:

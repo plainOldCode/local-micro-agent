@@ -5137,6 +5137,70 @@ value = 'fast'
             self.assertIn("no_improvement", formatted)
             self.assertIn("call_path_probe", formatted)
 
+    def test_single_candidate_test_records_history_and_survivor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'new'\n")
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('CYCLES: 100')\""],
+                    "metric_regex": r"CYCLES:\s*(\d+)",
+                    "baseline_metric": 50,
+                    "require_metric": True,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "preserve_correct_survivors": True,
+                    "deterministic_test_decision": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.TEST,
+                max_loops=1,
+            )
+            state.scratch["pre_code_snapshot"] = {"target.py": "value = 'old'\n"}
+            state.scratch["applied_changes"] = 1
+            state.proposed_changes = [
+                CodeChange(
+                    path="target.py",
+                    reason="change value",
+                    target="value = 'old'\n",
+                    replacement="value = 'new'\n",
+                )
+            ]
+            agent = MicroAgent(config, state)
+
+            async def test_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.test()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(test_once())
+
+            history_path = repo / ".local_micro_agent" / "candidates.jsonl"
+            survivor_path = repo / ".local_micro_agent" / "last_correct.patch"
+            self.assertTrue(history_path.exists())
+            self.assertTrue(survivor_path.exists())
+            record = json.loads(history_path.read_text())
+            self.assertEqual(record["candidate_id"], "loop-000-single")
+            self.assertEqual(record["status"], "rejected")
+            self.assertEqual(record["failure_class"], "no_improvement")
+            self.assertEqual(record["metric"], 100)
+            self.assertEqual(
+                record["last_correct_patch_path"],
+                ".local_micro_agent/last_correct.patch",
+            )
+            self.assertIn("+value = 'new'", survivor_path.read_text())
+            self.assertEqual(target.read_text(), "value = 'old'\n")
+
     def test_code_prompt_includes_failure_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
