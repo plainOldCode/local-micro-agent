@@ -4,6 +4,7 @@ Extracted from orchestrator.py; mixed into MicroAgent.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import fnmatch
 import hashlib
@@ -55,6 +56,7 @@ class TodoLifecycleMixin:
                 for part in (
                     self._focused_read_model_context(str(workflow.get("run_spec_focus", ""))),
                     self._spec_acceptance_policy_context(),
+                    self._spec_grounding_facts_context(),
                     self._spec_candidate_failure_scope_context(),
                     self._spec_design_failure_memory_context(),
                     self._spec_rewrite_portfolio_context(
@@ -210,6 +212,240 @@ class TodoLifecycleMixin:
             and workflow.get("metric_regex")
             and workflow.get("spec_metric_requires_improvement", True) is not False
         )
+
+    def _spec_grounding_gate_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("spec_grounding_gate"))
+
+    def _spec_grounding_facts_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_grounding_facts_path",
+            ".local_micro_agent/spec_grounding_facts.json",
+        )
+
+    def _spec_grounding_facts_context(self) -> str:
+        if not (
+            self._spec_grounding_gate_enabled()
+            or self.config.get("workflow", {}).get("spec_grounding_facts")
+        ):
+            return ""
+        facts = self._spec_grounding_facts()
+        if not facts:
+            return ""
+        path = self._spec_grounding_facts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(facts, ensure_ascii=False, indent=2) + "\n")
+        self.state.scratch["spec_grounding_facts"] = facts
+        self.state.notes.append(f"Persisted spec grounding facts: {path}")
+        compact = {
+            "writable_files": facts.get("writable_files", []),
+            "read_only_files": facts.get("read_only_files", []),
+            "allowed_target_regions": facts.get("allowed_target_regions", [])[:80],
+            "imported_symbols": facts.get("imported_symbols", [])[:80],
+            "test_commands": facts.get("test_commands", []),
+            "metric_regex": facts.get("metric_regex"),
+            "baseline_metric": facts.get("baseline_metric"),
+        }
+        return (
+            "Spec grounding facts from the deterministic controller follow. "
+            "Every implementation task must choose target_regions and "
+            "probe_diff_contract expected_changed_regions only from "
+            "allowed_target_regions unless it is a file-level non-Python edit. "
+            "Imported/read-only symbols may be mentioned as context or invariants, "
+            "but they must not be deliverables or changed targets.\n"
+            + json.dumps(compact, ensure_ascii=False, indent=2)
+        )
+
+    def _spec_grounding_facts(self) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        writable = self._spec_grounding_writable_files()
+        context_paths = {snapshot.path for snapshot in self.state.file_context}
+        paths = sorted(context_paths | writable)
+        files: dict[str, dict[str, Any]] = {}
+        symbol_regions: dict[str, dict[str, Any]] = {}
+        imports: list[dict[str, Any]] = []
+        for rel_path in paths:
+            if not rel_path or self._repo_path_key(rel_path) in self._external_context_path_keys():
+                continue
+            abs_path = self.state.repo_root / rel_path
+            content = self._spec_grounding_file_content(rel_path)
+            file_record: dict[str, Any] = {
+                "path": rel_path,
+                "writable": self._spec_path_is_writable(rel_path, writable),
+                "exists": abs_path.exists(),
+            }
+            if rel_path.endswith(".py") and content is not None:
+                py_facts = self._python_spec_grounding_facts(rel_path, content)
+                file_record.update(
+                    {
+                        "language": "python",
+                        "defined_regions": py_facts["defined_regions"],
+                        "imports": py_facts["imports"],
+                    }
+                )
+                for region in py_facts["defined_regions"]:
+                    symbol_regions[str(region["region"])] = region
+                imports.extend(py_facts["imports"])
+            files[rel_path] = file_record
+        imported_symbols = [
+            self._resolve_imported_symbol(record)
+            for record in imports
+            if self._spec_path_is_writable(str(record.get("path", "")), writable)
+        ]
+        imported_symbols = [
+            record for record in imported_symbols if record.get("origin_path")
+        ]
+        read_only_symbols = [
+            region
+            for region, meta in sorted(symbol_regions.items())
+            if not self._spec_path_is_writable(str(meta.get("path", "")), writable)
+        ]
+        allowed_target_regions = [
+            region
+            for region, meta in sorted(symbol_regions.items())
+            if self._spec_path_is_writable(str(meta.get("path", "")), writable)
+        ]
+        facts = {
+            "version": 1,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "writable_files": sorted(writable),
+            "read_only_files": sorted(path for path in files if path not in writable),
+            "files": files,
+            "allowed_target_regions": allowed_target_regions,
+            "read_only_symbols": read_only_symbols,
+            "imported_symbols": imported_symbols,
+            "test_commands": workflow.get("test_commands", []),
+            "metric_regex": workflow.get("metric_regex"),
+            "baseline_metric": workflow.get("baseline_metric"),
+        }
+        return facts
+
+    def _spec_grounding_writable_files(self) -> set[str]:
+        workflow = self.config.get("workflow", {})
+        candidates = workflow.get("writable_files") or self.state.planned_files
+        return {str(path).strip() for path in candidates if str(path).strip()}
+
+    def _spec_grounding_file_content(self, rel_path: str) -> str | None:
+        for snapshot in self.state.file_context:
+            if snapshot.path == rel_path:
+                return snapshot.content
+        try:
+            return (self.state.repo_root / rel_path).read_text(errors="replace")
+        except FileNotFoundError:
+            return None
+
+    def _python_spec_grounding_facts(
+        self, rel_path: str, content: str
+    ) -> dict[str, list[dict[str, Any]]]:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return {"defined_regions": [], "imports": []}
+        regions: list[dict[str, Any]] = []
+        imports: list[dict[str, Any]] = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                regions.append(self._python_region_record(rel_path, node.name, node))
+            elif isinstance(node, ast.ClassDef):
+                regions.append(self._python_region_record(rel_path, node.name, node))
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        regions.append(
+                            self._python_region_record(
+                                rel_path,
+                                f"{node.name}.{child.name}",
+                                child,
+                                parent=node.name,
+                            )
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                module = "." * int(node.level or 0) + (node.module or "")
+                for alias in node.names:
+                    imports.append(
+                        {
+                            "path": rel_path,
+                            "kind": "from",
+                            "module": module,
+                            "name": alias.name,
+                            "asname": alias.asname or alias.name,
+                            "line": getattr(node, "lineno", None),
+                        }
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports.append(
+                        {
+                            "path": rel_path,
+                            "kind": "import",
+                            "module": alias.name,
+                            "name": alias.name,
+                            "asname": alias.asname or alias.name.split(".")[0],
+                            "line": getattr(node, "lineno", None),
+                        }
+                    )
+        return {"defined_regions": regions, "imports": imports}
+
+    @staticmethod
+    def _python_region_record(
+        rel_path: str,
+        symbol: str,
+        node: ast.AST,
+        parent: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "path": rel_path,
+            "symbol": symbol,
+            "region": f"{rel_path}::{symbol}",
+            "parent": parent,
+            "start_line": getattr(node, "lineno", None),
+            "end_line": getattr(node, "end_lineno", getattr(node, "lineno", None)),
+            "kind": "method" if parent else node.__class__.__name__.replace("Def", "").lower(),
+        }
+
+    def _resolve_imported_symbol(self, record: dict[str, Any]) -> dict[str, Any]:
+        module = str(record.get("module", "") or "")
+        name = str(record.get("name", "") or "")
+        origin_path = ""
+        origin_region = ""
+        if module and not module.startswith("."):
+            candidate = module.replace(".", "/") + ".py"
+            if (self.state.repo_root / candidate).exists():
+                origin_path = candidate
+                if str(record.get("kind")) == "from" and name != "*":
+                    origin_region = f"{candidate}::{name}"
+        return {
+            "path": record.get("path"),
+            "symbol": record.get("asname") or name,
+            "imported_name": name,
+            "module": module,
+            "origin_path": origin_path,
+            "origin_region": origin_region,
+            "line": record.get("line"),
+        }
+
+    @staticmethod
+    def _spec_path_is_writable(rel_path: str, writable: set[str]) -> bool:
+        return rel_path in writable or any(fnmatch.fnmatch(rel_path, pattern) for pattern in writable)
+
+    def _current_spec_grounding_facts(self) -> dict[str, Any]:
+        facts = self.state.scratch.get("spec_grounding_facts")
+        if isinstance(facts, dict) and facts:
+            return facts
+        path = self._spec_grounding_facts_path()
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(errors="replace"))
+            except json.JSONDecodeError:
+                loaded = {}
+            if isinstance(loaded, dict):
+                self.state.scratch["spec_grounding_facts"] = loaded
+                return loaded
+        facts = self._spec_grounding_facts()
+        self.state.scratch["spec_grounding_facts"] = facts
+        path = self._spec_grounding_facts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(facts, ensure_ascii=False, indent=2) + "\n")
+        return facts
 
     @staticmethod
     def _load_run_spec(path: Path) -> dict[str, Any]:
@@ -967,8 +1203,109 @@ class TodoLifecycleMixin:
             issues.append("missing correctness_rationale")
         if not str(task.get("fallback_plan") or "").strip():
             issues.append("missing fallback_plan")
+        issues.extend(self._spec_task_grounding_issues(task))
         issues.extend(self._spec_task_structural_risk_issues(task))
         return issues
+
+    def _spec_task_grounding_issues(self, task: dict[str, Any]) -> list[str]:
+        if not self._spec_grounding_gate_enabled():
+            return []
+        facts = self._current_spec_grounding_facts()
+        if not facts:
+            return []
+        writable = set(str(path) for path in facts.get("writable_files", []) or [])
+        allowed_regions = set(
+            str(region) for region in facts.get("allowed_target_regions", []) or []
+        )
+        read_only_symbols = set(
+            str(region) for region in facts.get("read_only_symbols", []) or []
+        )
+        imported_symbols = [
+            record
+            for record in facts.get("imported_symbols", []) or []
+            if isinstance(record, dict)
+        ]
+        imported_roots = {
+            str(record.get("symbol") or "")
+            for record in imported_symbols
+            if str(record.get("symbol") or "")
+        }
+        issues: list[str] = []
+        for path in self._normalize_string_list(task.get("deliverables")):
+            if not self._spec_path_is_writable(path, writable):
+                issues.append(f"read_only_deliverable:{path}")
+        target_regions = self._normalize_string_list(task.get("target_regions"))
+        for region in target_regions:
+            region_path = self._region_path(region)
+            if region_path and not self._spec_path_is_writable(region_path, writable):
+                issues.append(f"non_writable_target_region:{region}")
+                continue
+            if region_path and region_path.endswith(".py") and region not in allowed_regions:
+                issues.append(f"unresolvable_target_region:{region}")
+            elif region in read_only_symbols:
+                issues.append(f"non_writable_target_region:{region}")
+        for symbol in self._normalize_string_list(task.get("target_symbols")):
+            symbol_root = self._symbol_root(symbol)
+            if symbol in read_only_symbols:
+                issues.append(f"non_writable_symbol:{symbol}")
+            elif symbol_root in imported_roots:
+                issues.append(f"imported_symbol_targeted:{symbol}")
+            elif "::" in symbol:
+                region_path = self._region_path(symbol)
+                if region_path and not self._spec_path_is_writable(region_path, writable):
+                    issues.append(f"non_writable_symbol:{symbol}")
+                elif region_path and region_path.endswith(".py") and symbol not in allowed_regions:
+                    issues.append(f"unresolvable_target_region:{symbol}")
+        contract = task.get("probe_diff_contract")
+        if isinstance(contract, dict):
+            contract_regions: list[str] = []
+            for key in (
+                "allowed_regions",
+                "expected_changed_regions",
+                "required_unchanged_regions",
+            ):
+                contract_regions.extend(self._normalize_string_list(contract.get(key)))
+            for region in contract_regions:
+                region_path = self._region_path(region)
+                if region_path and not self._spec_path_is_writable(region_path, writable):
+                    issues.append(f"non_writable_probe_region:{region}")
+                elif (
+                    region_path
+                    and region_path.endswith(".py")
+                    and region not in allowed_regions
+                    and region not in read_only_symbols
+                ):
+                    issues.append(f"unresolvable_probe_region:{region}")
+            for region in self._normalize_string_list(
+                contract.get("expected_changed_regions")
+            ):
+                if not self._region_matches_task_targets(region, target_regions):
+                    issues.append(f"probe_contract_region_mismatch:{region}")
+        return sorted(dict.fromkeys(issues))
+
+    @staticmethod
+    def _region_path(region: str) -> str:
+        return region.split("::", 1)[0].strip() if "::" in region else region.strip()
+
+    @staticmethod
+    def _symbol_root(symbol: str) -> str:
+        raw = symbol.split("::", 1)[-1]
+        return raw.split(".", 1)[0].strip()
+
+    @staticmethod
+    def _region_matches_task_targets(region: str, target_regions: list[str]) -> bool:
+        if not target_regions:
+            return True
+        for target in target_regions:
+            if region == target:
+                return True
+            if "::" not in region or "::" not in target:
+                continue
+            region_path, region_symbol = region.split("::", 1)
+            target_path, target_symbol = target.split("::", 1)
+            if region_path == target_path and region_symbol.startswith(target_symbol + "."):
+                return True
+        return False
 
     @staticmethod
     def _spec_edit_scope_too_broad(edit_scope: str) -> bool:

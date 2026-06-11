@@ -167,6 +167,11 @@ Rules:
   should use the configured workflow metric command.
 - Do not invent files, commands, benchmarks, or constraints that are absent from
   the current request/config/source context.
+- When deterministic Spec grounding facts are supplied, choose implementation
+  target_regions, deliverables, and probe_diff_contract expected_changed_regions
+  only from writable allowed_target_regions. Read-only or imported symbols may
+  be cited as context, hazards, invariants, or read_hints, but must not be
+  changed targets.
 - Do not include historical prior-run winners unless they are present in this run's input.
 - When Spec focus includes an existing task graph and one rewrite target, treat
   the call as a targeted graph rewrite. Preserve sibling tasks by default; do

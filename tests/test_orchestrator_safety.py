@@ -3999,6 +3999,298 @@ Background / non-constraints
             self.assertIn("one guarded branch", todo["micro_goal"])
             self.assertEqual(todo["validator"]["failure_condition"], "pytest fails")
 
+    def test_spec_grounding_gate_allows_writable_resolvable_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n    return value\n",
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "grounded",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            facts = json.loads(
+                (repo / ".local_micro_agent" / "spec_grounding_facts.json").read_text()
+            )
+            self.assertIn("target.py::parse_item", facts["allowed_target_regions"])
+
+    def test_spec_grounding_gate_allows_read_only_symbol_as_context_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+            (repo / "problem.py").write_text("class Machine:\n    def step(self):\n        pass\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text()),
+                FileSnapshot(path="problem.py", content=(repo / "problem.py").read_text()),
+            ]
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "grounded-context",
+                    "invariants": ["Machine.step behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "read_hints": ["problem.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["Machine.step behavior stays unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "Machine.step is read-only context.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+
+    def test_spec_grounding_gate_rejects_imported_symbol_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "problem.py").write_text("class Machine:\n    def step(self):\n        pass\n")
+            (repo / "perf_takehome.py").write_text(
+                "from problem import Machine\n\n"
+                "class KernelBuilder:\n"
+                "    def build(self):\n"
+                "        return []\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["perf_takehome.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="perf_takehome.py", content=(repo / "perf_takehome.py").read_text()),
+                FileSnapshot(path="problem.py", content=(repo / "problem.py").read_text()),
+            ]
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "bad-target",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "optimize machine step",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["perf_takehome.py"],
+                            "target_symbols": ["Machine.step"],
+                            "target_regions": ["perf_takehome.py::Machine.step"],
+                            "preserved_invariants": ["Machine.step behavior stays unchanged"],
+                            "edit_scope": "Change one guarded branch in Machine.step.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            issues = persisted["task_graph"][0]["design_contract"]["issues"]
+            self.assertIn("imported_symbol_targeted:Machine.step", issues)
+            self.assertIn("unresolvable_target_region:perf_takehome.py::Machine.step", issues)
+
+    def test_spec_grounding_gate_rejects_read_only_deliverable_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "problem.py").write_text("class Machine:\n    def step(self):\n        pass\n")
+            (repo / "perf_takehome.py").write_text("def build_kernel():\n    return []\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["perf_takehome.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="perf_takehome.py", content=(repo / "perf_takehome.py").read_text()),
+                FileSnapshot(path="problem.py", content=(repo / "problem.py").read_text()),
+            ]
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "read-only-target",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "optimize machine step",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["problem.py"],
+                            "target_symbols": ["problem.py::Machine.step"],
+                            "target_regions": ["problem.py::Machine.step"],
+                            "preserved_invariants": ["Machine.step behavior stays unchanged"],
+                            "edit_scope": "Change one guarded branch in Machine.step.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            issues = persisted["task_graph"][0]["design_contract"]["issues"]
+            self.assertIn("read_only_deliverable:problem.py", issues)
+            self.assertIn("non_writable_target_region:problem.py::Machine.step", issues)
+
+    def test_spec_grounding_gate_rejects_probe_contract_region_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n    return value\n\n"
+                "def format_item(value):\n    return str(value)\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "mismatch",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "probe_diff_contract": {
+                                "allowed_regions": ["target.py::format_item"],
+                                "expected_changed_regions": ["target.py::format_item"],
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            issues = persisted["task_graph"][0]["design_contract"]["issues"]
+            self.assertIn("probe_contract_region_mismatch:target.py::format_item", issues)
+
     def test_structural_risk_gate_rejects_broad_rewrite_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

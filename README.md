@@ -213,6 +213,22 @@ regenerate the same shape unless the replacement has a materially narrower
 target region, clearer validator/failure condition, and a risk contract that
 addresses the rejection.
 
+`spec_grounding_gate=true` adds a deterministic target-grounding floor for
+SPEC. After READ, the controller writes
+`.local_micro_agent/spec_grounding_facts.json` with the current writable files,
+read-only files, Python AST symbol/region spans, imported symbol origins,
+allowed writable target regions, configured test commands, metric regex, and
+baseline metric. SPEC sees a compact copy of those facts and must choose
+implementation `target_regions`, `deliverables`, and structural probe
+`expected_changed_regions` from the writable, resolvable target set. Read-only
+or imported symbols may still appear in `read_hints`, invariants, hazards, or
+correctness rationale; they are rejected only when used as changed targets or
+deliverables. Grounding failures are design-contract issues such as
+`unresolvable_target_region`, `non_writable_target_region`,
+`imported_symbol_targeted`, `read_only_deliverable`, and
+`probe_contract_region_mismatch`, so an impossible SPEC is rewritten before it
+can spend CODE/TEST loops.
+
 Candidate failure memory is also scoped before it reaches CODE or SPEC. Records
 carry `failure_origin`, `issue_scope`, `repo_valid_after_restore`,
 `repair_task_eligible`, and `memory_use`. Only `current_repo` issues may become
