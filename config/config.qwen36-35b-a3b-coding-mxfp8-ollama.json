@@ -260,6 +260,9 @@
     "profile_model_stream": true,
     "adaptive_gate_min_family_attempts_for_hard": 2,
     "spec_hard_active_todo_contract": true,
-    "todo_enforce_active_change_scope": true
+    "todo_enforce_active_change_scope": true,
+    "spec_structural_risk_gate": true,
+    "structural_probe_max_changes": 1,
+    "structural_probe_max_changed_lines": 40
   }
 }

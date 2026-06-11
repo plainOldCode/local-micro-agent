@@ -297,11 +297,20 @@ class TodoLifecycleMixin:
                 task.get("preserved_invariants")
             ),
             "edit_scope": self._normalize_task_text_field(task.get("edit_scope")),
+            "risk_level": self._normalize_risk_level(task.get("risk_level")),
+            "tactic_stage": self._normalize_tactic_stage(task.get("tactic_stage")),
+            "probe_plan": self._normalize_task_text_field(task.get("probe_plan")),
+            "invariant_evidence": self._normalize_string_list(
+                task.get("invariant_evidence")
+            ),
             "validator": self._normalize_task_validator(task.get("validator")),
             "correctness_rationale": self._normalize_task_text_field(
                 task.get("correctness_rationale")
             ),
             "fallback_plan": self._normalize_task_text_field(task.get("fallback_plan")),
+            "rollback_or_shrink_plan": self._normalize_task_text_field(
+                task.get("rollback_or_shrink_plan")
+            ),
             "acceptance": normalized_acceptance,
             "budget": {"attempts_max": attempts_max, "attempts_used": attempts_used},
             "closed_at": task.get("closed_at"),
@@ -322,6 +331,20 @@ class TodoLifecycleMixin:
     @staticmethod
     def _normalize_task_text_field(value: Any) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_risk_level(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"local", "structural"}:
+            return normalized
+        return ""
+
+    @staticmethod
+    def _normalize_tactic_stage(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"local_edit", "structural_probe", "structural_expand"}:
+            return normalized
+        return ""
 
     def _normalize_task_validator(self, value: Any) -> dict[str, str]:
         if not isinstance(value, dict):
@@ -422,6 +445,10 @@ class TodoLifecycleMixin:
     def _spec_design_contract_gate_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("spec_design_contract_gate"))
 
+    def _spec_structural_risk_gate_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("spec_structural_risk_gate"))
+
     def _spec_task_design_contract_issues(
         self, spec: dict[str, Any], task: dict[str, Any]
     ) -> list[str]:
@@ -456,6 +483,7 @@ class TodoLifecycleMixin:
             issues.append("missing correctness_rationale")
         if not str(task.get("fallback_plan") or "").strip():
             issues.append("missing fallback_plan")
+        issues.extend(self._spec_task_structural_risk_issues(task))
         return issues
 
     @staticmethod
@@ -469,6 +497,107 @@ class TodoLifecycleMixin:
             r"\boptimi[sz]e (the )?(algorithm|program|codebase|hot path)\b",
         )
         return any(re.search(pattern, text) for pattern in broad_patterns)
+
+    def _spec_task_structural_risk_issues(self, task: dict[str, Any]) -> list[str]:
+        if not self._spec_structural_risk_gate_enabled():
+            return []
+        is_structural = self._spec_task_has_structural_risk(task)
+        if not is_structural:
+            return []
+
+        issues: list[str] = []
+        if str(task.get("risk_level", "")).strip().lower() != "structural":
+            issues.append("structural task must declare risk_level=structural")
+        stage = str(task.get("tactic_stage", "")).strip().lower()
+        if stage not in {"structural_probe", "structural_expand"}:
+            issues.append("structural task must use tactic_stage=structural_probe")
+        attempts = int(task.get("attempts", 0) or 0)
+        budget = task.get("budget")
+        if isinstance(budget, dict):
+            attempts = max(attempts, int(budget.get("attempts_used", 0) or 0))
+        if attempts <= 0 and stage == "structural_expand":
+            issues.append("first structural attempt must use structural_probe")
+        if not str(task.get("probe_plan", "")).strip():
+            issues.append("missing probe_plan for structural task")
+        if not self._normalize_string_list(task.get("invariant_evidence")):
+            issues.append("missing invariant_evidence for structural task")
+        if self._structural_probe_scope_too_broad(str(task.get("edit_scope") or "")):
+            issues.append("structural edit_scope too broad; start with one reversible probe")
+        shrink_plan = str(task.get("rollback_or_shrink_plan") or "").strip()
+        fallback_plan = str(task.get("fallback_plan") or "").strip()
+        if not shrink_plan:
+            issues.append("missing rollback_or_shrink_plan for structural task")
+        elif not self._plan_mentions_shrink_or_probe(shrink_plan + " " + fallback_plan):
+            issues.append("rollback_or_shrink_plan must describe a smaller/guarded probe")
+        return issues
+
+    def _spec_task_has_structural_risk(self, task: dict[str, Any]) -> bool:
+        if str(task.get("risk_level", "")).strip().lower() == "structural":
+            return True
+        text = " ".join(
+            str(task.get(key, "") or "")
+            for key in (
+                "title",
+                "strategy_axis",
+                "family_key",
+                "expected_signal",
+                "edit_scope",
+                "correctness_rationale",
+                "fallback_plan",
+            )
+        ).lower()
+        patterns = (
+            r"\brewrite\b",
+            r"\brefactor\b",
+            r"\brestructure\b",
+            r"\breorder(?:ing)?\b",
+            r"\border(?:ing)?\b",
+            r"\breschedul(?:e|ing)\b",
+            r"\bschedul(?:e|er|ing)\b",
+            r"\bbatch(?:ing)?\b",
+            r"\bbundle(?:s|d|ing)?\b",
+            r"\bgroup(?:ing)?\b",
+            r"\bmerge\b",
+            r"\bsplit\b",
+            r"\bparallel(?:ize|ism)?\b",
+            r"\bconcurrent\b",
+            r"\bdata\s*flow\b",
+            r"\bcontrol\s*flow\b",
+            r"\bside[- ]?effect",
+            r"\bstate\s+(lifecycle|machine|transition|ordering)\b",
+            r"\bmove\b.*\b(state|effect|write|read|operation|logic)\b",
+            r"\b(change|alter|replace)\b.*\b(loop|order|ordering|flow|state)\b",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    @staticmethod
+    def _structural_probe_scope_too_broad(edit_scope: str) -> bool:
+        text = edit_scope.lower()
+        patterns = (
+            r"\b(rewrite|replace|refactor|restructure)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
+            r"\b(entire|whole|all)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
+            r"\b(across|throughout)\b.*\b(file|module|codebase|pipeline|system)\b",
+            r"\bchange\b.*\b(data\s*flow|control\s*flow|state lifecycle|ordering)\b",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    @staticmethod
+    def _plan_mentions_shrink_or_probe(text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "shrink",
+                "smaller",
+                "narrow",
+                "guard",
+                "probe",
+                "fallback branch",
+                "feature flag",
+                "isolate",
+                "single",
+            )
+        )
 
     def _reject_spec_task_for_design_contract(
         self, spec: dict[str, Any], task: dict[str, Any], issues: list[str]
@@ -495,7 +624,8 @@ class TodoLifecycleMixin:
         task["decision_hint"] = (
             "spec_design_contract_incomplete: rewrite this task with target symbols/"
             "regions, preserved invariants, a small edit scope, validator failure "
-            "condition, correctness rationale, and fallback plan before CODE."
+            "condition, correctness rationale, fallback plan, and structural probe "
+            "metadata when the task changes ordering/state/dataflow before CODE."
         )
         spec["active_task_id"] = None
         spec["last_design_contract_issues"] = {
@@ -534,6 +664,11 @@ class TodoLifecycleMixin:
             "strategy_axis": task.get("strategy_axis"),
             "family_key": task.get("family_key"),
             "expected_signal": task.get("expected_signal"),
+            "risk_level": task.get("risk_level"),
+            "tactic_stage": task.get("tactic_stage"),
+            "probe_plan": task.get("probe_plan"),
+            "invariant_evidence": task.get("invariant_evidence"),
+            "rollback_or_shrink_plan": task.get("rollback_or_shrink_plan"),
             "issues": issues,
             "last_observation": task.get("last_observation"),
         }
@@ -543,6 +678,11 @@ class TodoLifecycleMixin:
             "Rewrite the spec tasks so every implementation task names concrete "
             "target_symbols or target_regions, preserved_invariants, edit_scope, "
             "validator.failure_condition, correctness_rationale, and fallback_plan.",
+            "If the task changes behavior ordering, data/control flow, state lifecycle, "
+            "scheduling, batching, parallelism, loop structure, or side-effect placement, "
+            "rewrite it as risk_level=structural with tactic_stage=structural_probe, "
+            "probe_plan, invariant_evidence, and rollback_or_shrink_plan. The first "
+            "structural task should be a small reversible probe, not a full rewrite.",
             "Rejected task:",
             json.dumps(compact_task, ensure_ascii=False, indent=2),
         ]
@@ -1100,6 +1240,12 @@ class TodoLifecycleMixin:
             "implementation_hint": str(task.get("decision_hint") or ""),
             "allowed_files": list(task.get("deliverables") or []),
             "expected_signal": str(task.get("expected_signal") or ""),
+            "risk_level": str(task.get("risk_level") or ""),
+            "tactic_stage": str(task.get("tactic_stage") or "local_edit"),
+            "probe_plan": str(task.get("probe_plan") or ""),
+            "invariant_evidence": self._normalize_string_list(
+                task.get("invariant_evidence")
+            ),
             "target_symbols": self._normalize_string_list(task.get("target_symbols")),
             "target_regions": self._normalize_string_list(task.get("target_regions")),
             "preserved_invariants": self._normalize_string_list(
@@ -1111,6 +1257,7 @@ class TodoLifecycleMixin:
             else {},
             "correctness_rationale": str(task.get("correctness_rationale") or ""),
             "fallback_plan": str(task.get("fallback_plan") or ""),
+            "rollback_or_shrink_plan": str(task.get("rollback_or_shrink_plan") or ""),
             "attempts": int(task.get("attempts", 0) or 0),
             "budget": budget,
             "source": "spec_scheduler",
@@ -2145,6 +2292,9 @@ class TodoLifecycleMixin:
                 "title": active_todo.get("title"),
                 "context": self._truncate_text(str(active_todo.get("context", "")), 700),
                 "micro_goal": active_todo.get("micro_goal"),
+                "risk_level": active_todo.get("risk_level", ""),
+                "probe_plan": active_todo.get("probe_plan", ""),
+                "invariant_evidence": active_todo.get("invariant_evidence", []),
                 "target_symbols": active_todo.get("target_symbols", []),
                 "target_regions": active_todo.get("target_regions", []),
                 "preserved_invariants": active_todo.get("preserved_invariants", []),
@@ -2152,6 +2302,7 @@ class TodoLifecycleMixin:
                 "validator": active_todo.get("validator", {}),
                 "correctness_rationale": active_todo.get("correctness_rationale", ""),
                 "fallback_plan": active_todo.get("fallback_plan", ""),
+                "rollback_or_shrink_plan": active_todo.get("rollback_or_shrink_plan", ""),
             },
             "recent_attempts": compact_attempts,
             "continuation_focus": continuation_focus,

@@ -63,12 +63,17 @@ Output strict JSON with:
       "target_regions": ["relative/path.py::symbol_or_local_region"],
       "preserved_invariants": ["specific behavior, API, ordering, or data invariant"],
       "edit_scope": "one-sentence maximum edit boundary",
+      "risk_level": "local|structural",
+      "tactic_stage": "local_edit|structural_probe|structural_expand",
+      "probe_plan": "first smallest reversible probe when risk_level is structural",
+      "invariant_evidence": ["observable invariant or diagnostic proving the probe is safe"],
       "validator": {
         "kind": "metric|command|synthesized",
         "failure_condition": "observable condition that rejects the attempt"
       },
       "correctness_rationale": "why this task can preserve behavior",
       "fallback_plan": "how to shrink, repair, or abandon this task after failure",
+      "rollback_or_shrink_plan": "how to revert or reduce the probe after failure",
       "status": "open",
       "depends_on": [],
       "deliverables": ["relative/path.py"],
@@ -107,6 +112,15 @@ Rules:
 - Do not emit abstract tasks such as "optimize algorithm", "reduce memory
   accesses", "loop unrolling", or "rewrite hot path" unless the task also
   provides concrete target_symbols/target_regions and preserved_invariants.
+- If a task changes behavior ordering, data/control flow, state lifecycle,
+  scheduling, batching, parallelism, loop structure, or side-effect placement,
+  set risk_level to "structural" and tactic_stage to "structural_probe" for
+  the first attempt. Provide probe_plan, invariant_evidence, and a
+  rollback_or_shrink_plan. A structural task must start as a small reversible
+  probe, not a full rewrite.
+- Set risk_level to "local" and tactic_stage to "local_edit" only when the
+  change is a narrow local edit that does not reorder behavior, state, data
+  flow, control flow, or side effects.
 - Use acceptance.kind "synthesized" for implementation tasks unless the request supplies
   an explicit command or metric acceptance.
 - For command acceptance, include only human-supplied commands from the request or config.

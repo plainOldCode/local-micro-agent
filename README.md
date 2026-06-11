@@ -200,6 +200,15 @@ when generic durable todos would otherwise be soft until the first improvement.
 before apply when their target/search block is outside the active todo's named
 target symbol or file region.
 
+`spec_structural_risk_gate=true` adds a domain-neutral check for structural
+changes such as rewrites, reordering, batching, scheduling, parallelization,
+state lifecycle changes, data/control-flow changes, loop structure changes, and
+side-effect movement. Those tasks must declare `risk_level=structural`,
+start with `tactic_stage=structural_probe`, and provide `probe_plan`,
+`invariant_evidence`, and `rollback_or_shrink_plan`. Active structural probes
+are also constrained to a small single-region edit before apply, using
+`structural_probe_max_changes` and `structural_probe_max_changed_lines`.
+
 ### Acceptance
 
 - `synthesized` (default in the `spec` preset): `ACCEPT_SYNTH` asks the coder

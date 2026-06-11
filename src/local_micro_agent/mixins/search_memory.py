@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -446,6 +447,9 @@ class AdaptiveSearchMixin:
                     f"{', '.join(sorted(candidate_families))} instead of active todo "
                     f"{todo_id} family_key {required_family}",
                 )
+        scope_rejection = self._active_todo_change_scope_rejection(candidate.changes)
+        if scope_rejection is not None:
+            return scope_rejection
         return None
 
     def _active_todo_change_scope_rejection(
@@ -481,6 +485,22 @@ class AdaptiveSearchMixin:
         if not symbols and not regions:
             return None
 
+        if self._active_todo_is_structural_probe(active_todo):
+            max_changes = int(workflow.get("structural_probe_max_changes", 1) or 1)
+            if max_changes > 0 and len(changes) > max_changes:
+                return (
+                    "rejected_todo_scope_drift",
+                    "structural_probe must emit one small change at a time",
+                )
+            max_lines = int(workflow.get("structural_probe_max_changed_lines", 40) or 40)
+            for change in changes:
+                if self._change_too_broad_for_structural_probe(change, max_lines):
+                    return (
+                        "rejected_todo_scope_drift",
+                        "structural_probe change is too broad; use a smaller "
+                        "reversible probe inside the active target region",
+                    )
+
         allowed_paths = {
             region.split("::", 1)[0]
             for region in regions
@@ -507,6 +527,42 @@ class AdaptiveSearchMixin:
                     f"symbols {', '.join(symbols)}",
                 )
         return None
+
+    @staticmethod
+    def _active_todo_is_structural_probe(active_todo: dict[str, Any]) -> bool:
+        stage = str(active_todo.get("tactic_stage", "")).strip().lower()
+        return stage == "structural_probe"
+
+    def _change_too_broad_for_structural_probe(
+        self, change: CodeChange, max_lines: int
+    ) -> bool:
+        text_parts = [
+            change.target or "",
+            change.replacement or "",
+            change.patch or "",
+            change.reason or "",
+        ]
+        line_count = max(
+            self._non_empty_line_count(change.target or ""),
+            self._non_empty_line_count(change.replacement or ""),
+            self._non_empty_line_count(change.patch or ""),
+        )
+        if max_lines > 0 and line_count > max_lines:
+            return True
+        target = (change.target or "").lstrip()
+        if target.startswith(("def ", "async def ", "class ")):
+            return True
+        joined = "\n".join(text_parts).lower()
+        broad_patterns = (
+            r"\b(rewrite|replace|refactor|restructure)\b.*\b(function|class|method|module|loop|algorithm|pipeline|hot path)\b",
+            r"\b(entire|whole|all)\b.*\b(function|class|method|module|loop|algorithm|pipeline|hot path)\b",
+            r"\bchange\b.*\b(data\s*flow|control\s*flow|state lifecycle|ordering)\b",
+        )
+        return any(re.search(pattern, joined) for pattern in broad_patterns)
+
+    @staticmethod
+    def _non_empty_line_count(text: str) -> int:
+        return sum(1 for line in text.splitlines() if line.strip())
 
     def _change_targets_any_symbol(
         self, change: CodeChange, symbols: list[str]

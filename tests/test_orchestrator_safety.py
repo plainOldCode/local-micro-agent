@@ -3366,6 +3366,183 @@ Background / non-constraints
             self.assertIn("one guarded branch", todo["micro_goal"])
             self.assertEqual(todo["validator"]["failure_condition"], "pytest fails")
 
+    def test_structural_risk_gate_rejects_broad_rewrite_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_structural_risk_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "perf",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Replace parser loop with batched state flow",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Replace the parser loop with a batched state machine.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "Outputs should stay equivalent.",
+                            "fallback_plan": "Revert the parser rewrite.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            task = persisted["task_graph"][0]
+            self.assertEqual(task["status"], "needs_design")
+            issues = task["design_contract"]["issues"]
+            self.assertIn("structural task must declare risk_level=structural", issues)
+            self.assertIn("missing probe_plan for structural task", issues)
+            self.assertIn(
+                "structural edit_scope too broad; start with one reversible probe",
+                issues,
+            )
+
+    def test_structural_risk_gate_allows_local_micro_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_structural_risk_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "perf",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            todo = agent.state.scratch["active_todo"]
+            self.assertEqual(todo["risk_level"], "local")
+            self.assertEqual(todo["tactic_stage"], "local_edit")
+
+    def test_structural_risk_gate_allows_small_probe_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_structural_risk_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "perf",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Probe parser branch scheduling",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": (
+                                "Add one guarded branch inside parse_item before the existing "
+                                "parser loop."
+                            ),
+                            "risk_level": "structural",
+                            "tactic_stage": "structural_probe",
+                            "probe_plan": "Add a single guarded branch and keep the old path.",
+                            "invariant_evidence": [
+                                "The existing branch remains the fallback path.",
+                                "pytest covers equivalent parse outputs.",
+                            ],
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback parser path is unchanged.",
+                            "fallback_plan": "Disable the guarded branch.",
+                            "rollback_or_shrink_plan": (
+                                "Shrink to a smaller guarded probe or revert the branch."
+                            ),
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            todo = agent.state.scratch["active_todo"]
+            self.assertEqual(todo["risk_level"], "structural")
+            self.assertEqual(todo["tactic_stage"], "structural_probe")
+            self.assertIn("single guarded branch", todo["probe_plan"])
+            self.assertIn("fallback path", todo["invariant_evidence"][0])
+
     def test_spec_active_todo_contract_stays_hard_before_first_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3487,6 +3664,63 @@ Background / non-constraints
             )
 
             self.assertIsNone(agent._active_todo_change_scope_rejection([change]))
+
+    def test_structural_probe_change_scope_rejects_broad_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n"
+                "    for part in value:\n"
+                "        yield part\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_enforce_active_change_scope": True,
+                        "structural_probe_max_changes": 1,
+                        "structural_probe_max_changed_lines": 40,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            change = CodeChange(
+                "target.py",
+                "rewrite the whole parser function",
+                target=(
+                    "def parse_item(value):\n"
+                    "    for part in value:\n"
+                    "        yield part\n"
+                ),
+                replacement=(
+                    "def parse_item(value):\n"
+                    "    items = list(value)\n"
+                    "    for index in range(len(items)):\n"
+                    "        yield items[index]\n"
+                ),
+            )
+
+            rejection = agent._active_todo_change_scope_rejection([change])
+
+            self.assertIsNotNone(rejection)
+            self.assertEqual(rejection[0], "rejected_todo_scope_drift")
+            self.assertIn("structural_probe change is too broad", rejection[1])
 
     def test_repeated_correctness_failure_routes_task_to_design_rewrite(self) -> None:
         async def run_case() -> None:
