@@ -4774,6 +4774,142 @@ Background / non-constraints
             self.assertIsNotNone(rejection)
             self.assertIn("region mapping failed", rejection[1])
 
+    def test_probe_diff_contract_fallback_rejects_outside_target_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = (
+                "def parse_item(value):\n"
+                "    return value.strip()\n\n"
+                "def other(value):\n"
+                "    return value\n"
+            )
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+            }
+            snapshot = {"target.py": before}
+            target.write_text(before.replace("return value\n", "return value + 1\n"))
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"target.py"},
+            )
+
+            self.assertIsNotNone(rejection)
+            self.assertIn("outside allowed_regions", rejection[1])
+            self.assertIn("probe_diff_summary", rejection[2])
+
+    def test_probe_diff_contract_rejects_hunk_line_and_unchanged_region_violations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = (
+                "def parse_item(value):\n"
+                "    left = value.strip()\n"
+                "    return left\n\n"
+                "def other(value):\n"
+                "    cached = value\n"
+                "    return cached\n"
+            )
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "required_unchanged_regions": ["target.py::other"],
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 1,
+                    "max_changed_functions": 1,
+                },
+            }
+            snapshot = {"target.py": before}
+            target.write_text(
+                before.replace("left = value.strip()", "left = value.strip() or ''")
+                .replace("return left", "return left.upper()")
+                .replace("return cached", "return cached or ''")
+            )
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"target.py"},
+            )
+
+            self.assertIsNotNone(rejection)
+            note = rejection[1]
+            self.assertIn("max_hunks", note)
+            self.assertIn("max_changed_lines", note)
+            self.assertIn("required-unchanged", note)
+
+    def test_probe_diff_contract_ignores_missing_active_todo_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = "def parse_item(value):\n    return value.strip()\n"
+            target.write_text("def parse_item(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                {"target.py": before},
+                {"target.py"},
+            )
+
+            self.assertIsNone(rejection)
+
     def test_local_edit_is_not_probe_diff_gated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -4972,6 +5108,111 @@ Background / non-constraints
                     "rejected_probe_contract_mismatch",
                 )
                 self.assertIn("outside allowed_regions", rejection["note"])
+
+        asyncio.run(run_case())
+
+    def test_candidate_queue_probe_diff_mismatch_records_and_continues(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                target = repo / "target.py"
+                before = (
+                    "def parse_item(value):\n"
+                    "    return value.strip()\n\n"
+                    "def other(value):\n"
+                    "    return value\n"
+                )
+                target.write_text(before)
+                config = {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "writable_files": ["target.py"],
+                        "test_commands": ["python3 -c \"print('cycles: 80')\""],
+                        "metric_regex": r"cycles: (\d+)",
+                        "baseline_metric": 100,
+                        "candidate_queue": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                        "todo_reject_duplicate_variants": False,
+                    },
+                }
+                agent = MicroAgent(config, AgentState(repo_root=repo, user_request="test"))
+                agent.state.scratch["pre_code_snapshot"] = {"target.py": before}
+                agent.state.scratch["active_todo"] = {
+                    "todo_id": "task-001",
+                    "spec_task_id": "task-001",
+                    "status": "active",
+                    "source": "spec_scheduler",
+                    "risk_level": "structural",
+                    "tactic_stage": "structural_probe",
+                    "target_symbols": ["parse_item"],
+                    "target_regions": ["target.py::parse_item"],
+                    "allowed_files": ["target.py"],
+                    "probe_diff_contract": {
+                        "allowed_files": ["target.py"],
+                        "allowed_regions": ["target.py::parse_item"],
+                        "expected_changed_regions": ["target.py::parse_item"],
+                        "max_files_changed": 1,
+                        "max_hunks": 2,
+                        "max_changed_lines": 5,
+                        "max_changed_functions": 1,
+                    },
+                }
+                bad = CodeCandidate(
+                    "bad",
+                    [
+                        CodeChange(
+                            "target.py",
+                            "task-001 parse_item probe but edits other",
+                            content=before.replace("return value\n", "return value + 1\n"),
+                        )
+                    ],
+                    "task-001 parse_item probe",
+                    strategy_axis="general_edit",
+                )
+                good = CodeCandidate(
+                    "good",
+                    [
+                        CodeChange(
+                            "target.py",
+                            "task-001 parse_item probe",
+                            content=before.replace(
+                                "return value.strip()",
+                                "return value.strip() if value else ''",
+                            ),
+                        )
+                    ],
+                    "task-001 parse_item probe",
+                    strategy_axis="general_edit",
+                )
+
+                await agent.mcp.start()
+                try:
+                    await agent._evaluate_code_candidates([bad, good], {"target.py"})
+                finally:
+                    await agent.mcp.close()
+
+                self.assertIn("if value else", target.read_text())
+                rows = [
+                    json.loads(line)
+                    for line in (repo / ".local_micro_agent" / "candidates.jsonl")
+                    .read_text()
+                    .splitlines()
+                ]
+                self.assertEqual(rows[0]["candidate_id"], "bad")
+                self.assertEqual(rows[0]["status"], "rejected_probe_contract_mismatch")
+                self.assertEqual(rows[0]["failure_class"], "probe_contract_mismatch")
+                self.assertEqual(rows[0]["issue_scope"], "candidate_delta")
+                self.assertFalse(rows[0]["repair_task_eligible"])
+                self.assertIn("diff_contract_violations", rows[0])
+                self.assertEqual(rows[1]["candidate_id"], "good")
+                self.assertEqual(rows[1]["status"], "improved")
+                self.assertIn("Candidate bad rejected after diff check", "\n".join(agent.state.notes))
 
         asyncio.run(run_case())
 
