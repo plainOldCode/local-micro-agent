@@ -149,6 +149,10 @@ Rules:
 - Do not invent files, commands, benchmarks, or constraints that are absent from
   the current request/config/source context.
 - Do not include historical prior-run winners unless they are present in this run's input.
+- When Spec focus includes an existing task graph and one rewrite target, treat
+  the call as a targeted graph rewrite. Preserve sibling tasks by default; do
+  not collapse the portfolio to a single replacement task. If you replace the
+  rejected target, keep its task_id or set replaces_task_id to that task.
 - When failure memory is supplied by issue scope, only entries labeled as
   current_repo_issues may become repair/syntax-fix tasks. Rejected candidate
   lessons are transient candidate-delta, patch, contract, metric, or design

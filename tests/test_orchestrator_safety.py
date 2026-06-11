@@ -3487,6 +3487,337 @@ Background / non-constraints
 
         asyncio.run(run_case())
 
+    def test_targeted_spec_rewrite_preserves_omitted_sibling_tasks(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_design_contract_gate": True,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "Rejected target",
+                                "status": "needs_design",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Rewrite the whole target function.",
+                                "risk_level": "structural",
+                                "tactic_stage": "structural_probe",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Rewrite the whole target function.",
+                                    "explanation": "Structural edit scope.",
+                                },
+                                "probe_plan": "Try a smaller guard.",
+                                "invariant_evidence": ["tests pass"],
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "Preserve behavior.",
+                                "fallback_plan": "Revert.",
+                                "rollback_or_shrink_plan": "Shrink to one branch.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "Sibling local edit",
+                                "status": "open",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "preserved_invariants": ["existing parse outputs"],
+                                "edit_scope": "Cache one local value in parse_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Cache one local value in parse_item.",
+                                    "explanation": "Local binding only.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Remove the binding.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            },
+                        ],
+                    }
+                )
+                replacement_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "replacement",
+                        "task_graph": [
+                            {
+                                "task_id": "task-099",
+                                "title": "Narrow replacement",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Change one guarded branch in target.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Change one guarded branch in target.",
+                                    "explanation": "One branch only.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The fallback branch remains.",
+                                "fallback_plan": "Revert the guarded branch.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            }
+                        ],
+                    }
+                )
+                models = _RoleModelManager({"reasoner": replacement_spec})
+                agent.models = models
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                task_ids = [task["task_id"] for task in persisted["task_graph"]]
+                self.assertEqual(task_ids, ["task-099", "task-002"])
+                self.assertEqual(persisted["task_graph"][0]["replaces_task_id"], "task-001")
+                self.assertEqual(persisted["task_graph"][1]["status"], "open")
+                self.assertTrue(persisted["task_graph"][1]["portfolio_preserved_after_rewrite"])
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertIn('"event": "rewrite_merged"', progress)
+                prompt = models.seen["reasoner"][0][1]["content"]
+                self.assertIn("Existing task graph before this targeted SPEC rewrite", prompt)
+                self.assertIn("task-002", prompt)
+                self.assertIn("rewrite target is task-001", prompt)
+
+        asyncio.run(run_case())
+
+    def test_replacement_task_inherits_design_rewrite_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_design_contract_rewrite_attempts": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["spec_design_contract_rewrite_attempts_by_task"] = {
+                "task-001": 2
+            }
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "portfolio",
+                    "task_graph": [
+                        {
+                            "task_id": "task-099",
+                            "replaces_task_id": "task-001",
+                            "title": "Broad replacement",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["target"],
+                            "target_regions": ["target.py::target"],
+                            "preserved_invariants": ["existing behavior"],
+                            "edit_scope": "Replace the whole target function.",
+                            "risk_level": "structural",
+                            "tactic_stage": "structural_probe",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "Replace the whole target function.",
+                                "explanation": "Structural scope.",
+                            },
+                            "probe_plan": "Try the replacement.",
+                            "invariant_evidence": ["tests pass"],
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "Preserve behavior.",
+                            "fallback_plan": "Revert.",
+                            "rollback_or_shrink_plan": "Shrink.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        },
+                        {
+                            "task_id": "task-002",
+                            "title": "Sibling local edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs"],
+                            "edit_scope": "Cache one local value in parse_item.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "Cache one local value in parse_item.",
+                                "explanation": "Local binding only.",
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "No behavior change.",
+                            "fallback_plan": "Remove the binding.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        },
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
+            self.assertEqual(
+                persisted["task_graph"][0]["design_contract"]["rewrite_attempt_key"],
+                "task-001",
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            self.assertEqual(agent.state.scratch["active_todo"]["spec_task_id"], "task-002")
+
+    def test_targeted_spec_rewrite_rejects_single_broad_structural_graph(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_design_contract_gate": True,
+                            "spec_tactic_portfolio": True,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "Rejected target",
+                                "status": "needs_design",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Rewrite the whole target function.",
+                                "risk_level": "structural",
+                                "tactic_stage": "structural_probe",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Rewrite the whole target function.",
+                                    "explanation": "Structural edit scope.",
+                                },
+                                "probe_plan": "Try a smaller guard.",
+                                "invariant_evidence": ["tests pass"],
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "Preserve behavior.",
+                                "fallback_plan": "Revert.",
+                                "rollback_or_shrink_plan": "Shrink to one branch.",
+                                "acceptance": {"kind": "metric"},
+                            }
+                        ],
+                    }
+                )
+                broad_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "collapsed",
+                        "task_graph": [
+                            {
+                                "task_id": "task-999",
+                                "title": "Broad structural replacement",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Replace the whole target function.",
+                                "risk_level": "structural",
+                                "tactic_stage": "structural_probe",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Replace the whole target function.",
+                                    "explanation": "Structural scope.",
+                                },
+                                "probe_plan": "Try the replacement.",
+                                "invariant_evidence": ["tests pass"],
+                                "validator": {
+                                    "kind": "metric",
+                                    "failure_condition": "metric does not improve",
+                                },
+                                "correctness_rationale": "Preserve behavior.",
+                                "fallback_plan": "Revert.",
+                                "rollback_or_shrink_plan": "Shrink.",
+                                "acceptance": {"kind": "metric"},
+                            }
+                        ],
+                    }
+                )
+                agent.models = _StaticModelManager(broad_rewrite)
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(persisted["spec_id"], "previous")
+                self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertIn('"event": "graph_rewrite_rejected"', progress)
+                self.assertIn("only one broad structural task", progress)
+
+        asyncio.run(run_case())
+
     def test_spec_design_failure_memory_context_summarizes_rejected_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
