@@ -3366,6 +3366,128 @@ Background / non-constraints
             self.assertIn("one guarded branch", todo["micro_goal"])
             self.assertEqual(todo["validator"]["failure_condition"], "pytest fails")
 
+    def test_spec_active_todo_contract_stays_hard_before_first_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_soft_until_first_improvement": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "title": "guard parser branch",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "source": "spec_scheduler",
+            }
+
+            self.assertFalse(agent._todo_contract_soft_now())
+            self.assertEqual(agent._active_todo_id(), "task-001")
+            self.assertIn("guard parser branch", agent._format_active_todo())
+
+    def test_active_todo_change_scope_rejects_wrong_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "class Parser:\n"
+                "    def parse_item(self, value):\n"
+                "        return value.strip()\n\n"
+                "    def build(self, value):\n"
+                "        return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_soft_until_first_improvement": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["Parser.parse_item"],
+                "target_regions": ["target.py::Parser.parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            change = CodeChange(
+                "target.py",
+                "speed up unrelated build helper",
+                target="    def build(self, value):\n        return value\n",
+                replacement="    def build(self, value):\n        return value + 1\n",
+            )
+
+            rejection = agent._active_todo_change_scope_rejection([change])
+
+            self.assertIsNotNone(rejection)
+            self.assertEqual(rejection[0], "rejected_todo_scope_drift")
+            self.assertIn("Parser.parse_item", rejection[1])
+
+    def test_active_todo_change_scope_allows_target_symbol_span(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "class Parser:\n"
+                "    def parse_item(self, value):\n"
+                "        return value.strip()\n\n"
+                "    def build(self, value):\n"
+                "        return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_soft_until_first_improvement": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["Parser.parse_item"],
+                "target_regions": ["target.py::Parser.parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            change = CodeChange(
+                "target.py",
+                "guard active parser todo task-001",
+                target="    def parse_item(self, value):\n        return value.strip()\n",
+                replacement=(
+                    "    def parse_item(self, value):\n"
+                    "        return value.strip() if value is not None else ''\n"
+                ),
+            )
+
+            self.assertIsNone(agent._active_todo_change_scope_rejection([change]))
+
     def test_repeated_correctness_failure_routes_task_to_design_rewrite(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:

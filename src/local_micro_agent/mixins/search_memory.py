@@ -448,6 +448,139 @@ class AdaptiveSearchMixin:
                 )
         return None
 
+    def _active_todo_change_scope_rejection(
+        self, changes: list[CodeChange]
+    ) -> tuple[str, str] | None:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("todo_enforce_active_change_scope", True) is False:
+            return None
+        if self._todo_contract_soft_now():
+            return None
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return None
+        if active_todo.get("status") not in {"active", "attempted"}:
+            return None
+        if self._todo_attempt_budget_exhausted(active_todo):
+            return None
+
+        symbols = [
+            str(item).strip()
+            for item in active_todo.get("target_symbols", [])
+            if str(item).strip()
+        ] if isinstance(active_todo.get("target_symbols"), list) else []
+        regions = [
+            str(item).strip()
+            for item in active_todo.get("target_regions", [])
+            if str(item).strip()
+        ] if isinstance(active_todo.get("target_regions"), list) else []
+        if not symbols and not regions:
+            return None
+
+        allowed_paths = {
+            region.split("::", 1)[0]
+            for region in regions
+            if region.split("::", 1)[0]
+        }
+        allowed_files = active_todo.get("allowed_files")
+        if isinstance(allowed_files, list):
+            allowed_paths.update(
+                str(path).strip() for path in allowed_files if str(path).strip()
+            )
+
+        todo_id = str(active_todo.get("todo_id", "active todo"))
+        for change in changes:
+            if allowed_paths and change.path not in allowed_paths:
+                return (
+                    "rejected_todo_scope_drift",
+                    f"change path {change.path} is outside active todo {todo_id} "
+                    f"target paths {', '.join(sorted(allowed_paths))}",
+                )
+            if symbols and not self._change_targets_any_symbol(change, symbols):
+                return (
+                    "rejected_todo_scope_drift",
+                    f"change for {change.path} does not target active todo {todo_id} "
+                    f"symbols {', '.join(symbols)}",
+                )
+        return None
+
+    def _change_targets_any_symbol(
+        self, change: CodeChange, symbols: list[str]
+    ) -> bool:
+        target = change.target if isinstance(change.target, str) else ""
+        if target:
+            try:
+                content = (self.state.repo_root / change.path).read_text(errors="replace")
+            except OSError:
+                content = ""
+            if content and target in content:
+                return self._target_text_inside_python_symbols(content, target, symbols)
+
+        evidence_text = " ".join(
+            item
+            for item in (
+                change.reason,
+                change.target or "",
+                change.replacement or "",
+                change.patch or "",
+            )
+            if isinstance(item, str)
+        ).lower()
+        return any(self._symbol_mentioned(symbol, evidence_text) for symbol in symbols)
+
+    @classmethod
+    def _target_text_inside_python_symbols(
+        cls, content: str, target: str, symbols: list[str]
+    ) -> bool:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return False
+        lines = content.splitlines(keepends=True)
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line))
+
+        ranges: list[tuple[int, int]] = []
+        for symbol in symbols:
+            node = cls._find_symbol_node(tree, symbol)
+            if (
+                node is None
+                or not hasattr(node, "lineno")
+                or not hasattr(node, "end_lineno")
+            ):
+                continue
+            start_line = max(1, int(node.lineno))
+            end_line = min(len(lines), int(node.end_lineno))
+            ranges.append((offsets[start_line - 1], offsets[end_line]))
+        if not ranges:
+            return False
+
+        start = content.find(target)
+        while start >= 0:
+            end = start + len(target)
+            if any(
+                range_start <= start and end <= range_end
+                for range_start, range_end in ranges
+            ):
+                return True
+            start = content.find(target, start + 1)
+        return False
+
+    @staticmethod
+    def _symbol_mentioned(symbol: str, evidence_text: str) -> bool:
+        symbol = symbol.strip()
+        if not symbol:
+            return False
+        variants = {symbol, symbol.replace("::", "."), symbol.split(".")[-1]}
+        if "::" in symbol:
+            variants.add(symbol.rsplit("::", 1)[-1])
+        return any(variant and variant.lower() in evidence_text for variant in variants)
+
     def _active_todo_duplicate_variant_rejection(
         self, candidate: CodeCandidate
     ) -> tuple[str, str] | None:

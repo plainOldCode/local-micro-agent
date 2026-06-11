@@ -339,6 +339,28 @@ class TodoLifecycleMixin:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("todo_soft_until_first_improvement", True))
 
+    def _spec_hard_active_todo_contract_now(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        if not self._spec_mode_enabled():
+            return False
+        hard_enabled = workflow.get(
+            "spec_hard_active_todo_contract",
+            workflow.get("spec_design_contract_gate", False),
+        )
+        if not hard_enabled:
+            return False
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict):
+            return False
+        return bool(
+            active_todo.get("spec_task_id")
+            or active_todo.get("source") == "spec_scheduler"
+        )
+
     def _run_spec_path(self) -> Path:
         return self._workflow_artifact_path(
             "run_spec_path", ".local_micro_agent/run_spec.json"
@@ -1863,6 +1885,8 @@ class TodoLifecycleMixin:
         self.state.notes.append(f"Persisted spec report: {report_path}")
 
     def _todo_contract_soft_now(self) -> bool:
+        if self._spec_hard_active_todo_contract_now():
+            return False
         return (
             self._todo_soft_until_first_improvement_enabled()
             and not self._has_current_run_improvement()

@@ -192,6 +192,14 @@ design instead of retrying the same tactic family. Correctness-preserving
 `last_correct` survivor artifacts are summarized into SPEC context as safe
 composition evidence.
 
+Spec-scheduled active todos can be made hard even before the first metric
+improvement with `spec_hard_active_todo_contract=true`. In that mode, the
+active design contract stays in the CODE prompt and candidate records, even
+when generic durable todos would otherwise be soft until the first improvement.
+`todo_enforce_active_change_scope=true` also rejects single-candidate edits
+before apply when their target/search block is outside the active todo's named
+target symbol or file region.
+
 ### Acceptance
 
 - `synthesized` (default in the `spec` preset): `ACCEPT_SYNTH` asks the coder

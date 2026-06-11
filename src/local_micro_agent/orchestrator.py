@@ -396,17 +396,6 @@ class MicroAgent(
                         "or diagnostic observation.\n"
                         f"{todo_observation_chain}"
                     )
-                active_todo = self._format_active_todo()
-                if active_todo:
-                    add_runtime_context(
-                        "Active durable todo follows. Implement only this todo. "
-                        "Candidate strategy_axis must exactly match the todo "
-                        "strategy_axis. Candidate reason and change reasons must "
-                        "preserve the todo context, stay on its family_key when one "
-                        "is present, and should mention the todo_id. Todo drift is "
-                        "rejected before edits or tests.\n"
-                        f"{active_todo}"
-                    )
                 structural_state = self._format_structural_state_context()
                 if structural_state:
                     add_runtime_context(
@@ -432,6 +421,20 @@ class MicroAgent(
                         "Preserve ideas that were accepted unless the current plan says otherwise.\n"
                         f"{history}"
                     )
+                active_todo = self._format_active_todo()
+                if active_todo:
+                    add_runtime_context(
+                        "Active durable todo follows. This is the current contract "
+                        "and supersedes broader run-local spec tasks, candidate "
+                        "history, and failure memory. Implement only this todo. "
+                        "Candidate strategy_axis must exactly match the todo "
+                        "strategy_axis. Candidate reason and change reasons must "
+                        "preserve the todo context, stay on its family_key when one "
+                        "is present, mention the todo_id, and edit only the named "
+                        "target_symbols/target_regions. Todo drift is rejected "
+                        "before edits or tests.\n"
+                        f"{active_todo}"
+                    )
                 if dynamic_suffix_blocks:
                     dynamic_suffix_blocks = self._shrink_dynamic_suffix_blocks(
                         messages,
@@ -455,6 +458,19 @@ class MicroAgent(
         self.state.scratch["pre_code_snapshot"] = await self._snapshot_files(sorted(allowed))
         if self.config.get("workflow", {}).get("candidate_queue"):
             await self._evaluate_code_candidates(decision.candidates, allowed)
+            self.state.current = AgentStateName.TEST
+            return
+        scope_rejection = self._active_todo_change_scope_rejection(decision.changes)
+        if scope_rejection is not None:
+            status, note = scope_rejection
+            self.state.notes.append(
+                f"Single CODE candidate rejected before apply: {note}"
+            )
+            self.state.scratch["pre_apply_candidate_rejection"] = {
+                "status": status,
+                "note": note,
+            }
+            self.state.scratch["applied_changes"] = 0
             self.state.current = AgentStateName.TEST
             return
         await self._apply_changes(decision.changes, allowed)
@@ -1338,17 +1354,34 @@ class MicroAgent(
         if isinstance(previous_snapshot, dict):
             current_snapshot = await self._snapshot_files(sorted(self._writable_files()))
             patch_text = self._snapshot_patch(previous_snapshot, current_snapshot)
-        status = (
-            "improved"
-            if self.state.scratch.get("metric_improved") is True and not failed
-            else "rejected"
+        pre_apply_rejection = self.state.scratch.pop(
+            "pre_apply_candidate_rejection", None
         )
-        history_failed = failed and (not correctness_passed or metric is None)
+        status = (
+            str(pre_apply_rejection.get("status", "rejected"))
+            if isinstance(pre_apply_rejection, dict)
+            else (
+                "improved"
+                if self.state.scratch.get("metric_improved") is True and not failed
+                else "rejected"
+            )
+        )
+        history_failed = (
+            True
+            if isinstance(pre_apply_rejection, dict)
+            else failed and (not correctness_passed or metric is None)
+        )
         failure_detail = self._candidate_failure_detail(
             self.state.notes[-12:],
             self.state.test_results,
             failed=history_failed,
         )
+        if isinstance(pre_apply_rejection, dict):
+            note = str(pre_apply_rejection.get("note", "")).strip()
+            if note:
+                failure_detail = (
+                    f"{note}; {failure_detail}" if failure_detail else note
+                )
         no_change_reason = failure_detail if applied == 0 else ""
         extra = self._candidate_history_extra(
             candidate,

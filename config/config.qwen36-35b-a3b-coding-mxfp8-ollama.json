@@ -258,6 +258,8 @@
     "deterministic_test_decision": true,
     "profile_agent": true,
     "profile_model_stream": true,
-    "adaptive_gate_min_family_attempts_for_hard": 2
+    "adaptive_gate_min_family_attempts_for_hard": 2,
+    "spec_hard_active_todo_contract": true,
+    "todo_enforce_active_change_scope": true
   }
 }
