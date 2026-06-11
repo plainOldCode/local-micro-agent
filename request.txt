@@ -1,0 +1,31 @@
+Optimize the performance take-home benchmark in perf_takehome.py.
+
+Correctness is the first constraint. Every proposed Python change must preserve
+the provided tests before it is considered for performance. A change that
+breaks correctness, fails to reach a parseable CYCLES line, violates
+SLOT_LIMITS, changes pause/debug alignment, modifies problem.py/tests, changes
+benchmark constants, or enables multicore is a failed candidate even if the
+idea sounds faster.
+
+Scope:
+- Only modify perf_takehome.py.
+- Do not modify problem.py, tests/, benchmark constants, problem settings, or
+  N_CORES; keep multicore disabled.
+- The primary validation command is:
+  /opt/homebrew/bin/python3 perf_takehome.py
+- A useful candidate must exit 0 and print CYCLES.
+- The objective is to reduce CYCLES below the measured baseline while
+  preserving correctness.
+
+Optimization guidance:
+- Prefer the smallest behavior-preserving probe that can be tested.
+- If an idea risks correctness, implement a guarded or fallback-preserving
+  variant first.
+- Do not make broad rewrites of KernelBuilder.build, slot packing, instruction
+  scheduling, or data flow unless the generated instruction bundles still
+  respect SLOT_LIMITS and the benchmark command reaches a parseable CYCLES line.
+- If you add a scheduler branch or helper, make sure it is actually executed by
+  the benchmark path; do not leave optimization behind an inactive optional
+  flag.
+- Treat missing CYCLES, assertion failures, SLOT_LIMITS violations, or changed
+  pause/debug alignment as correctness failures, not partial progress.
