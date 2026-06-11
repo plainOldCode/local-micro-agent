@@ -633,7 +633,7 @@ class TodoLifecycleMixin:
         ]
         issues: list[dict[str, Any]] = []
         for task in tasks:
-            issues.extend(self._spec_task_quality_issues(task))
+            issues.extend(self._spec_task_quality_issues(spec, task))
         preferred = self._spec_idea_preferred_target_region()
         if preferred:
             runnable = self._schedulable_spec_tasks(spec.get("task_graph", []))
@@ -676,7 +676,9 @@ class TodoLifecycleMixin:
                 )
         return issues
 
-    def _spec_task_quality_issues(self, task: dict[str, Any]) -> list[dict[str, Any]]:
+    def _spec_task_quality_issues(
+        self, spec: dict[str, Any], task: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         workflow = self.config.get("workflow", {})
         task_id = str(task.get("task_id") or "")
         issues: list[dict[str, Any]] = []
@@ -779,6 +781,11 @@ class TodoLifecycleMixin:
                         "A structural probe must name one expected changed region.",
                     )
                 )
+        design_issues = self._spec_task_design_contract_issues(spec, task)
+        issues.extend(
+            self._spec_quality_issue_from_design_issue(task_id, issue)
+            for issue in design_issues
+        )
         return issues
 
     @staticmethod
@@ -795,6 +802,62 @@ class TodoLifecycleMixin:
             "detail": detail,
             "rewrite_hint": rewrite_hint,
         }
+
+    def _spec_quality_issue_from_design_issue(
+        self, task_id: str, design_issue: str
+    ) -> dict[str, Any]:
+        raw = str(design_issue or "").strip()
+        base = raw.split(":", 1)[0] or "issue"
+        code = "design_contract_" + re.sub(r"[^a-z0-9]+", "_", base.lower()).strip("_")
+        return self._spec_quality_issue(
+            code,
+            task_id,
+            raw,
+            self._spec_design_issue_rewrite_hint(raw),
+        )
+
+    @staticmethod
+    def _spec_design_issue_rewrite_hint(design_issue: str) -> str:
+        lowered = design_issue.lower()
+        if "probe_contract_region_mismatch" in lowered:
+            return (
+                "Make probe_diff_contract.expected_changed_regions exactly match "
+                "the task target region, or split cross-region work into a "
+                "separate structural task. Bad: target=parse_item with expected "
+                "[parse_item, format_item]. Good: target=parse_item with expected "
+                "[parse_item]."
+            )
+        if "rollback_or_shrink_plan" in lowered:
+            return (
+                "Describe a smaller guarded probe, not only a revert. Bad: "
+                "'Revert the patch.' Good: 'Shrink to one guarded branch in the "
+                "target region; keep the old path as fallback; revert if the "
+                "guarded probe fails.'"
+            )
+        if "structural edit_scope too broad" in lowered or "edit_scope too broad" in lowered:
+            return (
+                "Narrow the task to one reversible operation in one target "
+                "region. Split multi-step rewrites into independent probe tasks."
+            )
+        if "local risk_level contradicts structural action" in lowered:
+            return (
+                "Reclassify the task as risk_level=structural with "
+                "tactic_stage=structural_probe, or reduce the edit_scope to a "
+                "single local edit that does not change signatures, callsites, "
+                "data flow, ordering, or side effects."
+            )
+        if "missing probe_diff_contract" in lowered:
+            return (
+                "Add a probe_diff_contract with allowed_files, allowed_regions, "
+                "exactly one expected_changed_regions entry, forbidden regions, "
+                "and small max_files/max_hunks/max_changed_lines limits."
+            )
+        if "missing probe_plan" in lowered:
+            return "Add the smallest reversible structural probe plan before expanding."
+        return (
+            "Rewrite the runnable task so it satisfies the deterministic design "
+            "contract before run_spec persistence."
+        )
 
     def _spec_region_line_count(self, region: str) -> int | None:
         facts = self._current_spec_grounding_facts()

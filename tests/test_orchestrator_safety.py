@@ -6290,6 +6290,169 @@ Background / non-constraints
 
             self.assertEqual(report["status"], "pass")
 
+    def test_spec_quality_gate_accepts_valid_structural_probe_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "spec_grounding_gate": True,
+                        "spec_design_contract_gate": True,
+                        "spec_structural_risk_gate": True,
+                        "spec_probe_diff_contract_required": True,
+                        "writable_files": ["target.py"],
+                        "test_commands": ["python -m pytest"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-structural-normal",
+                    "invariants": ["parse_item return contract stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Probe parser branch scheduling",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Add one guarded branch before the parser loop.",
+                            "risk_level": "structural",
+                            "tactic_stage": "structural_probe",
+                            "risk_evidence": {
+                                "field": "title",
+                                "quote": "scheduling",
+                                "explanation": "Scheduling is a structural behavior risk.",
+                            },
+                            "probe_plan": "Add a single guarded branch and keep the old path.",
+                            "probe_diff_contract": {
+                                "allowed_files": ["target.py"],
+                                "allowed_regions": ["target.py::parse_item"],
+                                "expected_changed_regions": ["target.py::parse_item"],
+                                "target_symbols": ["parse_item"],
+                                "max_files_changed": 1,
+                                "max_hunks": 1,
+                                "max_changed_lines": 12,
+                                "max_changed_functions": 1,
+                                "allowed_change_kinds": ["add_guard"],
+                                "observation": "pytest remains green",
+                            },
+                            "invariant_evidence": ["The old path remains the fallback path."],
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback parser path is unchanged.",
+                            "fallback_plan": "Disable the guarded branch.",
+                            "rollback_or_shrink_plan": (
+                                "Shrink to a smaller guarded probe or revert the branch."
+                            ),
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            self.assertEqual(report["status"], "pass")
+
+    def test_spec_quality_gate_rejects_design_contract_region_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n    return value\n\n"
+                "def format_item(value):\n    return str(value)\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "spec_grounding_gate": True,
+                        "spec_design_contract_gate": True,
+                        "spec_structural_risk_gate": True,
+                        "writable_files": ["target.py"],
+                        "test_commands": ["python -m pytest"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-design-preflight",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parse branch",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["return value remains unchanged"],
+                            "edit_scope": "Add one guarded branch inside parse_item.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "one guarded branch",
+                                "explanation": "single guarded local edit",
+                            },
+                            "probe_diff_contract": {
+                                "allowed_files": ["target.py"],
+                                "allowed_regions": ["target.py::parse_item"],
+                                "expected_changed_regions": ["target.py::format_item"],
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The original return path is preserved.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {
+                                "kind": "command",
+                                "commands": ["python -m pytest"],
+                            },
+                        }
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "design_contract_probe_contract_region_mismatch",
+                report["issue_codes"],
+            )
+            self.assertIn(
+                "target=parse_item with expected [parse_item]",
+                report["issues"][-1]["rewrite_hint"],
+            )
+
     def test_spec_quality_gate_retries_after_silent_idea_drift(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
