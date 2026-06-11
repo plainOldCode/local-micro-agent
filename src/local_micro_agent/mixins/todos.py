@@ -44,6 +44,7 @@ class TodoLifecycleMixin:
                 for part in (
                     self._focused_read_model_context(str(workflow.get("run_spec_focus", ""))),
                     self._spec_acceptance_policy_context(),
+                    self._spec_design_failure_memory_context(),
                     self._spec_rewrite_focus_context(),
                     self._correct_survivor_spec_context(),
                 )
@@ -451,6 +452,13 @@ class TodoLifecycleMixin:
             record["task_id"] = task.get("task_id")
             record["task_status"] = task.get("status")
             record["task_attempts"] = task.get("attempts")
+            if event in {"design_rejected", "failed_design", "needs_design"}:
+                record["task_title"] = task.get("title")
+                record["task_edit_scope"] = task.get("edit_scope")
+                record["task_risk_level"] = task.get("risk_level")
+                record["task_tactic_stage"] = task.get("tactic_stage")
+                record["task_target_symbols"] = task.get("target_symbols")
+                record["task_target_regions"] = task.get("target_regions")
         if extra:
             record.update(extra)
         with path.open("a", encoding="utf-8") as handle:
@@ -786,12 +794,71 @@ class TodoLifecycleMixin:
             "The first structural task should be a small reversible probe, not a full "
             "rewrite. risk_evidence must quote an actionable field such as title or "
             "edit_scope, not a correctness rationale or invariant.",
+            "Do not regenerate the same rejected design shape. A previously "
+            "failed_design task may reappear only if it has a materially narrower "
+            "target region, clearer validator, and a risk contract that directly "
+            "addresses the rejection issues.",
             "Rejected task:",
             json.dumps(compact_task, ensure_ascii=False, indent=2),
         ]
         if failure_summary.strip():
             parts.extend(["Latest failure summary:", failure_summary.strip()])
         return "\n\n".join(parts)
+
+    def _spec_design_failure_memory_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("spec_design_failure_memory", True) is False:
+            return ""
+        limit = int(workflow.get("spec_design_failure_memory_limit", 6) or 6)
+        if limit <= 0:
+            return ""
+        path = self._workflow_artifact_path(
+            "spec_progress_path", ".local_micro_agent/spec_progress.jsonl"
+        )
+        records: list[dict[str, Any]] = []
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except FileNotFoundError:
+            lines = []
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") not in {"design_rejected", "failed_design"}:
+                continue
+            compact = {
+                "event": record.get("event"),
+                "spec_id": record.get("spec_id"),
+                "task_id": record.get("task_id"),
+                "title": record.get("task_title"),
+                "edit_scope": record.get("task_edit_scope"),
+                "risk_level": record.get("task_risk_level"),
+                "tactic_stage": record.get("task_tactic_stage"),
+                "target_symbols": record.get("task_target_symbols"),
+                "target_regions": record.get("task_target_regions"),
+                "issues": record.get("issues"),
+                "rewrite_attempt": record.get("rewrite_attempt"),
+            }
+            records.append(
+                {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+            )
+            if len(records) >= limit:
+                break
+        if not records:
+            return ""
+        records.reverse()
+        return (
+            "Recent rejected design shapes from this run follow. Treat them as "
+            "negative design memory, not as domain tactics or hidden answers. Do "
+            "not regenerate the same shape unless the new task is materially "
+            "narrower, has a clearer validator/failure condition, and addresses "
+            "the listed issues. If no bounded/verifiable implementation unit can "
+            "be formed, emit a context/read task instead of CODE work.\n"
+            + json.dumps(records, ensure_ascii=False, indent=2)
+        )
 
     def _spec_rewrite_focus_context(self) -> str:
         focus = self.state.scratch.get("spec_rewrite_focus")
@@ -1996,11 +2063,39 @@ class TodoLifecycleMixin:
                     "failure_class": task["last_observation"].get("failure_class"),
                 },
             )
-            self.state.scratch["spec_rewrite_focus"] = self._spec_design_rewrite_focus(
+            rewrite_focus = self._spec_design_rewrite_focus(
                 task,
                 ["repeated correctness_failure"],
                 failure_summary=self.state.latest_test_summary(),
             )
+            self.state.scratch["spec_rewrite_focus"] = rewrite_focus
+            if self._spec_global_loop_cap_reached():
+                spec["last_stop_reason"] = "max_code_test_loops"
+                spec["pending_spec_rewrite_reason"] = {
+                    "task_id": task.get("task_id"),
+                    "reason": "repeated_correctness_failure",
+                    "issues": ["repeated correctness_failure"],
+                    "failure_summary": self._truncate_text(
+                        self.state.latest_test_summary(),
+                        800,
+                    ),
+                }
+                spec["progress"] = self._run_spec_progress(spec)
+                self._persist_run_spec(spec)
+                self.state.notes.append(
+                    "Spec rewrite deferred because max_code_test_loops was reached"
+                )
+                self._append_spec_progress_event(
+                    "failed",
+                    spec,
+                    task,
+                    extra={
+                        "reason": "max_code_test_loops",
+                        "pending_spec_rewrite": True,
+                    },
+                )
+                self.state.current = AgentStateName.FAILED
+                return
             self.state.current = AgentStateName.SPEC_SYNTH
             return
         if not failed:
@@ -2101,6 +2196,7 @@ class TodoLifecycleMixin:
         if not isinstance(spec, dict) or not spec:
             return
         progress = self._run_spec_progress(spec)
+        self._persist_spec_terminal_state(spec, progress)
         report_path = self._workflow_artifact_path(
             "spec_report_path", ".local_micro_agent/spec_report.md"
         )
@@ -2168,6 +2264,107 @@ class TodoLifecycleMixin:
             lines.extend(f"- {note}" for note in notes_tail)
         report_path.write_text("\n".join(lines).rstrip() + "\n")
         self.state.notes.append(f"Persisted spec report: {report_path}")
+
+    def _persist_spec_terminal_state(
+        self,
+        spec: dict[str, Any],
+        progress: dict[str, int],
+    ) -> None:
+        path = self._workflow_artifact_path(
+            "spec_terminal_state_path",
+            ".local_micro_agent/terminal_state.json",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        spec_events = self._read_spec_jsonl(
+            self._workflow_artifact_path(
+                "spec_progress_path", ".local_micro_agent/spec_progress.jsonl"
+            )
+        )
+        candidate_events = self._read_spec_jsonl(
+            self._workflow_artifact_path(
+                "candidate_history_path", ".local_micro_agent/candidates.jsonl"
+            )
+        )
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        terminal = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "state": str(self.state.current),
+            "stop_reason": spec.get("last_stop_reason", ""),
+            "code_test_loop_count": self.state.loop_count,
+            "fsm_step_count": self.state.fsm_step_count,
+            "max_code_test_loops": self.state.max_loops,
+            "spec_id": spec.get("spec_id"),
+            "active_task_id": spec.get("active_task_id"),
+            "progress": progress,
+            "pending_spec_rewrite_reason": spec.get("pending_spec_rewrite_reason"),
+            "tasks": [
+                self._terminal_spec_task_snapshot(task)
+                for task in tasks
+                if isinstance(task, dict)
+            ],
+            "spec_progress_counts": self._count_jsonl_values(spec_events, "event"),
+            "candidate_status_counts": self._count_jsonl_values(
+                candidate_events, "status"
+            ),
+            "candidate_failure_class_counts": self._count_jsonl_values(
+                candidate_events, "failure_class"
+            ),
+            "last_spec_progress_event": spec_events[-1] if spec_events else None,
+            "last_candidate_event": candidate_events[-1] if candidate_events else None,
+        }
+        path.write_text(json.dumps(terminal, ensure_ascii=False, indent=2) + "\n")
+
+    @staticmethod
+    def _read_spec_jsonl(path: Path) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except FileNotFoundError:
+            return records
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+
+    @staticmethod
+    def _count_jsonl_values(records: list[dict[str, Any]], key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for record in records:
+            value = str(record.get(key) or "")
+            if not value:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+        return counts
+
+    def _terminal_spec_task_snapshot(self, task: dict[str, Any]) -> dict[str, Any]:
+        budget = task.get("budget") if isinstance(task.get("budget"), dict) else {}
+        snapshot = {
+            "task_id": task.get("task_id"),
+            "status": task.get("status"),
+            "title": task.get("title"),
+            "attempts": task.get("attempts"),
+            "attempts_used": budget.get("attempts_used"),
+            "attempts_max": budget.get("attempts_max"),
+            "recovery_rounds": task.get("recovery_rounds"),
+            "risk_level": task.get("risk_level"),
+            "tactic_stage": task.get("tactic_stage"),
+            "target_symbols": task.get("target_symbols"),
+            "target_regions": task.get("target_regions"),
+            "last_observation": task.get("last_observation"),
+            "design_contract": task.get("design_contract"),
+            "decision_hint": task.get("decision_hint"),
+        }
+        return {
+            key: value
+            for key, value in snapshot.items()
+            if value not in (None, "", [], {})
+        }
 
     def _todo_contract_soft_now(self) -> bool:
         if self._spec_hard_active_todo_contract_now():

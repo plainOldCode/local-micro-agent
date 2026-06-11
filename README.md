@@ -206,6 +206,20 @@ open tasks can continue. The run stops with `spec_design_contract_incomplete`
 only when no schedulable task remains because the remaining work is design-
 invalid.
 
+Recent `design_rejected` and `failed_design` shapes are summarized back into
+the next SPEC call as negative design memory. This memory records the rejected
+task shape and contract issues, not benchmark-specific answers. SPEC should not
+regenerate the same shape unless the replacement has a materially narrower
+target region, clearer validator/failure condition, and a risk contract that
+addresses the rejection.
+
+At the loop cap, pending design rewrites are not sent back through `SPEC_SYNTH`.
+The current run spec is preserved with `last_stop_reason=max_code_test_loops`
+and a `pending_spec_rewrite_reason`. The terminal report also writes
+`.local_micro_agent/terminal_state.json` with candidate/status distributions,
+spec-progress distributions, and the last task snapshots so final analysis is
+not confused by a late spec rewrite.
+
 Spec-scheduled active todos can be made hard even before the first metric
 improvement with `spec_hard_active_todo_contract=true`. In that mode, the
 active design contract stays in the CODE prompt and candidate records, even

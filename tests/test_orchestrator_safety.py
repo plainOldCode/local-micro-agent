@@ -3417,6 +3417,203 @@ Background / non-constraints
             self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
             self.assertEqual(persisted["last_stop_reason"], "spec_design_contract_incomplete")
 
+    def test_loop_cap_defers_spec_rewrite_instead_of_resetting_run_spec(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                task = {
+                    "task_id": "task-001",
+                    "title": "guard parser branch",
+                    "strategy_axis": "general_edit",
+                    "status": "in_progress",
+                    "deliverables": ["target.py"],
+                    "target_symbols": ["parse_item"],
+                    "target_regions": ["target.py::parse_item"],
+                    "preserved_invariants": ["existing parse outputs stay unchanged"],
+                    "edit_scope": "Change one guarded branch in parse_item.",
+                    "validator": {
+                        "kind": "command",
+                        "failure_condition": "pytest fails",
+                    },
+                    "correctness_rationale": "The fallback branch is unchanged.",
+                    "fallback_plan": "Revert the guarded branch.",
+                    "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                    "budget": {"attempts_max": 4, "attempts_used": 0},
+                }
+                spec = {
+                    "version": 2,
+                    "spec_id": "portable-spec",
+                    "active_task_id": "task-001",
+                    "task_graph": [task],
+                }
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_design_contract_gate": True,
+                            "spec_redesign_after_correctness_failures": 1,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", max_loops=1),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.scratch["last_candidate_observation"] = {
+                    "failure_class": "correctness_failure",
+                    "summary": "assertion failed",
+                }
+                agent.state.test_results = [
+                    TestResult(command="python -m pytest", exit_code=1, stderr="assertion failed")
+                ]
+
+                await agent._handle_spec_task_test_result(True)
+
+                self.assertEqual(agent.state.current, AgentStateName.FAILED)
+                self.assertNotEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+                persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(persisted["spec_id"], "portable-spec")
+                self.assertEqual(persisted["last_stop_reason"], "max_code_test_loops")
+                self.assertEqual(persisted["task_graph"][0]["status"], "needs_design")
+                self.assertEqual(
+                    persisted["pending_spec_rewrite_reason"]["reason"],
+                    "repeated_correctness_failure",
+                )
+                progress_events = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertIn('"pending_spec_rewrite": true', progress_events)
+
+        asyncio.run(run_case())
+
+    def test_spec_design_failure_memory_context_summarizes_rejected_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "spec_progress.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event": "failed_design",
+                        "spec_id": "portable-spec",
+                        "task_id": "task-001",
+                        "task_title": "Refactor pipeline",
+                        "task_edit_scope": "Replace the pipeline implementation.",
+                        "task_risk_level": "structural",
+                        "task_tactic_stage": "structural_probe",
+                        "task_target_regions": ["target.py::pipeline"],
+                        "issues": ["edit_scope too broad"],
+                        "rewrite_attempt": 3,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            context = agent._spec_design_failure_memory_context()
+
+            self.assertIn("negative design memory", context)
+            self.assertIn("Do not regenerate the same shape", context)
+            self.assertIn("Refactor pipeline", context)
+            self.assertIn("edit_scope too broad", context)
+
+    def test_spec_design_rewrite_focus_requires_narrower_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            focus = agent._spec_design_rewrite_focus(
+                {
+                    "task_id": "task-001",
+                    "title": "Refactor pipeline",
+                    "edit_scope": "Replace the pipeline implementation.",
+                },
+                ["edit_scope too broad"],
+            )
+
+            self.assertIn("Do not regenerate the same rejected design shape", focus)
+            self.assertIn("materially narrower", focus)
+
+    def test_spec_terminal_state_records_lineage_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "spec_progress.jsonl").write_text(
+                json.dumps({"event": "scheduled", "task_id": "task-001"}) + "\n"
+                + json.dumps({"event": "failed", "reason": "max_code_test_loops"}) + "\n"
+            )
+            (artifact_dir / "candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "loop-000-single",
+                        "status": "rejected",
+                        "failure_class": "correctness_failure",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_report_path": ".local_micro_agent/spec_report.md",
+                    },
+                },
+                AgentState(
+                    repo_root=repo,
+                    user_request="test",
+                    current=AgentStateName.FAILED,
+                    loop_count=1,
+                    max_loops=1,
+                ),
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "portable-spec",
+                "last_stop_reason": "max_code_test_loops",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "guard parser branch",
+                        "status": "needs_design",
+                        "budget": {"attempts_max": 3, "attempts_used": 1},
+                    }
+                ],
+            }
+            agent.state.scratch["run_spec"] = spec
+
+            agent._persist_spec_report()
+
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            self.assertEqual(terminal["stop_reason"], "max_code_test_loops")
+            self.assertEqual(terminal["spec_progress_counts"]["scheduled"], 1)
+            self.assertEqual(terminal["candidate_status_counts"]["rejected"], 1)
+            self.assertEqual(
+                terminal["candidate_failure_class_counts"]["correctness_failure"],
+                1,
+            )
+            self.assertEqual(terminal["tasks"][0]["status"], "needs_design")
+
     def test_valid_spec_design_contract_becomes_active_todo_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
