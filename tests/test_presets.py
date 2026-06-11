@@ -53,6 +53,21 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertFalse(workflow["continue_after_improvement"])
         self.assertTrue(workflow["deterministic_test_decision"])
 
+    def test_spec_preset_owns_spec_safety_gates(self) -> None:
+        config = apply_workflow_preset({"workflow": {"preset": "spec"}})
+        workflow = config["workflow"]
+        for key in (
+            "spec_design_contract_gate",
+            "spec_grounding_gate",
+            "spec_quality_gate",
+            "spec_structural_risk_gate",
+            "spec_two_call_synthesis",
+            "spec_probe_diff_contract_required",
+            "probe_diff_contract_gate",
+        ):
+            self.assertTrue(workflow[key], key)
+        self.assertEqual(workflow["spec_quality_rewrite_attempts"], 2)
+
     def test_explicit_workflow_key_wins_over_preset(self) -> None:
         config = apply_workflow_preset(
             {"workflow": {"preset": "search", "max_code_test_loops": 100}}

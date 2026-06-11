@@ -85,7 +85,20 @@ one of four vetted bundles from `src/local_micro_agent/presets.py`:
 | `minimal` | conservative fix-the-tests loop | deterministic test decisions, retries, target-not-found repair; all exploration machinery off |
 | `search` | long-running metric search | conditional reflect, brainstorm after repeated rejections, novelty/axis/region gates, adaptive gate controller, candidate history + artifacts, continue-after-improvement, profiling |
 | `structural` | multi-step refactors | `search` + run-spec task graph, semantic analysis, structural scaffold/probe/expand lifecycle, structural checkpoints |
-| `spec` | build a spec through a task graph | `structural` + strict spec-mode scheduling: task-scoped READ, synthesized acceptance, dependency gates, recovery rounds, progress/report artifacts |
+| `spec` | build a spec through a task graph | `structural` + strict spec-mode scheduling: task-scoped READ, synthesized acceptance, dependency gates, recovery rounds, progress/report artifacts, grounded/design/quality/probe gates |
+
+Spec-mode safety gates are dormant until `preset: "spec"` or the individual
+flag enables them:
+
+| Gate | Enabled by `spec` preset | Purpose |
+|---|---:|---|
+| `spec_design_contract_gate` | yes | rejects abstract or under-specified runnable tasks before CODE |
+| `spec_grounding_gate` | yes | requires writable, resolvable task targets and context-only read-only regions |
+| `spec_quality_gate` | yes | runs pre-persist quality/design preflight with bounded rewrites |
+| `spec_structural_risk_gate` | yes | classifies signature/callsite/dataflow/order edits as structural risk |
+| `spec_two_call_synthesis` | yes | uses advisory SPEC_IDEA followed by no-think JSON finalizer |
+| `spec_probe_diff_contract_required` | yes | requires structural probes to declare one expected changed region |
+| `probe_diff_contract_gate` | yes | checks structural probe diffs after apply and before tests |
 
 Preset values are defaults, not a mode switch: any key set explicitly in
 `workflow` wins. The expanded workflow records preset-supplied keys in

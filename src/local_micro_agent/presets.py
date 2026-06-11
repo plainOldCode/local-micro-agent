@@ -17,7 +17,9 @@ used as a base and selectively overridden.
   multi-step refactors: run-spec task graph, semantic analysis, structural
   tactic lifecycle, and structural state checkpoints.
 - `spec`: `structural` plus the experimental spec-mode scheduler. A v2
-  run_spec task graph becomes the deterministic loop driver.
+  run_spec task graph becomes the deterministic loop driver, with the
+  grounded/spec-quality/design-contract/probe gates enabled as one vetted
+  bundle.
 """
 from __future__ import annotations
 
@@ -95,6 +97,14 @@ _SPEC: dict[str, Any] = {
     "spec_invariant_commands": [],
     "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
     "spec_report_path": ".local_micro_agent/spec_report.md",
+    "spec_design_contract_gate": True,
+    "spec_grounding_gate": True,
+    "spec_quality_gate": True,
+    "spec_quality_rewrite_attempts": 2,
+    "spec_structural_risk_gate": True,
+    "spec_two_call_synthesis": True,
+    "spec_probe_diff_contract_required": True,
+    "probe_diff_contract_gate": True,
     "continue_after_improvement": False,
     "deterministic_test_decision": True,
 }

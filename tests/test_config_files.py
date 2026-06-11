@@ -4,15 +4,32 @@ import json
 import unittest
 from pathlib import Path
 
+from local_micro_agent.orchestrator import load_config
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigFileTests(unittest.TestCase):
     def test_a3b_mxfp8_config_keeps_tuned_lane_split(self) -> None:
-        config = json.loads(
-            (ROOT / "config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json").read_text()
-        )
+        config_path = ROOT / "config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json"
+        raw_config = json.loads(config_path.read_text())
+        config = load_config(config_path)
+        self.assertEqual(raw_config["workflow"]["preset"], "spec")
+        for absorbed_key in (
+            "spec_design_contract_gate",
+            "spec_grounding_gate",
+            "spec_quality_gate",
+            "spec_structural_risk_gate",
+            "spec_two_call_synthesis",
+            "spec_probe_diff_contract_required",
+            "probe_diff_contract_gate",
+        ):
+            self.assertNotIn(
+                absorbed_key,
+                raw_config["workflow"],
+                f"{absorbed_key} should come from the spec preset",
+            )
         models = config["models"]
         providers = config["providers"]
         workflow = config["workflow"]
