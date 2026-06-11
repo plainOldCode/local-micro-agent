@@ -149,6 +149,12 @@ Rules:
 - Do not invent files, commands, benchmarks, or constraints that are absent from
   the current request/config/source context.
 - Do not include historical prior-run winners unless they are present in this run's input.
+- When failure memory is supplied by issue scope, only entries labeled as
+  current_repo_issues may become repair/syntax-fix tasks. Rejected candidate
+  lessons are transient candidate-delta, patch, contract, metric, or design
+  failures; use them only to avoid, shrink, or retarget candidate shapes. Do
+  not infer that the current source has a syntax/test bug from a rejected
+  candidate lesson.
 - Keep task_graph to 3-8 tasks."""
 
 ACCEPTANCE_SYNTH_SYSTEM = """You are the ACCEPT_SYNTH node in a local coding-agent FSM.

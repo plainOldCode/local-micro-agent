@@ -213,6 +213,13 @@ regenerate the same shape unless the replacement has a materially narrower
 target region, clearer validator/failure condition, and a risk contract that
 addresses the rejection.
 
+Candidate failure memory is also scoped before it reaches CODE or SPEC. Records
+carry `failure_origin`, `issue_scope`, `repo_valid_after_restore`,
+`repair_task_eligible`, and `memory_use`. Only `current_repo` issues may become
+repair tasks. Failures from rejected candidate deltas, pre-apply contracts,
+patch misses, or metric gates are negative lessons for retargeting or avoiding
+the same shape; they are not treated as proof that the current source is broken.
+
 At the loop cap, pending design rewrites are not sent back through `SPEC_SYNTH`.
 The current run spec is preserved with `last_stop_reason=max_code_test_loops`
 and a `pending_spec_rewrite_reason`. The terminal report also writes

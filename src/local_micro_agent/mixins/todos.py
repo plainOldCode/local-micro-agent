@@ -44,6 +44,7 @@ class TodoLifecycleMixin:
                 for part in (
                     self._focused_read_model_context(str(workflow.get("run_spec_focus", ""))),
                     self._spec_acceptance_policy_context(),
+                    self._spec_candidate_failure_scope_context(),
                     self._spec_design_failure_memory_context(),
                     self._spec_rewrite_focus_context(),
                     self._correct_survivor_spec_context(),
@@ -798,6 +799,12 @@ class TodoLifecycleMixin:
             "failed_design task may reappear only if it has a materially narrower "
             "target region, clearer validator, and a risk contract that directly "
             "addresses the rejection issues.",
+            "If the rejected task's last_observation has issue_scope=candidate_delta "
+            "or repair_task_eligible=false, do not convert that transient rejected "
+            "candidate failure into a repair/syntax-fix task. Treat it as negative "
+            "candidate evidence: avoid the failed shape, retarget from fresh source, "
+            "or choose a bounded sibling hypothesis. Create repair tasks only for "
+            "current_repo issue_scope observations.",
             "Rejected task:",
             json.dumps(compact_task, ensure_ascii=False, indent=2),
         ]
@@ -2031,7 +2038,16 @@ class TodoLifecycleMixin:
                 task["last_observation"]["summary"] = metric_summary
         candidate_observation = self.state.scratch.get("last_candidate_observation")
         if isinstance(candidate_observation, dict):
-            for key in ("failure_class", "stage_result", "recovery_hint"):
+            for key in (
+                "failure_class",
+                "stage_result",
+                "recovery_hint",
+                "failure_origin",
+                "issue_scope",
+                "repo_valid_after_restore",
+                "repair_task_eligible",
+                "memory_use",
+            ):
                 value = candidate_observation.get(key)
                 if value not in (None, "", [], {}):
                     task["last_observation"][key] = value
@@ -3173,9 +3189,14 @@ class TodoLifecycleMixin:
             "test_output_path",
             "diagnostic_summary",
             "diagnostics",
+            "failure_origin",
+            "issue_scope",
+            "repo_valid_after_restore",
+            "repair_task_eligible",
+            "memory_use",
         ):
             value = candidate_record.get(key)
-            if value:
+            if value not in (None, "", [], {}):
                 attempt[key] = value
         with path.open("a") as handle:
             handle.write(json.dumps(attempt, ensure_ascii=False, sort_keys=True) + "\n")

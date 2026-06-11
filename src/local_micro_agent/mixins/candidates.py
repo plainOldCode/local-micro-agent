@@ -55,6 +55,11 @@ class CandidateRecordsMixin:
             }
             for key in (
                 "failure_class",
+                "failure_origin",
+                "issue_scope",
+                "repo_valid_after_restore",
+                "repair_task_eligible",
+                "memory_use",
                 "no_change_reason",
                 "failure_detail",
                 "recovery_hint",
@@ -67,7 +72,7 @@ class CandidateRecordsMixin:
                 "last_correct_patch_path",
             ):
                 value = record.get(key)
-                if value:
+                if value not in (None, "", [], {}):
                     item[key] = (
                         self._truncate_text(str(value), 500)
                         if key in {"no_change_reason", "failure_detail", "diagnostic_summary"}
@@ -143,6 +148,16 @@ class CandidateRecordsMixin:
             no_change_reason=no_change_reason,
             diagnostic_results=diagnostic_results or [],
         )
+        failure_scope = self._candidate_failure_scope(
+            status=status,
+            applied=applied,
+            failed=failed,
+            failure_class=str(observation.get("failure_class", "")),
+            failure_detail=failure_detail,
+            no_change_reason=no_change_reason,
+            results=results,
+        )
+        observation.update(failure_scope)
         extra.update(observation)
         if diagnostic_results:
             extra["diagnostics"] = self._compact_diagnostic_results(diagnostic_results)
@@ -161,6 +176,7 @@ class CandidateRecordsMixin:
                 no_change_reason=no_change_reason,
                 diagnostic_results=diagnostic_results or [],
                 recovery_hint=str(observation.get("recovery_hint", "")),
+                failure_scope=failure_scope,
             )
         )
         extra.update(

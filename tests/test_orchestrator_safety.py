@@ -6137,6 +6137,191 @@ value = 'fast'
             self.assertIn("stale address", record["why_invalid"])
             self.assertEqual(extra["failure_memory_path"], ".local_micro_agent/failure_memory.jsonl")
 
+    def test_candidate_syntax_failure_after_restore_is_not_repair_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    adaptive_search_memory=True,
+                    failure_memory=True,
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": "value = 1\n"}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "syntax-bad",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="try a local edit",
+                        target="value = 1\n",
+                        replacement="value =\n",
+                    )
+                ],
+                "try a local edit",
+                strategy_axis="general_edit",
+            )
+
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected",
+                metric=None,
+                applied=1,
+                failed=True,
+                patch_text="",
+                results=[
+                    TestResult(
+                        "preflight:syntax target.py",
+                        1,
+                        stderr="SyntaxError in target.py:1:8: invalid syntax",
+                    )
+                ],
+                failure_detail="Candidate preflight failed for target.py: SyntaxError line 1",
+            )
+
+            self.assertEqual(extra["failure_origin"], "candidate_validation")
+            self.assertEqual(extra["issue_scope"], "candidate_delta")
+            self.assertTrue(extra["repo_valid_after_restore"])
+            self.assertFalse(extra["repair_task_eligible"])
+            self.assertEqual(extra["memory_use"], "avoid_shape")
+            record = json.loads((repo / ".local_micro_agent" / "failure_memory.jsonl").read_text())
+            self.assertEqual(record["issue_scope"], "candidate_delta")
+            self.assertFalse(record["repair_task_eligible"])
+            formatted = agent._format_failure_memory()
+            self.assertIn("rejected_candidate_lessons", formatted)
+            self.assertIn("SyntaxError", formatted)
+            self.assertIn('"current_repo_issues": []', formatted)
+
+    def test_post_restore_validation_failure_is_repair_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = {
+                "models": {},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": takehome_workflow(
+                    adaptive_search_memory=True,
+                    failure_memory=True,
+                ),
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.scratch["pre_code_snapshot"] = {"target.py": "value = 1\n"}
+            agent = MicroAgent(config, state)
+            candidate = CodeCandidate(
+                "restore-bad",
+                [],
+                "restore validation failed",
+                strategy_axis="general_edit",
+            )
+
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected",
+                metric=None,
+                applied=0,
+                failed=True,
+                patch_text="",
+                results=[TestResult("python3 test.py", 1, stderr="SyntaxError")],
+                failure_detail="post-restore validation failed: SyntaxError",
+            )
+
+            self.assertEqual(extra["failure_origin"], "post_restore_validation")
+            self.assertEqual(extra["issue_scope"], "current_repo")
+            self.assertFalse(extra["repo_valid_after_restore"])
+            self.assertTrue(extra["repair_task_eligible"])
+            self.assertEqual(extra["memory_use"], "create_repair_task")
+            formatted = agent._format_failure_memory()
+            self.assertIn("current_repo_issues", formatted)
+            self.assertIn("create_repair_task", formatted)
+
+    def test_spec_candidate_failure_scope_context_separates_current_repo_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "failure_memory.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop": 1,
+                        "strategy_axis": "general_edit",
+                        "failure_class": "correctness_failure",
+                        "why_invalid": "candidate SyntaxError",
+                        "failure_origin": "candidate_validation",
+                        "issue_scope": "candidate_delta",
+                        "repo_valid_after_restore": True,
+                        "repair_task_eligible": False,
+                        "memory_use": "avoid_shape",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "loop": 2,
+                        "strategy_axis": "general_edit",
+                        "failure_class": "correctness_failure",
+                        "why_invalid": "post-restore SyntaxError",
+                        "failure_origin": "post_restore_validation",
+                        "issue_scope": "current_repo",
+                        "repo_valid_after_restore": False,
+                        "repair_task_eligible": True,
+                        "memory_use": "create_repair_task",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": takehome_workflow(
+                        adaptive_search_memory=True,
+                        failure_memory=True,
+                    ),
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            context = agent._spec_candidate_failure_scope_context()
+
+            self.assertIn("Current repo issues", context)
+            self.assertIn("Rejected candidate lessons", context)
+            self.assertIn("current_repo_issues", context)
+            self.assertIn("post-restore SyntaxError", context)
+            self.assertIn("rejected_candidate_lessons", context)
+            self.assertIn("candidate SyntaxError", context)
+            self.assertIn("do not turn", context)
+
+    def test_spec_rewrite_focus_for_candidate_delta_forbids_repair_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            focus = agent._spec_design_rewrite_focus(
+                {
+                    "task_id": "task-001",
+                    "title": "Fix syntax",
+                    "edit_scope": "Fix syntax in target.py",
+                    "last_observation": {
+                        "failure_class": "correctness_failure",
+                        "issue_scope": "candidate_delta",
+                        "repair_task_eligible": False,
+                        "summary": "candidate SyntaxError",
+                    },
+                },
+                ["repeated correctness_failure"],
+            )
+
+            self.assertIn("do not convert", focus)
+            self.assertIn("repair/syntax-fix task", focus)
+            self.assertIn("current_repo", focus)
+
     def test_correct_candidate_persists_last_correct_survivor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

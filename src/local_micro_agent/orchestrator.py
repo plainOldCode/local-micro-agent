@@ -377,11 +377,16 @@ class MicroAgent(
                 if failure_memory:
                     add_runtime_context(
                         "Failure memory follows. Treat it as durable negative "
-                        "evidence from prior candidates. Do not treat improved "
-                        "diagnostics as valid unless tests also passed. Avoid "
-                        "candidate variants whose failure_signature, failure_class, "
-                        "or next_rule says avoid; when next_rule is repair_with_constraint, "
-                        "address why_invalid before optimizing further.\n"
+                        "evidence from prior candidates, grouped by issue scope. "
+                        "Only current_repo_issues describe problems that may justify "
+                        "repair work in the current source. Rejected candidate lessons "
+                        "describe discarded candidate deltas, patch misses, contract "
+                        "rejects, or metric gates; do not turn their SyntaxError/test "
+                        "text into current-code repair tasks. Do not treat improved "
+                        "diagnostics as valid unless tests also passed. Avoid candidate "
+                        "variants whose failure_signature, failure_class, or next_rule "
+                        "says avoid; when next_rule is repair_with_constraint, address "
+                        "why_invalid before optimizing further.\n"
                         f"{failure_memory}"
                     )
                 todo_observation_chain = self._format_todo_observation_chain()

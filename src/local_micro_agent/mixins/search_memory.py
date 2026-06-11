@@ -1345,31 +1345,103 @@ class AdaptiveSearchMixin:
         if not path.exists():
             return ""
         limit = int(self.config.get("workflow", {}).get("failure_memory_recent_limit", 8) or 8)
+        payload = self._scoped_failure_memory_payload(limit)
+        if not payload["current_repo_issues"] and not payload["rejected_candidate_lessons"]:
+            return ""
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _scoped_failure_memory_payload(self, limit: int) -> dict[str, Any]:
+        path = self._failure_memory_path()
         records: list[dict[str, Any]] = []
         for line in path.read_text(errors="replace").splitlines()[-limit:]:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            records.append(
-                {
-                    key: record.get(key)
-                    for key in (
-                        "loop",
-                        "strategy_axis",
-                        "failure_class",
-                        "failure_signature",
-                        "observed_signal",
-                        "why_invalid",
-                        "next_rule",
-                        "repair_hint",
-                    )
-                    if record.get(key) not in (None, "", [], {})
-                }
+            records.append(self._compact_failure_memory_record(record))
+        current_repo_issues = [
+            record
+            for record in records
+            if record.get("issue_scope") == "current_repo"
+            or record.get("repair_task_eligible") is True
+        ]
+        rejected_candidate_lessons = [
+            record
+            for record in records
+            if record not in current_repo_issues
+        ]
+        return {
+            "failure_memory_policy": (
+                "Only current_repo_issues may be converted into repair tasks. "
+                "Rejected candidate lessons describe transient candidate deltas, "
+                "patch misses, contract rejects, metric gates, or invalid design "
+                "shapes; use them as negative evidence, not as proof that the "
+                "current repository is broken."
+            ),
+            "current_repo_issues": current_repo_issues,
+            "rejected_candidate_lessons": rejected_candidate_lessons,
+        }
+
+    def _compact_failure_memory_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        issue_scope = str(record.get("issue_scope") or "")
+        repair_task_eligible = record.get("repair_task_eligible")
+        if not issue_scope:
+            issue_scope = (
+                "current_repo"
+                if repair_task_eligible is True
+                else "candidate_delta"
             )
-        if not records:
+        compact_keys = (
+            "loop",
+            "strategy_axis",
+            "failure_class",
+            "failure_signature",
+            "observed_signal",
+            "why_invalid",
+            "next_rule",
+            "repair_hint",
+            "failure_origin",
+            "issue_scope",
+            "repo_valid_after_restore",
+            "repair_task_eligible",
+            "memory_use",
+        )
+        compact = {
+            key: record.get(key)
+            for key in compact_keys
+            if record.get(key) not in (None, "", [], {})
+        }
+        compact["issue_scope"] = issue_scope
+        if repair_task_eligible is not None:
+            compact["repair_task_eligible"] = bool(repair_task_eligible)
+        return compact
+
+    def _spec_candidate_failure_scope_context(self) -> str:
+        if not self._failure_memory_enabled():
             return ""
-        return json.dumps({"recent_failure_lessons": records}, ensure_ascii=False, indent=2)
+        path = self._failure_memory_path()
+        if not path.exists():
+            return ""
+        limit = int(
+            self.config.get("workflow", {}).get(
+                "spec_candidate_failure_memory_limit",
+                self.config.get("workflow", {}).get("failure_memory_recent_limit", 8),
+            )
+            or 8
+        )
+        payload = self._scoped_failure_memory_payload(limit)
+        if not payload["current_repo_issues"] and not payload["rejected_candidate_lessons"]:
+            return ""
+        return (
+            "Recent candidate failure memory by issue scope follows. Current repo "
+            "issues are the only entries eligible for repair/syntax-fix tasks. "
+            "Rejected candidate lessons came from discarded candidate deltas, "
+            "pre-apply contracts, patch application, or metric gates; do not turn "
+            "their SyntaxError/test/patch-miss text into a new current-code repair "
+            "task. Use those lessons only to avoid, retarget, or shrink future "
+            "candidate shapes.\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+        )
 
     def _remember_failure_lesson(
         self,
@@ -1383,12 +1455,22 @@ class AdaptiveSearchMixin:
         no_change_reason: str,
         diagnostic_results: list[dict[str, Any]],
         recovery_hint: str,
+        failure_scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self._failure_memory_enabled():
             return {}
         if status in {"improved", "accepted"} and not failed:
             return {}
         detail = no_change_reason or failure_detail
+        scope = failure_scope or self._candidate_failure_scope(
+            status=status,
+            applied=applied,
+            failed=failed,
+            failure_class=failure_class,
+            failure_detail=failure_detail,
+            no_change_reason=no_change_reason,
+            results=[],
+        )
         diagnostic_summary = self._diagnostic_summary(diagnostic_results, limit=500)
         observed_signal = []
         if metric is not None:
@@ -1415,6 +1497,7 @@ class AdaptiveSearchMixin:
             "next_rule": self._failure_memory_next_rule(failure_class, detail),
             "repair_hint": self._truncate_text(recovery_hint, 500),
         }
+        record.update(scope)
         path = self._failure_memory_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as handle:
@@ -1423,6 +1506,119 @@ class AdaptiveSearchMixin:
             "failure_memory_path": self._repo_relative_path(path),
             "failure_memory_next_rule": record["next_rule"],
         }
+
+    def _candidate_failure_scope(
+        self,
+        status: str,
+        applied: int,
+        failed: bool,
+        failure_class: str,
+        failure_detail: str = "",
+        no_change_reason: str = "",
+        results: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        detail = self._normalize_fingerprint_text(
+            " ".join([status, failure_class, failure_detail, no_change_reason])
+        )
+        result_list = results or []
+        result_failed = any(getattr(result, "exit_code", 0) != 0 for result in result_list)
+        origin = self._candidate_failure_origin(
+            status=status,
+            applied=applied,
+            failed=failed,
+            failure_class=failure_class,
+            detail=detail,
+            result_failed=result_failed,
+        )
+        issue_scope = self._candidate_issue_scope(
+            origin=origin,
+            applied=applied,
+            result_failed=result_failed,
+        )
+        repo_valid_after_restore: bool | None
+        if issue_scope == "current_repo":
+            repo_valid_after_restore = False
+        elif issue_scope == "candidate_delta":
+            repo_valid_after_restore = (
+                True
+                if isinstance(self.state.scratch.get("pre_code_snapshot"), dict)
+                else None
+            )
+        else:
+            repo_valid_after_restore = None
+        repair_task_eligible = issue_scope == "current_repo"
+        return {
+            "failure_origin": origin,
+            "issue_scope": issue_scope,
+            "repo_valid_after_restore": repo_valid_after_restore,
+            "repair_task_eligible": repair_task_eligible,
+            "memory_use": self._candidate_memory_use(origin, issue_scope),
+        }
+
+    @staticmethod
+    def _candidate_failure_origin(
+        status: str,
+        applied: int,
+        failed: bool,
+        failure_class: str,
+        detail: str,
+        result_failed: bool,
+    ) -> str:
+        if "post restore" in detail or "post-restore" in detail or "after restore" in detail:
+            return "post_restore_validation"
+        if "design contract" in detail or status in {"design_rejected", "failed_design"}:
+            return "design_contract"
+        if status.startswith("rejected_todo") or failure_class in {
+            "contract_mismatch",
+            "axis_mismatch",
+            "family_mismatch",
+        }:
+            return "pre_apply_contract"
+        if failure_class == "patch_miss":
+            return "patch_apply"
+        if failure_class in {
+            "no_improvement",
+            "probe_no_signal",
+            "scaffold_validated",
+            "metric_missing",
+        }:
+            return "metric_gate"
+        if applied > 0 or result_failed or failed:
+            return "candidate_validation"
+        return "unknown"
+
+    @staticmethod
+    def _candidate_issue_scope(
+        origin: str,
+        applied: int,
+        result_failed: bool,
+    ) -> str:
+        if origin == "post_restore_validation":
+            return "current_repo"
+        if origin == "design_contract":
+            return "design_shape"
+        if origin == "candidate_validation" and applied <= 0 and result_failed:
+            return "current_repo"
+        if origin in {
+            "patch_apply",
+            "pre_apply_contract",
+            "candidate_validation",
+            "metric_gate",
+        }:
+            return "candidate_delta"
+        return "unknown"
+
+    @staticmethod
+    def _candidate_memory_use(origin: str, issue_scope: str) -> str:
+        if issue_scope == "current_repo":
+            return "create_repair_task"
+        if origin == "patch_apply":
+            return "retry_with_fresh_context"
+        if issue_scope == "design_shape":
+            return "avoid_shape"
+        if issue_scope == "candidate_delta":
+            return "avoid_shape"
+        return "ignore_for_spec"
 
     @staticmethod
     def _failure_memory_next_rule(failure_class: str, detail: str) -> str:
