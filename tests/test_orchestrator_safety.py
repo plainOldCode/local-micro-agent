@@ -4124,6 +4124,66 @@ Background / non-constraints
 
             self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
 
+    def test_spec_grounding_gate_allows_read_only_required_unchanged_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+            (repo / "problem.py").write_text("class Machine:\n    def step(self):\n        pass\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text()),
+                FileSnapshot(path="problem.py", content=(repo / "problem.py").read_text()),
+            ]
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "grounded-unchanged",
+                    "invariants": ["Machine.step behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["Machine.step behavior stays unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "probe_diff_contract": {
+                                "allowed_regions": ["target.py::parse_item"],
+                                "expected_changed_regions": ["target.py::parse_item"],
+                                "required_unchanged_regions": ["problem.py::Machine.step"],
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "Machine.step is read-only context.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+
     def test_spec_grounding_gate_rejects_imported_symbol_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

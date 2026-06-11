@@ -1327,18 +1327,23 @@ class TodoLifecycleMixin:
                     issues.append(f"unresolvable_target_region:{symbol}")
         contract = task.get("probe_diff_contract")
         if isinstance(contract, dict):
-            contract_regions: list[str] = []
-            for key in (
-                "allowed_regions",
-                "expected_changed_regions",
-                "required_unchanged_regions",
-            ):
-                contract_regions.extend(self._normalize_string_list(contract.get(key)))
-            for region in contract_regions:
+            writable_probe_regions: list[str] = []
+            for key in ("allowed_regions", "expected_changed_regions"):
+                writable_probe_regions.extend(self._normalize_string_list(contract.get(key)))
+            for region in writable_probe_regions:
                 region_path = self._region_path(region)
                 if region_path and not self._spec_path_is_writable(region_path, writable):
                     issues.append(f"non_writable_probe_region:{region}")
                 elif (
+                    region_path
+                    and region_path.endswith(".py")
+                    and region not in allowed_regions
+                    and region not in read_only_symbols
+                ):
+                    issues.append(f"unresolvable_probe_region:{region}")
+            for region in self._normalize_string_list(contract.get("required_unchanged_regions")):
+                region_path = self._region_path(region)
+                if (
                     region_path
                     and region_path.endswith(".py")
                     and region not in allowed_regions
