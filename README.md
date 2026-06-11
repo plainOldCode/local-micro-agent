@@ -249,10 +249,16 @@ too many deliverables or read hints, not exactly one runnable target region,
 target spans that are too large to patch reliably, vague edit scopes, synthesized
 acceptance when configured command/metric validation exists, unsafe fallback
 plans, structural probes with more than one expected changed region, and silent
-drift away from the first feasible `SPEC_IDEA` target. If the finalizer chooses
-not to use that advisory target as the first runnable task, it must add an
-`idea_rejection_reason:` in `known_facts` or `decision_rules` that cites
-grounding facts or recent failure memory. Failed quality checks are written to
+drift away from the first feasible `SPEC_IDEA` target. When
+`spec_design_contract_gate=true`, the quality gate also runs the task design
+contract preflight before persistence, so local/structural risk mismatches,
+cross-region `probe_diff_contract` mismatches, missing structural probe fields,
+broad structural edit scopes, and rollback-only structural plans are rejected as
+`design_contract_*` quality issues instead of being saved and rediscovered later
+by the scheduler. If the finalizer chooses not to use that advisory target as
+the first runnable task, it must add an `idea_rejection_reason:` in
+`known_facts` or `decision_rules` that cites grounding facts or recent failure
+memory. Failed quality checks are written to
 `.local_micro_agent/spec_quality_report.json`, logged as `quality_rejected` in
 `spec_progress.jsonl`, and fed back into a bounded finalizer rewrite attempt.
 
@@ -289,10 +295,14 @@ target symbol or file region.
 `spec_structural_risk_gate=true` adds a domain-neutral check for structural
 changes such as rewrites, reordering, batching, scheduling, parallelization,
 state lifecycle changes, data/control-flow changes, loop structure changes, and
-side-effect movement. Those tasks must declare `risk_level=structural`,
+side-effect movement. Signature/API/parameter changes and call-site updates are
+also structural risk signals. Those tasks must declare `risk_level=structural`,
 start with `tactic_stage=structural_probe`, and provide `risk_evidence`,
 `probe_plan`, `probe_diff_contract`, `invariant_evidence`, and
-`rollback_or_shrink_plan`.
+`rollback_or_shrink_plan`. A structural probe must name a smaller guarded probe,
+not only a revert/restore/rollback instruction; multi-action edit scopes such
+as allocate + initialize + replace + increment + remove are treated as broad
+rewrites and must be split.
 `risk_evidence` must quote an actionable task field such as `title` or
 `edit_scope`; safety explanations in `correctness_rationale`, `fallback_plan`,
 or invariant fields are not used as risk triggers. Active structural probes are
