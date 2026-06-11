@@ -735,7 +735,7 @@ class TodoLifecycleMixin:
                     "vague_edit_scope",
                     task_id,
                     edit_scope or "missing edit_scope",
-                    "State the exact operation boundary; do not use only optimize/refactor/improve.",
+                    self._spec_quality_vague_edit_scope_hint(task, edit_scope),
                 )
             )
         acceptance = task.get("acceptance")
@@ -907,6 +907,29 @@ class TodoLifecycleMixin:
         return any(re.search(pattern, text) for pattern in vague_patterns) and not any(
             marker in text for marker in concrete_markers
         )
+
+    def _spec_quality_vague_edit_scope_hint(
+        self,
+        task: dict[str, Any],
+        edit_scope: str,
+    ) -> str:
+        target_regions = self._normalize_string_list(task.get("target_regions"))
+        target = target_regions[0] if len(target_regions) == 1 else "the target region"
+        hint = (
+            "State one exact operation boundary in one target region; do not use "
+            "only optimize/refactor/improve. Bad: 'Refactor target() to group "
+            "and pack work.' Good: 'In "
+            + target
+            + ", add one guarded branch for a single operation category; keep "
+            "the old path as fallback and preserve existing ordering invariants.'"
+        )
+        lowered = edit_scope.lower()
+        if "pack" in lowered or "group" in lowered:
+            hint += (
+                " For group/pack ideas, name the one category being packed and "
+                "the categories/orderings intentionally left unchanged."
+            )
+        return hint
 
     @staticmethod
     def _spec_quality_fallback_is_safe(text: str) -> bool:
@@ -3602,7 +3625,21 @@ class TodoLifecycleMixin:
         if not isinstance(spec, dict):
             spec = self._load_run_spec(self._run_spec_path())
         if not isinstance(spec, dict) or not spec:
-            return
+            quality_report = self.state.scratch.get("spec_quality_report")
+            if (
+                self.state.current != AgentStateName.FAILED
+                or not isinstance(quality_report, dict)
+                or not self._spec_quality_report_failed(quality_report)
+            ):
+                return
+            spec = {
+                "version": 2,
+                "spec_id": quality_report.get("spec_id") or "",
+                "objective": "Run spec generation failed before persistence.",
+                "task_graph": [],
+                "last_stop_reason": "spec_quality_gate_failed",
+                "spec_quality_report": quality_report,
+            }
         progress = self._run_spec_progress(spec)
         self._persist_spec_terminal_state(spec, progress)
         report_path = self._workflow_artifact_path(
@@ -3670,6 +3707,43 @@ class TodoLifecycleMixin:
         if notes_tail:
             lines.extend(["", "## Notes Tail", ""])
             lines.extend(f"- {note}" for note in notes_tail)
+        quality_report = (
+            spec.get("spec_quality_report")
+            if isinstance(spec.get("spec_quality_report"), dict)
+            else self.state.scratch.get("spec_quality_report")
+        )
+        if isinstance(quality_report, dict) and (
+            self._spec_quality_report_failed(quality_report)
+            or spec.get("last_stop_reason") == "spec_quality_gate_failed"
+        ):
+            issues = [
+                issue
+                for issue in quality_report.get("issues", [])
+                if isinstance(issue, dict)
+            ]
+            issue_codes = [
+                str(code)
+                for code in quality_report.get("issue_codes", [])
+                if str(code)
+            ]
+            lines.extend(
+                [
+                    "",
+                    "## Quality Gate",
+                    "",
+                    f"- status: `{quality_report.get('status', '')}`",
+                    f"- attempt: `{quality_report.get('attempt', '')}`",
+                    "- issue_codes: "
+                    + (", ".join(f"`{code}`" for code in issue_codes) or "`none`"),
+                ]
+            )
+            for issue in issues[:8]:
+                lines.append(
+                    "- "
+                    + str(issue.get("code") or "issue")
+                    + ": "
+                    + str(issue.get("detail") or "")
+                )
         report_path.write_text("\n".join(lines).rstrip() + "\n")
         self.state.notes.append(f"Persisted spec report: {report_path}")
 
@@ -3720,6 +3794,16 @@ class TodoLifecycleMixin:
             "last_spec_progress_event": spec_events[-1] if spec_events else None,
             "last_candidate_event": candidate_events[-1] if candidate_events else None,
         }
+        quality_report = (
+            spec.get("spec_quality_report")
+            if isinstance(spec.get("spec_quality_report"), dict)
+            else self.state.scratch.get("spec_quality_report")
+        )
+        if isinstance(quality_report, dict) and (
+            self._spec_quality_report_failed(quality_report)
+            or spec.get("last_stop_reason") == "spec_quality_gate_failed"
+        ):
+            terminal["spec_quality_report"] = quality_report
         path.write_text(json.dumps(terminal, ensure_ascii=False, indent=2) + "\n")
 
     @staticmethod

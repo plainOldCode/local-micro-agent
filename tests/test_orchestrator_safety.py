@@ -3988,6 +3988,72 @@ Background / non-constraints
             )
             self.assertEqual(terminal["tasks"][0]["status"], "needs_design")
 
+    def test_spec_terminal_state_records_quality_gate_failure_without_run_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "spec_progress.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event": "quality_rejected",
+                        "quality_issue_codes": ["vague_edit_scope"],
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_report_path": ".local_micro_agent/spec_report.md",
+                    },
+                },
+                AgentState(
+                    repo_root=repo,
+                    user_request="test",
+                    current=AgentStateName.FAILED,
+                    loop_count=0,
+                    max_loops=100,
+                ),
+            )
+            quality_report = {
+                "version": 1,
+                "status": "fail",
+                "attempt": 1,
+                "spec_id": "bad-spec",
+                "issues": [
+                    {
+                        "code": "vague_edit_scope",
+                        "task_id": "task-001",
+                        "detail": "Refactor target().",
+                    }
+                ],
+                "issue_codes": ["vague_edit_scope"],
+            }
+            agent.state.scratch["spec_quality_report"] = quality_report
+            agent.state.notes.append("Run spec discarded: quality gate issues remain")
+
+            agent._persist_spec_report()
+
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            report = (artifact_dir / "spec_report.md").read_text()
+            self.assertEqual(terminal["stop_reason"], "spec_quality_gate_failed")
+            self.assertEqual(terminal["spec_id"], "bad-spec")
+            self.assertEqual(terminal["progress"]["total"], 0)
+            self.assertEqual(terminal["spec_progress_counts"]["quality_rejected"], 1)
+            self.assertEqual(
+                terminal["spec_quality_report"]["issue_codes"],
+                ["vague_edit_scope"],
+            )
+            self.assertIn("stop_reason: `spec_quality_gate_failed`", report)
+            self.assertIn("## Quality Gate", report)
+            self.assertIn("`vague_edit_scope`", report)
+
     def test_valid_spec_design_contract_becomes_active_todo_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -6289,6 +6355,79 @@ Background / non-constraints
             report = agent._spec_quality_report(spec)
 
             self.assertEqual(report["status"], "pass")
+
+    def test_spec_quality_vague_edit_scope_hint_is_repairable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def build(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "writable_files": ["target.py"],
+                        "test_commands": ["python -m pytest"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-vague-scope",
+                    "invariants": ["build return contract stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "pack build work",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "read_hints": ["target.py"],
+                            "target_symbols": ["build"],
+                            "target_regions": ["target.py::build"],
+                            "preserved_invariants": ["return value remains unchanged"],
+                            "edit_scope": (
+                                "Refactor build() to group slots by engine and pack "
+                                "them into fewer instructions"
+                            ),
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "group slots",
+                                "explanation": "single target local edit",
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The original behavior is preserved.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {
+                                "kind": "command",
+                                "commands": ["python -m pytest"],
+                            },
+                        }
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            issue = next(
+                issue for issue in report["issues"] if issue["code"] == "vague_edit_scope"
+            )
+            self.assertIn("Bad:", issue["rewrite_hint"])
+            self.assertIn("Good:", issue["rewrite_hint"])
+            self.assertIn("target.py::build", issue["rewrite_hint"])
+            self.assertIn("name the one category", issue["rewrite_hint"])
 
     def test_spec_quality_gate_accepts_valid_structural_probe_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

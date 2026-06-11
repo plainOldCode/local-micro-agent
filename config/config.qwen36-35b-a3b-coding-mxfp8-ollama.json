@@ -268,7 +268,7 @@
     "local_task_max_changes": 1,
     "spec_grounding_gate": true,
     "spec_quality_gate": true,
-    "spec_quality_rewrite_attempts": 1,
+    "spec_quality_rewrite_attempts": 2,
     "spec_quality_max_deliverables": 1,
     "spec_quality_max_read_hints": 3,
     "spec_quality_max_target_lines": 160,

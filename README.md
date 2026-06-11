@@ -260,7 +260,10 @@ the first runnable task, it must add an `idea_rejection_reason:` in
 `known_facts` or `decision_rules` that cites grounding facts or recent failure
 memory. Failed quality checks are written to
 `.local_micro_agent/spec_quality_report.json`, logged as `quality_rejected` in
-`spec_progress.jsonl`, and fed back into a bounded finalizer rewrite attempt.
+`spec_progress.jsonl`, and fed back into bounded finalizer rewrite attempts. If
+no valid v2 run spec can be persisted, spec mode still writes terminal artifacts
+with `stop_reason=spec_quality_gate_failed` and the final quality report so
+loop-0 spec generation failures are analyzable.
 
 For local spec tasks, `spec_local_task_one_change=true` keeps CODE patch shape
 small after the quality gate has selected one runnable target. A `local_edit`
@@ -357,9 +360,10 @@ Spec mode appends every scheduling event to
 `.local_micro_agent/spec_progress.jsonl` and writes
 `.local_micro_agent/spec_report.md` at DONE/FAILED with graph progress,
 `code_test_loop_count` vs `max_code_test_loops`, `stop_reason`, per-task
-attempts and recovery rounds, deliverables, and acceptance state. This
-distinguishes a true loop-cap exit from dependency blocking or no-recovery
-termination.
+attempts and recovery rounds, deliverables, acceptance state, and final quality
+gate issues when a spec fails before persistence. This distinguishes a true
+loop-cap exit from dependency blocking, no-recovery termination, or early spec
+quality failure.
 
 ## Search Machinery (classic mode)
 
