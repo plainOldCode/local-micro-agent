@@ -163,6 +163,13 @@ exhausted or the metric improves.
       "target_regions": ["src/parser.py::parse_item"],
       "preserved_invariants": ["existing accepted inputs keep their parsed shape"],
       "edit_scope": "Change only the parse_item branch that handles tagged items.",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Change only the parse_item branch",
+        "explanation": "single-region local branch edit"
+      },
       "validator": {
         "kind": "command",
         "failure_condition": "configured tests fail or expected metric is missing"
@@ -171,7 +178,7 @@ exhausted or the metric improves.
       "fallback_plan": "Revert to the previous branch and add a narrower guard.",
       "acceptance": { "kind": "synthesized", "commands": [] },
       "budget": { "attempts_max": 8, "attempts_used": 0 },
-      "status": "open"                         // open|in_progress|closed|deferred|failed
+      "status": "open"                         // open|needs_design|in_progress|closed|deferred|failed|failed_design
     }
   ]
 }
@@ -191,6 +198,13 @@ current task is also marked `needs_design` so the next attempt rewrites the
 design instead of retrying the same tactic family. Correctness-preserving
 `last_correct` survivor artifacts are summarized into SPEC context as safe
 composition evidence.
+
+Design rewrite budgets are task-scoped. If a task exhausts its design rewrite
+budget before it becomes a bounded, verifiable, independently executable unit,
+it is marked `failed_design` and isolated from scheduling. Other dependency-free
+open tasks can continue. The run stops with `spec_design_contract_incomplete`
+only when no schedulable task remains because the remaining work is design-
+invalid.
 
 Spec-scheduled active todos can be made hard even before the first metric
 improvement with `spec_hard_active_todo_contract=true`. In that mode, the

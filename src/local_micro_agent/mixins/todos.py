@@ -464,12 +464,20 @@ class TodoLifecycleMixin:
         return {
             "total": len(statuses),
             "closed": statuses.count("closed"),
-            "deferred": statuses.count("deferred"),
-            "failed": statuses.count("failed"),
+            "deferred": sum(1 for status in statuses if self._spec_status_is_deferred(status)),
+            "failed": sum(1 for status in statuses if self._spec_status_is_failed(status)),
         }
 
     def _spec_design_contract_gate_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("spec_design_contract_gate"))
+
+    @staticmethod
+    def _spec_status_is_deferred(status: str) -> bool:
+        return status in {"deferred", "deferred_design_invalid"}
+
+    @staticmethod
+    def _spec_status_is_failed(status: str) -> bool:
+        return status in {"failed", "failed_design"}
 
     def _spec_structural_risk_gate_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -664,21 +672,31 @@ class TodoLifecycleMixin:
     ) -> None:
         workflow = self.config.get("workflow", {})
         max_rewrites = int(workflow.get("spec_design_contract_rewrite_attempts", 2) or 0)
+        task_id = str(task.get("task_id") or "")
         prior_contract = task.get("design_contract")
         persisted_attempts = (
             int(prior_contract.get("rewrite_attempts", 0) or 0)
             if isinstance(prior_contract, dict)
             else 0
         )
-        attempts = max(
-            int(self.state.scratch.get("spec_design_contract_rewrite_attempts", 0) or 0),
-            persisted_attempts,
+        attempts_by_task = self.state.scratch.setdefault(
+            "spec_design_contract_rewrite_attempts_by_task",
+            {},
         )
+        if not isinstance(attempts_by_task, dict):
+            attempts_by_task = {}
+            self.state.scratch["spec_design_contract_rewrite_attempts_by_task"] = (
+                attempts_by_task
+            )
+        scratch_attempts = int(attempts_by_task.get(task_id, 0) or 0)
+        attempts = max(scratch_attempts, persisted_attempts)
+        next_attempt = attempts + 1
         task["status"] = "needs_design"
         task["design_contract"] = {
             "status": "rejected",
             "issues": issues,
-            "rewrite_attempts": attempts + 1,
+            "rewrite_attempts": next_attempt,
+            "rewrite_attempts_max": max_rewrites,
             "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
         task["decision_hint"] = (
@@ -697,23 +715,45 @@ class TodoLifecycleMixin:
             "design_rejected",
             spec,
             task,
-            extra={"issues": issues, "rewrite_attempt": attempts + 1},
+            extra={"issues": issues, "rewrite_attempt": next_attempt},
         )
         self.state.notes.append(
             f"Spec task {task.get('task_id')} failed design contract gate: "
             + "; ".join(issues)
         )
         if attempts < max_rewrites:
-            self.state.scratch["spec_design_contract_rewrite_attempts"] = attempts + 1
+            attempts_by_task[task_id] = next_attempt
             self.state.scratch["spec_rewrite_focus"] = self._spec_design_rewrite_focus(
                 task,
                 issues,
             )
             self.state.current = AgentStateName.SPEC_SYNTH
             return
-        spec["last_stop_reason"] = "spec_design_contract_incomplete"
+        task["status"] = "failed_design"
+        task["design_contract"]["status"] = "failed_design"
+        task["decision_hint"] = (
+            "design_contract_exhausted: this task could not be rewritten into a "
+            "bounded executable unit. Do not schedule it again unless a future "
+            "SPEC rewrite supplies a materially narrower target, invariant, "
+            "validator, and risk contract."
+        )
+        spec["last_design_contract_issues"] = {
+            "task_id": task.get("task_id"),
+            "issues": issues,
+            "exhausted": True,
+        }
         self._persist_run_spec(spec)
-        self.state.current = AgentStateName.FAILED
+        self._append_spec_progress_event(
+            "failed_design",
+            spec,
+            task,
+            extra={"issues": issues, "rewrite_attempt": next_attempt},
+        )
+        self.state.notes.append(
+            f"Spec task {task.get('task_id')} failed design contract after "
+            f"{next_attempt} rewrite attempts; continuing with other schedulable tasks."
+        )
+        self.state.current = AgentStateName.SCHEDULE
 
     def _spec_design_rewrite_focus(
         self, task: dict[str, Any], issues: list[str], failure_summary: str = ""
@@ -937,7 +977,11 @@ class TodoLifecycleMixin:
             if not isinstance(task, dict):
                 continue
             status = str(task.get("status", "open"))
-            if status not in {"open", "deferred", "in_progress"}:
+            task_id = str(task.get("task_id") or "<unknown>")
+            if status in {"failed_design", "deferred_design_invalid"}:
+                blocked.append(f"{task_id} status={status}")
+                continue
+            if status not in {"open", "deferred", "in_progress", "needs_design"}:
                 continue
             deps = task.get("depends_on")
             missing = [
@@ -945,7 +989,6 @@ class TodoLifecycleMixin:
                 for dep in deps
                 if str(dep) not in closed
             ] if isinstance(deps, list) else []
-            task_id = str(task.get("task_id") or "<unknown>")
             if missing:
                 blocked.append(f"{task_id} waiting on {', '.join(missing)}")
             else:
@@ -1051,7 +1094,8 @@ class TodoLifecycleMixin:
         failed = {
             str(task.get("task_id"))
             for task in tasks
-            if isinstance(task, dict) and str(task.get("status")) == "failed"
+            if isinstance(task, dict)
+            and str(task.get("status")) in {"failed", "failed_design"}
         }
         if not failed:
             return []
@@ -1141,14 +1185,15 @@ class TodoLifecycleMixin:
         failed = {
             str(task.get("task_id"))
             for task in tasks
-            if isinstance(task, dict) and str(task.get("status")) == "failed"
+            if isinstance(task, dict)
+            and str(task.get("status")) in {"failed", "failed_design"}
         }
         blocking: set[str] = set()
         for task in tasks:
             if not isinstance(task, dict):
                 continue
             status = str(task.get("status", "open"))
-            if status not in {"open", "deferred", "in_progress"}:
+            if status not in {"open", "deferred", "in_progress", "needs_design"}:
                 continue
             deps = task.get("depends_on")
             if not isinstance(deps, list):
@@ -1162,9 +1207,12 @@ class TodoLifecycleMixin:
     def _spec_blocked_event_extra(self, tasks: list[Any]) -> dict[str, Any]:
         failed_prerequisites = sorted(self._failed_spec_prerequisite_ids(tasks))
         blocked_tasks = self._spec_blocked_task_ids(tasks)
+        design_failed = self._design_failed_spec_task_ids(tasks)
         remaining = self._spec_remaining_loop_budget()
         stop_reason = "no_recovery_possible"
-        if (
+        if design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
+            stop_reason = "spec_design_contract_incomplete"
+        elif (
             failed_prerequisites
             and remaining
             and remaining > 0
@@ -1179,7 +1227,31 @@ class TodoLifecycleMixin:
             "runnable_tasks_at_exit": 0,
             "blocked_tasks": blocked_tasks,
             "failed_prerequisites": failed_prerequisites,
+            "design_failed_tasks": design_failed,
         }
+
+    @staticmethod
+    def _design_failed_spec_task_ids(tasks: list[Any]) -> list[str]:
+        return [
+            str(task.get("task_id") or "")
+            for task in tasks
+            if isinstance(task, dict)
+            and str(task.get("status")) in {"failed_design", "deferred_design_invalid"}
+            and str(task.get("task_id") or "")
+        ]
+
+    def _all_remaining_spec_tasks_design_failed(self, tasks: list[Any]) -> bool:
+        saw_remaining = False
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status == "closed":
+                continue
+            saw_remaining = True
+            if status not in {"failed_design", "deferred_design_invalid"}:
+                return False
+        return saw_remaining
 
     def _reopenable_failed_spec_prerequisite_ids(self, tasks: list[Any]) -> set[str]:
         workflow = self.config.get("workflow", {})
@@ -1233,7 +1305,7 @@ class TodoLifecycleMixin:
             if not isinstance(task, dict):
                 continue
             status = str(task.get("status", "open"))
-            if status not in {"open", "deferred", "in_progress"}:
+            if status not in {"open", "deferred", "in_progress", "needs_design"}:
                 continue
             deps = task.get("depends_on")
             missing = [

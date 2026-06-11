@@ -45,6 +45,10 @@ Do not write code. Convert the request, plan, read source, and semantic facts in
 one run-local execution spec that the deterministic spec scheduler can execute.
 For optimization or metric-search requests, treat tasks as an agentic tactic
 portfolio, not a waterfall implementation plan.
+Every implementation task must be a bounded, verifiable, independently
+executable unit: one intent, one primary target region, one edit boundary, one
+validator, and one rollback/shrink path. A broad idea is not a task until it is
+decomposed into such a unit.
 Output strict JSON with:
 {
   "version": 2,
@@ -110,15 +114,20 @@ Rules:
   idea label. It must name the target symbol/region, the invariants CODE must
   preserve, a small edit scope, a validator/failure condition, and why the
   task should preserve correctness.
+- If an idea cannot be expressed as one target region, one intent, one edit
+  boundary, and one validator, split it into smaller tasks or emit a context
+  task/read hint instead of sending it to CODE.
 - Set deliverables to the smallest writable file paths or globs the task may change.
 - Set read_hints to the source paths the task needs before CODE.
 - Set expected_signal to a concrete command, metric, diagnostic, or source-level
   observation the controller can use as feedback.
-- Do not emit abstract tasks such as "optimize algorithm", "reduce memory
-  accesses", "loop unrolling", or "rewrite hot path" unless the task also
-  provides concrete target_symbols/target_regions and preserved_invariants.
+- Do not emit abstract tasks such as "optimize the system", "reduce overhead",
+  "rewrite the hot path", or "refactor the pipeline" unless the task also
+  provides concrete target_symbols/target_regions, preserved_invariants, a
+  narrow edit_scope, and a validator.failure_condition.
 - If a task changes behavior ordering, data/control flow, state lifecycle,
-  scheduling, batching, parallelism, loop structure, or side-effect placement,
+  execution structure, scheduling, batching, parallelism, resource lifetime,
+  API/schema contracts, or side-effect placement,
   set risk_level to "structural" and tactic_stage to "structural_probe" for
   the first attempt. Provide probe_plan, invariant_evidence, and a
   rollback_or_shrink_plan. A structural task must start as a small reversible

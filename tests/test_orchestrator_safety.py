@@ -3314,6 +3314,109 @@ Background / non-constraints
             self.assertIn("missing target_symbols", task["design_contract"]["issues"][0])
             self.assertIn("Spec rewrite focus", agent._spec_rewrite_focus_context())
 
+    def test_design_contract_exhaustion_skips_task_and_schedules_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_design_contract_rewrite_attempts": 0,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "portable-spec",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Improve component broadly",
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        },
+                        {
+                            "task_id": "task-002",
+                            "title": "guard parser branch",
+                            "strategy_axis": "general_edit",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["existing parse outputs stay unchanged"],
+                            "edit_scope": "Change one guarded branch in parse_item.",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback branch is unchanged.",
+                            "fallback_plan": "Revert the guarded branch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        },
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            self.assertEqual(agent.state.scratch["active_todo"]["spec_task_id"], "task-002")
+
+    def test_all_design_contract_exhausted_tasks_stop_as_spec_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_design_contract_rewrite_attempts": 0,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "portable-spec",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Improve component broadly",
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
+            self.assertEqual(persisted["last_stop_reason"], "spec_design_contract_incomplete")
+
     def test_valid_spec_design_contract_becomes_active_todo_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
