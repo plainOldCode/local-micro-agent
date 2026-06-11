@@ -483,7 +483,14 @@ through line/anchor-bounded windows, then falls back to the legacy stripped-line
 whitespace match. A supplied `target_hash` is stored as diagnostic metadata only.
 Ambiguous, missing, and no-op targets are recorded as structured `patch_miss_*`
 fields in candidate history. Whitespace misses with a single stripped-line match
-are still retargeted automatically.
+are still retargeted automatically. Apply is all-or-repair for generated
+candidates: if a multi-change candidate applies one edit but another
+replacement, patch, out-of-plan, or empty change fails, the controller restores
+the baseline before repair or test so partial diffs are never evaluated as
+successful candidates. Patch failures preserve the actual touched and rejected
+files (`patch_touched_files`, `patch_rejected_files`) plus a short
+`patch_failure_detail`, so structured history points to the real failed file
+even when the model's declared `path` was stale or misleading.
 
 **Output format.** For models that struggle to JSON-escape multi-line code,
 `code_output_format="xml"` switches CODE to raw `<search>`/`<replace>` blocks.
