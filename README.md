@@ -229,6 +229,18 @@ deliverables. Grounding failures are design-contract issues such as
 `probe_contract_region_mismatch`, so an impossible SPEC is rewritten before it
 can spend CODE/TEST loops.
 
+`spec_two_call_synthesis=true` splits spec generation into an advisory idea
+pass and a final JSON pass. The `SPEC_IDEA` pass can use a deeper reasoning
+role (`spec_idea_model_role`, defaulting to `reasoner`) to inspect the request,
+source, grounding facts, and negative design memory, then writes
+`.local_micro_agent/spec_idea.md`. That brief is advisory only: it is never
+accepted as a run spec and hidden/raw reasoning traces are not fed forward.
+The final `SPEC_SYNTH` call uses the no-think JSON finalizer role
+(`spec_finalize_model_role`, usually `spec_synth`) to emit the v2
+`run_spec.json` under the deterministic grounding/design gates. If the idea
+pass returns a reasoning-only or empty response, the controller records the
+failure and continues with the finalizer using facts and failure memory only.
+
 Candidate failure memory is also scoped before it reaches CODE or SPEC. Records
 carry `failure_origin`, `issue_scope`, `repo_valid_after_restore`,
 `repair_task_eligible`, and `memory_use`. Only `current_repo` issues may become

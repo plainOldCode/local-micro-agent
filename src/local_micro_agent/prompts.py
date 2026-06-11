@@ -185,6 +185,19 @@ Rules:
   candidate lesson.
 - Keep task_graph to 3-8 tasks."""
 
+SPEC_IDEA_SYSTEM = """You are the SPEC_IDEA node in a local coding-agent FSM.
+Do not write code and do not emit run_spec JSON.
+Think through the request, plan, source, semantic facts, grounding facts, and
+recent failures. Output concise Markdown only:
+- feasible writable targets and why they are writable/resolvable
+- read-only or imported symbols that are context only and must not be changed
+- 3-6 candidate task ideas, each with one target region, risk, smallest probe,
+  validator signal, and reason it avoids recent failed shapes
+- designs to reject before SPEC_FINALIZE
+
+This is advisory input for a no-think JSON finalizer. Always emit final
+Markdown content. Do not end after hidden reasoning."""
+
 ACCEPTANCE_SYNTH_SYSTEM = """You are the ACCEPT_SYNTH node in a local coding-agent FSM.
 Write task-local acceptance tests before implementation.
 Output strict JSON:
@@ -348,6 +361,32 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Source files:\n{source_blocks}"
                 f"{external_block}"
+                f"{focus_block}"
+            ),
+        },
+    ]
+
+
+def spec_idea_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    semantic_analysis = state.scratch.get("semantic_analysis")
+    semantic_block = (
+        f"\n\nSemantic analysis:\n{semantic_analysis}"
+        if isinstance(semantic_analysis, str) and semantic_analysis.strip()
+        else ""
+    )
+    focus_block = f"\n\nSpec focus and grounding facts:\n{focus}" if focus.strip() else ""
+    return [
+        {"role": "system", "content": SPEC_IDEA_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}"
+                f"{semantic_block}"
                 f"{focus_block}"
             ),
         },

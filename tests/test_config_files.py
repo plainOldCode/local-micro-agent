@@ -80,6 +80,9 @@ class ConfigFileTests(unittest.TestCase):
         self.assertTrue(workflow["spec_reopen_failed_portfolio_tasks"])
         self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 50)
         self.assertTrue(workflow["spec_grounding_gate"])
+        self.assertTrue(workflow["spec_two_call_synthesis"])
+        self.assertEqual(workflow["spec_idea_model_role"], "reasoner")
+        self.assertEqual(workflow["spec_finalize_model_role"], "spec_synth")
         self.assertEqual(
             workflow["candidate_history_path"],
             ".local_micro_agent/candidates.jsonl",

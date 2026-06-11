@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..decisions import CodeCandidate
-from ..prompts import acceptance_synth_prompt, spec_prompt
+from ..prompts import acceptance_synth_prompt, spec_idea_prompt, spec_prompt
 from ..state import AgentStateName, CodeChange, FileSnapshot, TestResult
 from ..validators import parse_json_object
 
@@ -68,8 +68,21 @@ class TodoLifecycleMixin:
                 )
                 if part.strip()
             )
-            role_default = "reasoner" if self._spec_mode_enabled() and force else "planner"
-            role = str(workflow.get("run_spec_model_role", role_default))
+            idea_context = await self._maybe_build_spec_idea_context(
+                focus,
+                force=force,
+                targeted_rewrite=targeted_rewrite,
+            )
+            if idea_context:
+                focus = "\n\n".join(part for part in (focus, idea_context) if part.strip())
+            two_call = self._spec_two_call_synthesis_enabled(force)
+            role_default = (
+                "spec_synth"
+                if two_call and self._spec_mode_enabled() and force
+                else ("reasoner" if self._spec_mode_enabled() and force else "planner")
+            )
+            role_key = "spec_finalize_model_role" if two_call else "run_spec_model_role"
+            role = str(workflow.get(role_key) or workflow.get("run_spec_model_role", role_default))
             call_site = "spec_synth" if self._spec_mode_enabled() and force else "run_spec"
             prompt = spec_prompt(self.state, focus=focus)
             fallback_role = str(
@@ -211,6 +224,62 @@ class TodoLifecycleMixin:
             self._spec_tactic_portfolio_enabled()
             and workflow.get("metric_regex")
             and workflow.get("spec_metric_requires_improvement", True) is not False
+        )
+
+    def _spec_two_call_synthesis_enabled(self, force: bool) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(
+            force
+            and self._spec_mode_enabled()
+            and workflow.get("spec_two_call_synthesis")
+        )
+
+    def _spec_idea_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_idea_path",
+            ".local_micro_agent/spec_idea.md",
+        )
+
+    async def _maybe_build_spec_idea_context(
+        self,
+        focus: str,
+        *,
+        force: bool,
+        targeted_rewrite: bool,
+    ) -> str:
+        if not self._spec_two_call_synthesis_enabled(force):
+            return ""
+        workflow = self.config.get("workflow", {})
+        role = str(workflow.get("spec_idea_model_role") or "reasoner")
+        call_site = "spec_idea_rewrite" if targeted_rewrite else "spec_idea"
+        try:
+            output = await self._model_chat(
+                role,
+                spec_idea_prompt(self.state, focus=focus),
+                call_site=call_site,
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"Spec idea model call failed; continuing with finalizer only: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self.state.scratch.pop("spec_idea_brief", None)
+            return ""
+        brief = output.strip()
+        if not brief:
+            self.state.notes.append("Spec idea model returned empty brief; finalizer will use facts only")
+            self.state.scratch.pop("spec_idea_brief", None)
+            return ""
+        path = self._spec_idea_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(brief.rstrip() + "\n")
+        self.state.scratch["spec_idea_brief"] = brief
+        self.state.notes.append(f"Persisted spec idea brief: {path}")
+        return (
+            "Spec idea brief from a non-authoritative thinking/analysis pass "
+            "follows. Use it only as advisory design input. The final JSON spec "
+            "must still obey deterministic grounding facts and workflow constraints.\n"
+            + brief
         )
 
     def _spec_grounding_gate_enabled(self) -> bool:

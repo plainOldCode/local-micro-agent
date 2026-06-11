@@ -25,6 +25,7 @@ from local_micro_agent.prompts import (
     read_prompt,
     reflect_prompt,
     semantic_analysis_prompt,
+    spec_idea_prompt,
     spec_prompt,
 )
 from local_micro_agent.state import (
@@ -210,6 +211,18 @@ class _RoleModelManager:
 
     def get(self, role):
         return _RoleModel(self.outputs, self.seen, role)
+
+
+class _SpecIdeaReasoningOnlyManager:
+    def __init__(self, finalizer_output: str):
+        self.finalizer_output = finalizer_output
+        self.seen: dict[str, int] = {}
+
+    def get(self, role):
+        self.seen[role] = self.seen.get(role, 0) + 1
+        if role == "reasoner":
+            return _ReasoningOnlyModel()
+        return _StaticModel(self.finalizer_output)
 
 
 def run_agent(repo: Path, workflow: dict) -> AgentState:
@@ -5675,6 +5688,150 @@ Background / non-constraints
             notes = "\n".join(agent.state.notes)
             self.assertIn("Run spec JSON parse failed", notes)
             self.assertIn("Run spec model fallback succeeded: coder", notes)
+
+    def test_spec_idea_prompt_is_markdown_advisory_not_json_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("def parse_item(value):\n    return value\n")
+            state = AgentState(repo_root=repo, user_request="optimize target")
+            state.plan_markdown = "Read target.py and create a grounded spec."
+            state.file_context = [FileSnapshot(path="target.py", content=target.read_text())]
+
+            messages = spec_idea_prompt(
+                state,
+                focus="allowed_target_regions: target.py::parse_item",
+            )
+
+            self.assertIn("Do not write code and do not emit run_spec JSON", messages[0]["content"])
+            self.assertIn("allowed_target_regions", messages[1]["content"])
+            self.assertIn("target.py::parse_item", messages[1]["content"])
+
+    def test_two_call_spec_synthesis_passes_idea_brief_to_finalizer(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                final_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "two-call",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "guard parser branch",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "acceptance": {"kind": "metric"},
+                            }
+                        ],
+                    }
+                )
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": "Idea brief: use target.py::parse_item only.",
+                        "spec_synth": final_spec,
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_idea_model_role": "reasoner",
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(spec["spec_id"], "two-call")
+                self.assertTrue((repo / ".local_micro_agent" / "spec_idea.md").exists())
+                finalizer_prompt = manager.seen["spec_synth"][0][-1]["content"]
+                self.assertIn("Spec idea brief", finalizer_prompt)
+                self.assertIn("target.py::parse_item", finalizer_prompt)
+
+        asyncio.run(run_case())
+
+    def test_two_call_spec_synthesis_continues_after_reasoning_only_idea(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                final_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "facts-only",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "guard parser branch",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "acceptance": {"kind": "metric"},
+                            }
+                        ],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_idea_model_role": "reasoner",
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = _SpecIdeaReasoningOnlyManager(final_spec)
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(spec["spec_id"], "facts-only")
+                self.assertFalse((repo / ".local_micro_agent" / "spec_idea.md").exists())
+                self.assertIn("Spec idea model call failed", "\n".join(agent.state.notes))
+
+        asyncio.run(run_case())
 
     def test_structural_tactic_creates_structural_probe_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
