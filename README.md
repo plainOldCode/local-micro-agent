@@ -150,6 +150,15 @@ plan, read source, and semantic facts, with a fallback model role
 With `spec_resume=true` (default) an existing v2 graph is resumed instead, so
 interrupted runs skip already-closed tasks.
 
+SPEC-side model calls are bounded separately from CODE/TEST loops by
+`spec_synth_call_budget` (enabled by the `spec` preset). The budget counts
+SPEC_IDEA, finalizer, and fallback finalizer calls. When it is exhausted before
+a v2 graph can be persisted, the run exits with
+`stop_reason=spec_budget_exhausted`; terminal artifacts include
+`spec_synth_call_count`, `spec_synth_call_budget`, and whether zero CODE
+attempts were reached. When profiling is enabled, reports also summarize
+SPEC-side model-call count and elapsed time from `profile_events.jsonl`.
+
 For metric optimization runs, enable `spec_tactic_portfolio=true` with
 `spec_force_metric_acceptance=true`. The controller then treats generated tasks
 as independent measurable hypotheses, strips waterfall dependencies from metric
@@ -277,6 +286,11 @@ memory. Failed quality checks are written to
 no valid v2 run spec can be persisted, spec mode still writes terminal artifacts
 with `stop_reason=spec_quality_gate_failed` and the final quality report so
 loop-0 spec generation failures are analyzable.
+With `spec_gate_soft_fallback=true`, a quality/design gate that exhausts its
+SPEC-side rewrite budget before any CODE attempt may persist the last candidate
+graph as an advisory soft fallback for one CODE attempt. Downstream active-todo,
+probe-diff, and test gates still run; the fallback only prevents a whole run
+from ending before CODE due to over-strict SPEC preflight.
 
 For local spec tasks, `spec_local_task_one_change=true` keeps CODE patch shape
 small after the quality gate has selected one runnable target. A `local_edit`
@@ -299,6 +313,12 @@ and a `pending_spec_rewrite_reason`. The terminal report also writes
 `.local_micro_agent/terminal_state.json` with candidate/status distributions,
 spec-progress distributions, and the last task snapshots so final analysis is
 not confused by a late spec rewrite.
+
+Active-todo gating order is fixed for both single-candidate and candidate-queue
+paths: metadata contract first, then one explicit change-scope check before
+apply, then apply/probe/test gates. Scope rejection is intentionally not nested
+inside the metadata contract gate so rejection reason distribution is stable
+across paths.
 
 Spec-scheduled active todos can be made hard even before the first metric
 improvement with `spec_hard_active_todo_contract=true`. In that mode, the

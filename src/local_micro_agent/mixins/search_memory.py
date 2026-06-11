@@ -448,9 +448,6 @@ class AdaptiveSearchMixin:
                     f"{', '.join(sorted(candidate_families))} instead of active todo "
                     f"{todo_id} family_key {required_family}",
                 )
-        scope_rejection = self._active_todo_change_scope_rejection(candidate.changes)
-        if scope_rejection is not None:
-            return scope_rejection
         return None
 
     def _active_todo_change_scope_rejection(

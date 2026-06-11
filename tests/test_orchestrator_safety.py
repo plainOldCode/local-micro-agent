@@ -3357,6 +3357,60 @@ Background / non-constraints
             self.assertIn("missing target_symbols", task["design_contract"]["issues"][0])
             self.assertIn("Spec rewrite focus", agent._spec_rewrite_focus_context())
 
+    def test_spec_design_soft_fallback_schedules_one_attempt_before_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "active_todo_path": ".local_micro_agent/active_todo.json",
+                        "spec_design_contract_gate": True,
+                        "spec_design_contract_rewrite_attempts": 0,
+                        "spec_gate_soft_fallback": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=0),
+            )
+            agent.state.scratch["run_spec"] = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "soft-design",
+                    "invariants": ["public behavior stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Improve component broadly",
+                            "deliverables": ["target.py"],
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            agent._schedule_spec_task()
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+            spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            task = spec["task_graph"][0]
+            self.assertEqual(task["status"], "open")
+            self.assertTrue(task["design_contract_advisory_once"])
+
+            agent.state.scratch["run_spec"] = spec
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            scheduled = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+            self.assertEqual(scheduled["task_graph"][0]["status"], "in_progress")
+            self.assertEqual(
+                scheduled["task_graph"][0]["design_contract"]["status"],
+                "soft_fallback_advisory",
+            )
+
     def test_design_contract_exhaustion_skips_task_and_schedules_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -4053,6 +4107,46 @@ Background / non-constraints
             self.assertIn("stop_reason: `spec_quality_gate_failed`", report)
             self.assertIn("## Quality Gate", report)
             self.assertIn("`vague_edit_scope`", report)
+
+    def test_spec_terminal_state_records_spec_call_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_report_path": ".local_micro_agent/spec_report.md",
+                        "spec_synth_call_budget": 1,
+                    },
+                },
+                AgentState(
+                    repo_root=repo,
+                    user_request="test",
+                    current=AgentStateName.FAILED,
+                    loop_count=0,
+                    max_loops=100,
+                ),
+            )
+            agent.state.scratch["spec_synth_call_count"] = 1
+            agent.state.scratch["spec_synth_budget_exhausted"] = True
+
+            agent._persist_spec_report()
+
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            report = (artifact_dir / "spec_report.md").read_text()
+            self.assertEqual(terminal["stop_reason"], "spec_budget_exhausted")
+            self.assertTrue(terminal["zero_code_attempt"])
+            self.assertEqual(terminal["spec_synth_call_count"], 1)
+            self.assertEqual(terminal["spec_synth_call_budget"], 1)
+            self.assertTrue(terminal["spec_synth_budget_exhausted"])
+            self.assertIn("stop_reason: `spec_budget_exhausted`", report)
+            self.assertIn("spec_synth_call_count: 1", report)
 
     def test_valid_spec_design_contract_becomes_active_todo_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4962,6 +5056,59 @@ Background / non-constraints
             self.assertIsNotNone(rejection)
             self.assertEqual(rejection[0], "rejected_todo_scope_drift")
             self.assertIn("Parser.parse_item", rejection[1])
+
+    def test_active_todo_contract_does_not_duplicate_scope_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "class Parser:\n"
+                "    def parse_item(self, value):\n"
+                "        return value.strip()\n\n"
+                "    def build(self, value):\n"
+                "        return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_enforce_active_contract": True,
+                        "todo_enforce_active_change_scope": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["Parser.parse_item"],
+                "target_regions": ["target.py::Parser.parse_item"],
+                "allowed_files": ["target.py"],
+                "source": "spec_scheduler",
+            }
+            change = CodeChange(
+                "target.py",
+                "speed up unrelated build helper",
+                target="    def build(self, value):\n        return value\n",
+                replacement="    def build(self, value):\n        return value + 1\n",
+            )
+            candidate = CodeCandidate(
+                "queue-bad-scope",
+                [change],
+                "Try a local parser edit in Parser.parse_item",
+                strategy_axis="general_edit",
+            )
+
+            self.assertIsNone(agent._active_todo_contract_rejection(candidate))
+            scope_rejection = agent._active_todo_change_scope_rejection(candidate.changes)
+
+            self.assertIsNotNone(scope_rejection)
+            self.assertEqual(scope_rejection[0], "rejected_todo_scope_drift")
 
     def test_active_todo_change_scope_allows_target_symbol_span(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6428,6 +6575,166 @@ Background / non-constraints
             self.assertIn("Good:", issue["rewrite_hint"])
             self.assertIn("target.py::build", issue["rewrite_hint"])
             self.assertIn("name the one category", issue["rewrite_hint"])
+
+    def test_spec_quality_soft_fallback_persists_last_spec_before_code(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def build(value):\n    return value\n")
+                bad_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "soft-quality",
+                        "invariants": ["build behavior stays unchanged"],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "pack build",
+                                "strategy_axis": "general_edit",
+                                "expected_signal": "pytest stays green",
+                                "deliverables": ["target.py"],
+                                "read_hints": ["target.py"],
+                                "target_symbols": ["build"],
+                                "target_regions": ["target.py::build"],
+                                "preserved_invariants": ["return value remains unchanged"],
+                                "edit_scope": "Refactor build.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Refactor build",
+                                    "explanation": "single target local edit",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The old behavior remains.",
+                                "fallback_plan": "Revert the change.",
+                                "acceptance": {
+                                    "kind": "command",
+                                    "commands": ["python -m pytest"],
+                                },
+                            }
+                        ],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "run_spec_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_gate_soft_fallback": True,
+                            "writable_files": ["target.py"],
+                            "test_commands": ["python -m pytest"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = _RoleModelManager({"spec_synth": bad_spec})
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertEqual(spec["quality_gate_advisory"]["status"], "soft_fallback")
+                self.assertIn("quality_soft_fallback", progress)
+
+        asyncio.run(run_case())
+
+    def test_spec_synth_call_budget_bounds_quality_rewrites(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def build(value):\n    return value\n")
+                bad_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "budgeted-quality",
+                        "invariants": ["build behavior stays unchanged"],
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "pack build",
+                                "strategy_axis": "general_edit",
+                                "expected_signal": "pytest stays green",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["build"],
+                                "target_regions": ["target.py::build"],
+                                "preserved_invariants": ["return value remains unchanged"],
+                                "edit_scope": "Refactor build.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Refactor build",
+                                    "explanation": "single target local edit",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "The old behavior remains.",
+                                "fallback_plan": "Revert the change.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            }
+                        ],
+                    }
+                )
+                manager = _RoleModelManager({"reasoner": "unused", "spec_synth": bad_spec})
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "spec_two_call_synthesis": True,
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 2,
+                            "spec_synth_call_budget": 1,
+                            "writable_files": ["target.py"],
+                            "test_commands": ["python -m pytest"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                self.assertEqual(agent.state.scratch["spec_synth_call_count"], 1)
+                self.assertTrue(agent.state.scratch["spec_synth_budget_exhausted"])
+                self.assertEqual(len(manager.seen.get("spec_synth", [])), 1)
+                self.assertNotIn("reasoner", manager.seen)
+                self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
+
+        asyncio.run(run_case())
 
     def test_spec_quality_gate_accepts_valid_structural_probe_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

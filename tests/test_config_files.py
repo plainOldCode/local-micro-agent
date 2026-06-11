@@ -99,6 +99,8 @@ class ConfigFileTests(unittest.TestCase):
         self.assertTrue(workflow["spec_grounding_gate"])
         self.assertTrue(workflow["spec_quality_gate"])
         self.assertEqual(workflow["spec_quality_rewrite_attempts"], 2)
+        self.assertEqual(workflow["spec_synth_call_budget"], 24)
+        self.assertTrue(workflow["spec_gate_soft_fallback"])
         self.assertTrue(workflow["spec_two_call_synthesis"])
         self.assertEqual(workflow["spec_idea_model_role"], "reasoner")
         self.assertEqual(workflow["spec_finalize_model_role"], "spec_synth")

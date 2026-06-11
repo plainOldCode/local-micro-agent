@@ -704,9 +704,37 @@ class MicroAgent(
         best_applied = 0
 
         for candidate in candidates:
+            # Candidate-queue gates are intentionally ordered as:
+            # active-todo metadata contract, active-todo change scope, duplicate
+            # todo variants, axis/family/novelty, apply, probe diff, tests.
+            # Single-candidate CODE uses the same change-scope helper before
+            # apply; keep scope enforcement in this explicit step rather than
+            # nesting it inside the metadata contract gate.
             todo_rejection = self._active_todo_contract_rejection(candidate)
             if todo_rejection is not None:
                 status, note = todo_rejection
+                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                extra = self._candidate_rejection_extra(candidate, status, note)
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    extra=extra,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
+            scope_rejection = self._active_todo_change_scope_rejection(candidate.changes)
+            if scope_rejection is not None:
+                status, note = scope_rejection
                 self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
                 extra = self._candidate_rejection_extra(candidate, status, note)
                 self._append_candidate_history(

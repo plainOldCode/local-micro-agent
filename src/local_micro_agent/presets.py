@@ -101,6 +101,8 @@ _SPEC: dict[str, Any] = {
     "spec_grounding_gate": True,
     "spec_quality_gate": True,
     "spec_quality_rewrite_attempts": 2,
+    "spec_synth_call_budget": 24,
+    "spec_gate_soft_fallback": True,
     "spec_structural_risk_gate": True,
     "spec_two_call_synthesis": True,
     "spec_probe_diff_contract_required": True,

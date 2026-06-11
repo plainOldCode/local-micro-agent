@@ -98,6 +98,8 @@ class TodoLifecycleMixin:
                     part for part in (focus, quality_feedback) if part.strip()
                 )
                 prompt = spec_prompt(self.state, focus=prompt_focus)
+                if not self._consume_spec_synth_call_budget(call_site):
+                    return
                 spec = await self._request_run_spec_from_model(
                     role=role,
                     prompt=prompt,
@@ -175,6 +177,10 @@ class TodoLifecycleMixin:
                     },
                 )
                 if quality_attempt >= quality_attempts:
+                    if self._maybe_persist_soft_fallback_spec(spec, quality_report):
+                        self.state.scratch.pop("spec_rewrite_focus", None)
+                        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        return
                     self.state.scratch.pop("spec_rewrite_focus", None)
                     self.state.scratch.pop("spec_rewrite_target_task_id", None)
                     self.state.notes.append(
@@ -187,6 +193,38 @@ class TodoLifecycleMixin:
             if spec:
                 self.state.scratch["run_spec"] = spec
                 self.state.notes.append(f"Loaded run spec: {path}")
+
+    def _maybe_persist_soft_fallback_spec(
+        self,
+        spec: dict[str, Any],
+        quality_report: dict[str, Any],
+    ) -> bool:
+        if not self._spec_gate_soft_fallback_enabled():
+            return False
+        if self.state.loop_count > 0:
+            return False
+        if not isinstance(spec.get("task_graph"), list) or not spec.get("task_graph"):
+            return False
+        spec["quality_gate_advisory"] = {
+            "status": "soft_fallback",
+            "reason": "quality_gate_exhausted_before_code",
+            "report": quality_report,
+        }
+        spec["last_quality_gate_issues"] = quality_report.get("issues", [])
+        self._persist_run_spec(spec)
+        self._append_spec_progress_event(
+            "quality_soft_fallback",
+            spec,
+            extra={
+                "reason": "quality_gate_exhausted_before_code",
+                "quality_issue_codes": quality_report.get("issue_codes", []),
+            },
+        )
+        self.state.notes.append(
+            "Run spec quality gate exhausted before CODE; persisted last spec as "
+            "soft fallback advisory"
+        )
+        return True
 
     def _run_spec_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -237,6 +275,8 @@ class TodoLifecycleMixin:
             )
             if not fallback_role or fallback_role == role:
                 return {}
+            if not self._consume_spec_synth_call_budget(f"{call_site}_fallback"):
+                return {}
             try:
                 output = await self._model_chat(
                     fallback_role,
@@ -260,6 +300,8 @@ class TodoLifecycleMixin:
                 f"Run spec JSON parse failed: {type(exc).__name__}: {exc}"
             )
             if not fallback_role or fallback_role == used_role:
+                return {}
+            if not self._consume_spec_synth_call_budget(f"{call_site}_fallback"):
                 return {}
             try:
                 output = await self._model_chat(
@@ -309,6 +351,17 @@ class TodoLifecycleMixin:
         workflow = self.config.get("workflow", {})
         role = str(workflow.get("spec_idea_model_role") or "reasoner")
         call_site = "spec_idea_rewrite" if targeted_rewrite else "spec_idea"
+        remaining = self._spec_synth_call_budget_remaining()
+        if remaining == 0:
+            self.state.notes.append("Spec idea skipped: spec synthesis call budget exhausted")
+            return ""
+        if remaining == 1:
+            self.state.notes.append(
+                "Spec idea skipped: preserving final spec synthesis call budget"
+            )
+            return ""
+        if not self._consume_spec_synth_call_budget(call_site):
+            return ""
         try:
             output = await self._model_chat(
                 role,
@@ -582,6 +635,43 @@ class TodoLifecycleMixin:
             return 0
         workflow = self.config.get("workflow", {})
         return max(0, int(workflow.get("spec_quality_rewrite_attempts", 1) or 0))
+
+    def _spec_synth_call_budget(self) -> int | None:
+        raw = self.config.get("workflow", {}).get("spec_synth_call_budget")
+        if raw in (None, "", False):
+            return None
+        budget = int(raw)
+        return budget if budget >= 0 else None
+
+    def _spec_synth_call_count(self) -> int:
+        return int(self.state.scratch.get("spec_synth_call_count", 0) or 0)
+
+    def _spec_synth_call_budget_remaining(self) -> int | None:
+        budget = self._spec_synth_call_budget()
+        if budget is None:
+            return None
+        return max(0, budget - self._spec_synth_call_count())
+
+    def _consume_spec_synth_call_budget(self, call_site: str) -> bool:
+        budget = self._spec_synth_call_budget()
+        used = self._spec_synth_call_count()
+        if budget is not None and used >= budget:
+            self.state.scratch["spec_synth_budget_exhausted"] = True
+            self.state.scratch["spec_synth_budget_exhausted_at"] = {
+                "call_site": call_site,
+                "used": used,
+                "budget": budget,
+            }
+            self.state.notes.append(
+                f"Spec synthesis call budget exhausted before {call_site}: "
+                f"{used}/{budget}"
+            )
+            return False
+        self.state.scratch["spec_synth_call_count"] = used + 1
+        return True
+
+    def _spec_gate_soft_fallback_enabled(self) -> bool:
+        return bool(self.config.get("workflow", {}).get("spec_gate_soft_fallback"))
 
     def _spec_quality_report_path(self) -> Path:
         return self._workflow_artifact_path(
@@ -2143,6 +2233,38 @@ class TodoLifecycleMixin:
             self.state.scratch["spec_rewrite_target_task_id"] = task_id
             self.state.current = AgentStateName.SPEC_SYNTH
             return
+        if self._spec_gate_soft_fallback_enabled() and self.state.loop_count == 0:
+            task["status"] = "open"
+            task["design_contract"]["status"] = "soft_fallback_advisory"
+            task["design_contract"]["soft_fallback_reason"] = (
+                "design_contract_exhausted_before_code"
+            )
+            task["design_contract_advisory_once"] = True
+            task["decision_hint"] = (
+                "design_contract_soft_fallback: this task exhausted design rewrites "
+                "before any CODE attempt. Execute once under advisory warning; all "
+                "CODE/apply/test gates still apply."
+            )
+            spec["last_design_contract_issues"] = {
+                "task_id": task.get("task_id"),
+                "issues": issues,
+                "soft_fallback": True,
+            }
+            self._persist_run_spec(spec)
+            self._append_spec_progress_event(
+                "design_soft_fallback",
+                spec,
+                task,
+                extra={"issues": issues, "rewrite_attempt": next_attempt},
+            )
+            self.state.notes.append(
+                f"Spec task {task.get('task_id')} exhausted design rewrites before "
+                "CODE; scheduling one advisory soft-fallback attempt."
+            )
+            self.state.scratch.pop("spec_rewrite_focus", None)
+            self.state.scratch.pop("spec_rewrite_target_task_id", None)
+            self.state.current = AgentStateName.SCHEDULE
+            return
         task["status"] = "failed_design"
         task["design_contract"]["status"] = "failed_design"
         task["decision_hint"] = (
@@ -2416,8 +2538,25 @@ class TodoLifecycleMixin:
         task = self._select_spec_task(tasks, open_candidates)
         design_issues = self._spec_task_design_contract_issues(spec, task)
         if design_issues:
-            self._reject_spec_task_for_design_contract(spec, task, design_issues)
-            return
+            if (
+                task.pop("design_contract_advisory_once", False)
+                and self._spec_gate_soft_fallback_enabled()
+                and self.state.loop_count == 0
+            ):
+                task["design_contract"] = {
+                    "status": "soft_fallback_advisory",
+                    "issues": design_issues,
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                self._append_spec_progress_event(
+                    "design_soft_fallback",
+                    spec,
+                    task,
+                    extra={"issues": design_issues},
+                )
+            else:
+                self._reject_spec_task_for_design_contract(spec, task, design_issues)
+                return
         task["status"] = "in_progress"
         task["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         spec["active_task_id"] = task.get("task_id")
@@ -2432,6 +2571,9 @@ class TodoLifecycleMixin:
         self.state.current = AgentStateName.TASK_READ
 
     def _retry_or_fail_without_spec(self) -> AgentStateName:
+        if self.state.scratch.get("spec_synth_budget_exhausted"):
+            self.state.notes.append("Spec mode has no v2 run_spec and SPEC call budget is exhausted")
+            return AgentStateName.FAILED
         if self._spec_mode_enabled() and not self.state.scratch.get("spec_synth_attempted"):
             self.state.scratch["spec_synth_attempted"] = True
             self.state.notes.append("Spec mode has no v2 run_spec; attempting SPEC_SYNTH")
@@ -3626,20 +3768,36 @@ class TodoLifecycleMixin:
             spec = self._load_run_spec(self._run_spec_path())
         if not isinstance(spec, dict) or not spec:
             quality_report = self.state.scratch.get("spec_quality_report")
+            budget_exhausted = bool(self.state.scratch.get("spec_synth_budget_exhausted"))
             if (
                 self.state.current != AgentStateName.FAILED
-                or not isinstance(quality_report, dict)
-                or not self._spec_quality_report_failed(quality_report)
+                or (
+                    not budget_exhausted
+                    and (
+                        not isinstance(quality_report, dict)
+                        or not self._spec_quality_report_failed(quality_report)
+                    )
+                )
             ):
                 return
             spec = {
                 "version": 2,
-                "spec_id": quality_report.get("spec_id") or "",
+                "spec_id": (
+                    quality_report.get("spec_id")
+                    if isinstance(quality_report, dict)
+                    else ""
+                )
+                or "",
                 "objective": "Run spec generation failed before persistence.",
                 "task_graph": [],
-                "last_stop_reason": "spec_quality_gate_failed",
-                "spec_quality_report": quality_report,
+                "last_stop_reason": (
+                    "spec_budget_exhausted"
+                    if budget_exhausted
+                    else "spec_quality_gate_failed"
+                ),
             }
+            if isinstance(quality_report, dict):
+                spec["spec_quality_report"] = quality_report
         progress = self._run_spec_progress(spec)
         self._persist_spec_terminal_state(spec, progress)
         report_path = self._workflow_artifact_path(
@@ -3659,6 +3817,7 @@ class TodoLifecycleMixin:
             f"- fsm_step_count: {self.state.fsm_step_count}",
             f"- max_code_test_loops: {self.state.max_loops}",
             f"- stop_reason: `{spec.get('last_stop_reason', '')}`",
+            f"- zero_code_attempt: `{str(self.state.loop_count == 0).lower()}`",
             "",
             "## Tasks",
             "",
@@ -3744,6 +3903,20 @@ class TodoLifecycleMixin:
                     + ": "
                     + str(issue.get("detail") or "")
                 )
+        spec_model_profile = self._spec_synth_profile_summary()
+        lines.extend(
+            [
+                "",
+                "## SPEC Calls",
+                "",
+                f"- spec_synth_call_count: {self._spec_synth_call_count()}",
+                f"- spec_synth_call_budget: {self._spec_synth_call_budget()}",
+                f"- spec_model_call_count: {spec_model_profile.get('model_call_count', 0)}",
+                f"- spec_model_elapsed_ms: {spec_model_profile.get('elapsed_ms', 0)}",
+                "- spec_synth_budget_exhausted: "
+                + str(bool(self.state.scratch.get("spec_synth_budget_exhausted"))).lower(),
+            ]
+        )
         report_path.write_text("\n".join(lines).rstrip() + "\n")
         self.state.notes.append(f"Persisted spec report: {report_path}")
 
@@ -3762,6 +3935,7 @@ class TodoLifecycleMixin:
                 "spec_progress_path", ".local_micro_agent/spec_progress.jsonl"
             )
         )
+        spec_model_profile = self._spec_synth_profile_summary()
         candidate_events = self._read_spec_jsonl(
             self._workflow_artifact_path(
                 "candidate_history_path", ".local_micro_agent/candidates.jsonl"
@@ -3775,6 +3949,13 @@ class TodoLifecycleMixin:
             "code_test_loop_count": self.state.loop_count,
             "fsm_step_count": self.state.fsm_step_count,
             "max_code_test_loops": self.state.max_loops,
+            "zero_code_attempt": self.state.loop_count == 0 and not candidate_events,
+            "spec_synth_call_count": self._spec_synth_call_count(),
+            "spec_synth_call_budget": self._spec_synth_call_budget(),
+            "spec_synth_budget_exhausted": bool(
+                self.state.scratch.get("spec_synth_budget_exhausted")
+            ),
+            "spec_synth_model_profile": spec_model_profile,
             "spec_id": spec.get("spec_id"),
             "active_task_id": spec.get("active_task_id"),
             "progress": progress,
@@ -3805,6 +3986,37 @@ class TodoLifecycleMixin:
         ):
             terminal["spec_quality_report"] = quality_report
         path.write_text(json.dumps(terminal, ensure_ascii=False, indent=2) + "\n")
+
+    def _spec_synth_profile_summary(self) -> dict[str, Any]:
+        records = self._read_spec_jsonl(
+            self._workflow_artifact_path(
+                "profile_events_path", ".local_micro_agent/profile_events.jsonl"
+            )
+        )
+        call_sites = {
+            "run_spec",
+            "run_spec_fallback",
+            "spec_idea",
+            "spec_idea_rewrite",
+            "spec_synth",
+            "spec_synth_fallback",
+        }
+        calls = [
+            record
+            for record in records
+            if record.get("event_type") == "model_call"
+            and str(record.get("call_site") or "") in call_sites
+        ]
+        elapsed_ms = 0.0
+        for record in calls:
+            value = record.get("elapsed_ms")
+            if isinstance(value, (int, float)):
+                elapsed_ms += float(value)
+        return {
+            "model_call_count": len(calls),
+            "elapsed_ms": round(elapsed_ms, 3),
+            "call_site_counts": self._count_jsonl_values(calls, "call_site"),
+        }
 
     @staticmethod
     def _read_spec_jsonl(path: Path) -> list[dict[str, Any]]:
