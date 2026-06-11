@@ -4604,6 +4604,377 @@ Background / non-constraints
             self.assertEqual(rejection[0], "rejected_todo_scope_drift")
             self.assertIn("structural_probe change is too broad", rejection[1])
 
+    def test_probe_diff_contract_allows_expected_symbol_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = (
+                "def parse_item(value):\n"
+                "    return value.strip()\n\n"
+                "def other(value):\n"
+                "    return value\n"
+            )
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 2,
+                    "max_changed_functions": 1,
+                },
+            }
+            snapshot = {"target.py": before}
+            target.write_text(
+                before.replace(
+                    "return value.strip()",
+                    "return value.strip() if value else ''",
+                )
+            )
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"target.py"},
+            )
+
+            self.assertIsNone(rejection)
+
+    def test_probe_diff_contract_rejects_symbol_outside_allowed_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = (
+                "def parse_item(value):\n"
+                "    return value.strip()\n\n"
+                "def other(value):\n"
+                "    return value\n"
+            )
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "max_files_changed": 1,
+                    "max_hunks": 2,
+                    "max_changed_lines": 5,
+                    "max_changed_functions": 1,
+                },
+            }
+            snapshot = {"target.py": before}
+            target.write_text(before.replace("return value\n", "return value + 1\n"))
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"target.py"},
+            )
+
+            self.assertIsNotNone(rejection)
+            self.assertEqual(rejection[0], "rejected_probe_contract_mismatch")
+            self.assertIn("outside allowed_regions", rejection[1])
+            self.assertEqual(rejection[2]["issue_scope"], "candidate_delta")
+            self.assertFalse(rejection[2]["repair_task_eligible"])
+
+    def test_probe_diff_contract_rejects_forbidden_region_and_syntax_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = (
+                "def parse_item(value):\n"
+                "    return value.strip()\n\n"
+                "def other(value):\n"
+                "    return value\n"
+            )
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "forbidden_symbols": ["other"],
+                    "max_files_changed": 1,
+                    "max_hunks": 2,
+                    "max_changed_lines": 5,
+                    "max_changed_functions": 1,
+                },
+            }
+            snapshot = {"target.py": before}
+            target.write_text(before.replace("return value.strip()", "return ("))
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"target.py"},
+            )
+
+            self.assertIsNotNone(rejection)
+            self.assertIn("region mapping failed", rejection[1])
+
+    def test_local_edit_is_not_probe_diff_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            before = "def parse_item(value):\n    return value.strip()\n"
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "local",
+                "tactic_stage": "local_edit",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "allowed_files": ["target.py"],
+            }
+            snapshot = {"target.py": before}
+            target.write_text("def parse_item(value):\n    return value\n")
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"target.py"},
+            )
+
+            self.assertIsNone(rejection)
+
+    def test_probe_diff_contract_non_python_uses_file_hunk_line_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "app.js"
+            before = "function handler(value) {\n  return value;\n}\n"
+            target.write_text(before)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hard_active_todo_contract": True,
+                        "probe_diff_contract_gate": True,
+                        "todo_soft_until_first_improvement": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "risk_level": "structural",
+                "tactic_stage": "structural_probe",
+                "target_symbols": ["handler"],
+                "target_regions": ["app.js::handler"],
+                "allowed_files": ["app.js"],
+                "probe_diff_contract": {
+                    "allowed_files": ["app.js"],
+                    "allowed_regions": ["app.js::handler"],
+                    "expected_changed_regions": ["app.js::handler"],
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 1,
+                },
+            }
+            snapshot = {"app.js": before}
+            target.write_text(before.replace("return value;", "return value ?? null;"))
+
+            rejection = agent._active_probe_diff_contract_rejection(
+                snapshot,
+                {"app.js"},
+            )
+
+            self.assertIsNone(rejection)
+
+    def test_probe_contract_mismatch_records_candidate_delta_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "status": "active",
+                "tactic_stage": "structural_probe",
+            }
+            candidate = CodeCandidate(
+                "probe-bad",
+                [CodeChange("target.py", "probe", content="x = 1\n")],
+                "probe candidate",
+            )
+
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected_probe_contract_mismatch",
+                metric=None,
+                applied=0,
+                failed=True,
+                patch_text="",
+                results=[],
+                failure_detail="probe diff contract mismatch: changed symbols outside allowed_regions",
+            )
+
+            self.assertEqual(extra["failure_class"], "probe_contract_mismatch")
+            self.assertEqual(extra["failure_origin"], "post_apply_contract")
+            self.assertEqual(extra["issue_scope"], "candidate_delta")
+            self.assertFalse(extra["repair_task_eligible"])
+
+    def test_single_code_candidate_probe_diff_mismatch_restores_before_test(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                target = repo / "target.py"
+                before = (
+                    "def parse_item(value):\n"
+                    "    return value.strip()\n\n"
+                    "def other(value):\n"
+                    "    return value\n"
+                )
+                target.write_text(before)
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "writable_files": ["target.py"],
+                            "spec_mode": True,
+                            "spec_hard_active_todo_contract": True,
+                            "probe_diff_contract_gate": True,
+                            "todo_soft_until_first_improvement": False,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = _StaticModelManager(
+                    json.dumps(
+                        {
+                            "changes": [
+                                {
+                                    "path": "target.py",
+                                    "reason": "probe task-001 parse_item boundary",
+                                    "content": before.replace(
+                                        "return value\n",
+                                        "return value + 1\n",
+                                    ),
+                                }
+                            ]
+                        }
+                    )
+                )
+                agent.state.scratch["active_todo"] = {
+                    "todo_id": "task-001",
+                    "spec_task_id": "task-001",
+                    "status": "active",
+                    "source": "spec_scheduler",
+                    "risk_level": "structural",
+                    "tactic_stage": "structural_probe",
+                    "target_symbols": ["parse_item"],
+                    "target_regions": ["target.py::parse_item"],
+                    "allowed_files": ["target.py"],
+                    "probe_diff_contract": {
+                        "allowed_files": ["target.py"],
+                        "allowed_regions": ["target.py::parse_item"],
+                        "expected_changed_regions": ["target.py::parse_item"],
+                        "max_files_changed": 1,
+                        "max_hunks": 2,
+                        "max_changed_lines": 5,
+                        "max_changed_functions": 1,
+                    },
+                }
+
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+                self.assertEqual(target.read_text(), before)
+                self.assertEqual(agent.state.current, AgentStateName.TEST)
+                rejection = agent.state.scratch["pre_apply_candidate_rejection"]
+                self.assertEqual(
+                    rejection["status"],
+                    "rejected_probe_contract_mismatch",
+                )
+                self.assertIn("outside allowed_regions", rejection["note"])
+
+        asyncio.run(run_case())
+
     def test_repeated_correctness_failure_routes_task_to_design_rewrite(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:

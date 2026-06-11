@@ -75,6 +75,21 @@ Output strict JSON with:
         "explanation": "why this task is local or structural"
       },
       "probe_plan": "first smallest reversible probe when risk_level is structural",
+      "probe_diff_contract": {
+        "allowed_files": ["relative/path.py"],
+        "allowed_regions": ["relative/path.py::symbol_or_local_region"],
+        "expected_changed_regions": ["relative/path.py::symbol_or_local_region"],
+        "target_symbols": ["symbol_or_function_name"],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "forbidden_symbols": ["symbol_or_function_name"],
+        "forbidden_regions": ["relative/path.py::symbol_or_region"],
+        "required_unchanged_regions": ["relative/path.py::symbol_or_region"],
+        "allowed_change_kinds": ["add_guard|add_observation|single_callsite_probe|local_refactor"],
+        "observation": "what the diff-level probe is allowed to observe"
+      },
       "invariant_evidence": ["observable invariant or diagnostic proving the probe is safe"],
       "validator": {
         "kind": "metric|command|synthesized",
@@ -129,9 +144,13 @@ Rules:
   execution structure, scheduling, batching, parallelism, resource lifetime,
   API/schema contracts, or side-effect placement,
   set risk_level to "structural" and tactic_stage to "structural_probe" for
-  the first attempt. Provide probe_plan, invariant_evidence, and a
-  rollback_or_shrink_plan. A structural task must start as a small reversible
-  probe, not a full rewrite.
+  the first attempt. Provide probe_plan, probe_diff_contract,
+  invariant_evidence, and a rollback_or_shrink_plan. A structural task must
+  start as a small reversible probe, not a full rewrite.
+- For structural_probe tasks, make probe_diff_contract a diff-level execution
+  contract: allowed files/regions, expected changed region, max files/hunks/
+  changed lines/functions, forbidden regions, required unchanged regions, and
+  the observation. CODE diffs outside this contract are rejected before tests.
 - Set risk_level to "local" and tactic_stage to "local_edit" only when the
   change is a narrow local edit that does not reorder behavior, state, data
   flow, control flow, or side effects.

@@ -240,12 +240,19 @@ changes such as rewrites, reordering, batching, scheduling, parallelization,
 state lifecycle changes, data/control-flow changes, loop structure changes, and
 side-effect movement. Those tasks must declare `risk_level=structural`,
 start with `tactic_stage=structural_probe`, and provide `risk_evidence`,
-`probe_plan`, `invariant_evidence`, and `rollback_or_shrink_plan`.
+`probe_plan`, `probe_diff_contract`, `invariant_evidence`, and
+`rollback_or_shrink_plan`.
 `risk_evidence` must quote an actionable task field such as `title` or
 `edit_scope`; safety explanations in `correctness_rationale`, `fallback_plan`,
 or invariant fields are not used as risk triggers. Active structural probes are
 also constrained to a small single-region edit before apply, using
 `structural_probe_max_changes` and `structural_probe_max_changed_lines`.
+`probe_diff_contract_gate=true` adds an after-apply, before-test check: the
+controller computes the actual snapshot diff and rejects structural probe
+candidates whose changed files, hunks, line count, or Python symbol/region
+touches exceed the active task's `probe_diff_contract`. Rejected probe diff
+mismatches are recorded as candidate-delta lessons, not as current-repo repair
+tasks.
 
 ### Acceptance
 

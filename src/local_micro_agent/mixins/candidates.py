@@ -261,7 +261,12 @@ class CandidateRecordsMixin:
                 return "probe_validated_no_metric_gain"
             if not failed and metric is not None:
                 return "probe_validated"
-            if failure_class in {"scope_too_broad", "invariant_broken", "guard_missing"}:
+            if failure_class in {
+                "scope_too_broad",
+                "invariant_broken",
+                "guard_missing",
+                "probe_contract_mismatch",
+            }:
                 return "probe_needs_guard_or_scope"
         if tactic_stage == "structural_expand":
             if failure_class == "no_improvement":
@@ -292,6 +297,8 @@ class CandidateRecordsMixin:
             return "axis_mismatch"
         if "family_drift" in status_text:
             return "family_mismatch"
+        if "probe_contract" in status_text or "probe diff contract" in detail_text:
+            return "probe_contract_mismatch"
         if status_text.startswith("rejected_todo"):
             return "contract_mismatch"
         patch_indicators = (

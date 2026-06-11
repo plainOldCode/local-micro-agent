@@ -5,6 +5,7 @@ Extracted from orchestrator.py; mixed into MicroAgent.
 from __future__ import annotations
 
 import ast
+import difflib
 import hashlib
 import json
 import re
@@ -527,6 +528,521 @@ class AdaptiveSearchMixin:
                     f"symbols {', '.join(symbols)}",
                 )
         return None
+
+    def _active_probe_diff_contract_rejection(
+        self,
+        previous_snapshot: dict[str, str | None],
+        allowed: set[str],
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        workflow = self.config.get("workflow", {})
+        if workflow.get(
+            "probe_diff_contract_gate",
+            workflow.get("spec_structural_risk_gate", False),
+        ) is False:
+            return None
+        if self._todo_contract_soft_now():
+            return None
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return None
+        if active_todo.get("status") not in {"active", "attempted"}:
+            return None
+        if self._todo_attempt_budget_exhausted(active_todo):
+            return None
+        if not self._active_todo_is_structural_probe(active_todo):
+            return None
+
+        contract = self._probe_diff_contract_for_todo(active_todo)
+        summary = self._probe_diff_summary(previous_snapshot, allowed)
+        violations = self._probe_diff_contract_violations(summary, contract)
+        self.state.scratch["last_probe_diff_summary"] = summary
+        if not violations:
+            return None
+        note = "probe diff contract mismatch: " + "; ".join(violations[:5])
+        extra = {
+            "diff_contract_violations": violations,
+            "probe_diff_summary": self._compact_probe_diff_summary(summary),
+            "probe_diff_contract": contract,
+            "failure_origin": "post_apply_contract",
+            "issue_scope": "candidate_delta",
+            "repo_valid_after_restore": True,
+            "repair_task_eligible": False,
+            "memory_use": "avoid_shape",
+            "candidate_delta_files_changed": summary.get("files_changed", 0),
+        }
+        return ("rejected_probe_contract_mismatch", note, extra)
+
+    def _probe_diff_contract_for_todo(self, active_todo: dict[str, Any]) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        raw = active_todo.get("probe_diff_contract")
+        contract = raw if isinstance(raw, dict) else {}
+        target_symbols = self._string_list_from_any(active_todo.get("target_symbols"))
+        target_regions = self._string_list_from_any(active_todo.get("target_regions"))
+        todo_files = self._string_list_from_any(active_todo.get("allowed_files"))
+        region_files = [
+            region.split("::", 1)[0]
+            for region in target_regions
+            if region.split("::", 1)[0]
+        ]
+        allowed_files = self._string_list_from_any(contract.get("allowed_files"))
+        if not allowed_files:
+            allowed_files = [*todo_files, *region_files]
+        allowed_regions = self._string_list_from_any(contract.get("allowed_regions"))
+        if not allowed_regions:
+            allowed_regions = [*target_regions, *target_symbols]
+        expected_changed_regions = self._string_list_from_any(
+            contract.get("expected_changed_regions")
+        )
+        if not expected_changed_regions:
+            expected_changed_regions = allowed_regions
+        return {
+            "allowed_files": sorted(dict.fromkeys(allowed_files)),
+            "allowed_regions": sorted(dict.fromkeys(allowed_regions)),
+            "expected_changed_regions": sorted(dict.fromkeys(expected_changed_regions)),
+            "target_symbols": sorted(
+                dict.fromkeys(
+                    self._string_list_from_any(contract.get("target_symbols"))
+                    or target_symbols
+                )
+            ),
+            "forbidden_symbols": self._string_list_from_any(
+                contract.get("forbidden_symbols")
+            ),
+            "forbidden_regions": self._string_list_from_any(
+                contract.get("forbidden_regions")
+            ),
+            "required_unchanged_regions": self._string_list_from_any(
+                contract.get("required_unchanged_regions")
+            ),
+            "allowed_change_kinds": self._string_list_from_any(
+                contract.get("allowed_change_kinds")
+            ),
+            "observation": str(contract.get("observation") or "").strip(),
+            "max_files_changed": self._positive_int(
+                contract.get("max_files_changed"),
+                int(workflow.get("structural_probe_max_files_changed", 1) or 1),
+            ),
+            "max_hunks": self._positive_int(
+                contract.get("max_hunks"),
+                int(workflow.get("structural_probe_max_hunks", 2) or 2),
+            ),
+            "max_changed_lines": self._positive_int(
+                contract.get("max_changed_lines"),
+                int(workflow.get("structural_probe_max_changed_lines", 40) or 40),
+            ),
+            "max_changed_functions": self._positive_int(
+                contract.get("max_changed_functions"),
+                int(workflow.get("structural_probe_max_changed_functions", 1) or 1),
+            ),
+        }
+
+    @staticmethod
+    def _positive_int(value: Any, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(0, parsed)
+
+    @staticmethod
+    def _string_list_from_any(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _probe_diff_summary(
+        self,
+        previous_snapshot: dict[str, str | None],
+        allowed: set[str],
+    ) -> dict[str, Any]:
+        paths = sorted(set(previous_snapshot) | set(allowed))
+        file_summaries: list[dict[str, Any]] = []
+        for rel_path in paths:
+            old_content = previous_snapshot.get(rel_path)
+            current_path = self.state.repo_root / rel_path
+            try:
+                new_content: str | None = current_path.read_text(errors="replace")
+            except OSError:
+                new_content = None
+            if old_content == new_content:
+                continue
+            file_summary = self._probe_diff_file_summary(
+                rel_path,
+                old_content,
+                new_content,
+            )
+            file_summaries.append(file_summary)
+        touched_symbols = sorted(
+            {
+                symbol
+                for file_summary in file_summaries
+                for symbol in file_summary.get("touched_symbols", [])
+            }
+        )
+        touched_functions = sorted(
+            {
+                symbol
+                for file_summary in file_summaries
+                for symbol in file_summary.get("touched_functions", [])
+            }
+        )
+        return {
+            "files_changed": len(file_summaries),
+            "changed_files": [item["path"] for item in file_summaries],
+            "hunks": sum(int(item.get("hunks", 0) or 0) for item in file_summaries),
+            "changed_lines": sum(
+                int(item.get("changed_lines", 0) or 0) for item in file_summaries
+            ),
+            "changed_functions": touched_functions,
+            "touched_symbols": touched_symbols,
+            "files": file_summaries,
+        }
+
+    def _probe_diff_file_summary(
+        self,
+        rel_path: str,
+        old_content: str | None,
+        new_content: str | None,
+    ) -> dict[str, Any]:
+        old_lines = (old_content or "").splitlines()
+        new_lines = (new_content or "").splitlines()
+        ranges: list[dict[str, int]] = []
+        changed_lines = 0
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            a=old_lines,
+            b=new_lines,
+            autojunk=False,
+        ).get_opcodes():
+            if tag == "equal":
+                continue
+            changed_lines += max(i2 - i1, j2 - j1)
+            ranges.append(
+                {
+                    "old_start": i1 + 1,
+                    "old_end": i2,
+                    "new_start": j1 + 1,
+                    "new_end": j2,
+                }
+            )
+        touched_symbols: set[str] = set()
+        touched_functions: set[str] = set()
+        syntax_errors: list[str] = []
+        if rel_path.endswith(".py"):
+            for content, key in ((old_content, "old"), (new_content, "new")):
+                if content is None:
+                    continue
+                symbol_summary = self._python_symbols_touched_by_ranges(
+                    rel_path,
+                    content,
+                    ranges,
+                    range_prefix=key,
+                )
+                touched_symbols.update(symbol_summary.get("symbols", set()))
+                touched_functions.update(symbol_summary.get("functions", set()))
+                error = symbol_summary.get("syntax_error")
+                if error:
+                    syntax_errors.append(str(error))
+        return {
+            "path": rel_path,
+            "hunks": len(ranges),
+            "changed_lines": changed_lines,
+            "changed_ranges": ranges,
+            "touched_symbols": sorted(touched_symbols),
+            "touched_functions": sorted(touched_functions),
+            "syntax_errors": syntax_errors,
+        }
+
+    def _python_symbols_touched_by_ranges(
+        self,
+        rel_path: str,
+        content: str,
+        ranges: list[dict[str, int]],
+        range_prefix: str,
+    ) -> dict[str, Any]:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError as exc:
+            return {
+                "symbols": set(),
+                "functions": set(),
+                "syntax_error": f"{rel_path}:{exc.lineno or 0}: {exc.msg}",
+            }
+        symbol_ranges = self._python_symbol_ranges(tree, rel_path)
+        touched_symbols: set[str] = set()
+        touched_functions: set[str] = set()
+        start_key = f"{range_prefix}_start"
+        end_key = f"{range_prefix}_end"
+        for changed_range in ranges:
+            start = int(changed_range.get(start_key, 0) or 0)
+            end = int(changed_range.get(end_key, 0) or 0)
+            if end <= 0:
+                end = start
+            if start <= 0:
+                start = 1
+            for item in symbol_ranges:
+                if not self._line_ranges_overlap(
+                    start,
+                    end,
+                    int(item["start"]),
+                    int(item["end"]),
+                ):
+                    continue
+                names = item["names"]
+                touched_symbols.update(names)
+                if item["kind"] == "function":
+                    touched_functions.add(str(item["canonical"]))
+        return {"symbols": touched_symbols, "functions": touched_functions}
+
+    @staticmethod
+    def _line_ranges_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+        return max(start_a, start_b) <= min(end_a, end_b)
+
+    def _python_symbol_ranges(self, tree: ast.AST, rel_path: str) -> list[dict[str, Any]]:
+        ranges: list[dict[str, Any]] = []
+        stack: list[str] = []
+
+        def add_symbol(node: ast.AST, name: str, kind: str) -> None:
+            if not hasattr(node, "lineno") or not hasattr(node, "end_lineno"):
+                return
+            qualified = ".".join([*stack, name]) if stack else name
+            names = {
+                name,
+                qualified,
+                qualified.replace(".", "::"),
+                f"{rel_path}::{qualified}",
+            }
+            ranges.append(
+                {
+                    "kind": kind,
+                    "start": int(node.lineno),
+                    "end": int(node.end_lineno),
+                    "canonical": qualified,
+                    "names": sorted(names),
+                }
+            )
+
+        def assignment_names(node: ast.AST) -> list[str]:
+            if isinstance(node, ast.Name):
+                return [node.id]
+            if isinstance(node, ast.Attribute):
+                return [node.attr]
+            if isinstance(node, (ast.Tuple, ast.List)):
+                names: list[str] = []
+                for element in node.elts:
+                    names.extend(assignment_names(element))
+                return names
+            return []
+
+        def visit(node: ast.AST) -> None:
+            if isinstance(node, ast.ClassDef):
+                add_symbol(node, node.name, "class")
+                stack.append(node.name)
+                for child in node.body:
+                    visit(child)
+                stack.pop()
+                return
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                add_symbol(node, node.name, "function")
+                stack.append(node.name)
+                for child in node.body:
+                    visit(child)
+                stack.pop()
+                return
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = []
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                else:
+                    targets = [node.target]
+                for target in targets:
+                    for name in assignment_names(target):
+                        add_symbol(node, name, "binding")
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        visit(tree)
+        return ranges
+
+    def _probe_diff_contract_violations(
+        self,
+        summary: dict[str, Any],
+        contract: dict[str, Any],
+    ) -> list[str]:
+        violations: list[str] = []
+        changed_files = self._string_list_from_any(summary.get("changed_files"))
+        allowed_files = set(self._string_list_from_any(contract.get("allowed_files")))
+        if allowed_files:
+            outside_files = sorted(path for path in changed_files if path not in allowed_files)
+            if outside_files:
+                violations.append(
+                    "changed files outside probe contract: " + ", ".join(outside_files)
+                )
+        max_files = int(contract.get("max_files_changed", 0) or 0)
+        if max_files and len(changed_files) > max_files:
+            violations.append(
+                f"changed {len(changed_files)} files, max_files_changed={max_files}"
+            )
+        max_hunks = int(contract.get("max_hunks", 0) or 0)
+        hunks = int(summary.get("hunks", 0) or 0)
+        if max_hunks and hunks > max_hunks:
+            violations.append(f"changed {hunks} hunks, max_hunks={max_hunks}")
+        max_lines = int(contract.get("max_changed_lines", 0) or 0)
+        changed_lines = int(summary.get("changed_lines", 0) or 0)
+        if max_lines and changed_lines > max_lines:
+            violations.append(
+                f"changed {changed_lines} lines, max_changed_lines={max_lines}"
+            )
+        changed_functions = self._string_list_from_any(summary.get("changed_functions"))
+        max_functions = int(contract.get("max_changed_functions", 0) or 0)
+        if max_functions and len(self._canonical_regions(changed_functions)) > max_functions:
+            violations.append(
+                "changed "
+                f"{len(self._canonical_regions(changed_functions))} functions, "
+                f"max_changed_functions={max_functions}"
+            )
+        for file_summary in summary.get("files", []):
+            if not isinstance(file_summary, dict):
+                continue
+            syntax_errors = self._string_list_from_any(file_summary.get("syntax_errors"))
+            if syntax_errors:
+                violations.append(
+                    "python diff region mapping failed: " + "; ".join(syntax_errors[:2])
+                )
+        touched_symbols = self._string_list_from_any(summary.get("touched_symbols"))
+        allowed_regions = self._string_list_from_any(contract.get("allowed_regions"))
+        if allowed_regions and touched_symbols:
+            outside = sorted(
+                symbol
+                for symbol in touched_symbols
+                if not self._region_matches_any(symbol, allowed_regions)
+            )
+            if outside:
+                violations.append(
+                    "changed symbols outside allowed_regions: "
+                    + ", ".join(outside[:6])
+                )
+        expected_regions = self._string_list_from_any(
+            contract.get("expected_changed_regions")
+        )
+        if (
+            expected_regions
+            and changed_files
+            and self._summary_has_python_changes(summary)
+            and not any(
+                self._region_matches_any(symbol, expected_regions)
+                for symbol in touched_symbols
+            )
+        ):
+            violations.append(
+                "diff did not touch expected_changed_regions: "
+                + ", ".join(expected_regions[:6])
+            )
+        forbidden_regions = [
+            *self._string_list_from_any(contract.get("forbidden_symbols")),
+            *self._string_list_from_any(contract.get("forbidden_regions")),
+            *self._string_list_from_any(contract.get("required_unchanged_regions")),
+        ]
+        touched_forbidden = sorted(
+            symbol
+            for symbol in touched_symbols
+            if self._region_matches_any(symbol, forbidden_regions)
+        )
+        if touched_forbidden:
+            violations.append(
+                "changed forbidden or required-unchanged regions: "
+                + ", ".join(touched_forbidden[:6])
+            )
+        return violations
+
+    @staticmethod
+    def _summary_has_python_changes(summary: dict[str, Any]) -> bool:
+        return any(
+            isinstance(item, dict) and str(item.get("path", "")).endswith(".py")
+            for item in summary.get("files", [])
+        )
+
+    @classmethod
+    def _region_matches_any(cls, touched: str, expected: list[str]) -> bool:
+        touched_aliases = cls._region_aliases(touched)
+        for item in expected:
+            expected_aliases = cls._region_aliases(item)
+            if touched_aliases & expected_aliases:
+                return True
+            for touched_alias in touched_aliases:
+                for expected_alias in expected_aliases:
+                    if (
+                        touched_alias.endswith("." + expected_alias)
+                        or expected_alias.endswith("." + touched_alias)
+                        or touched_alias.endswith("::" + expected_alias)
+                        or expected_alias.endswith("::" + touched_alias)
+                    ):
+                        return True
+        return False
+
+    @staticmethod
+    def _region_aliases(value: str) -> set[str]:
+        text = str(value).strip()
+        if not text:
+            return set()
+        normalized = text.replace("()", "")
+        basename = normalized.rsplit("/", 1)[-1]
+        region = normalized.rsplit("::", 1)[-1]
+        dotted = region.replace("::", ".")
+        aliases = {
+            normalized,
+            normalized.replace("::", "."),
+            basename,
+            basename.replace("::", "."),
+            region,
+            dotted,
+            dotted.rsplit(".", 1)[-1],
+        }
+        return {alias.lower() for alias in aliases if alias}
+
+    @classmethod
+    def _canonical_regions(cls, values: list[str]) -> set[str]:
+        canonical = set()
+        for value in values:
+            aliases = cls._region_aliases(value)
+            if aliases:
+                canonical.add(sorted(aliases, key=len)[-1])
+        return canonical
+
+    @staticmethod
+    def _compact_probe_diff_summary(summary: dict[str, Any]) -> dict[str, Any]:
+        compact_files = []
+        for file_summary in summary.get("files", []):
+            if not isinstance(file_summary, dict):
+                continue
+            compact_files.append(
+                {
+                    key: file_summary.get(key)
+                    for key in (
+                        "path",
+                        "hunks",
+                        "changed_lines",
+                        "touched_symbols",
+                        "touched_functions",
+                        "syntax_errors",
+                    )
+                    if file_summary.get(key) not in (None, "", [], {})
+                }
+            )
+        return {
+            "files_changed": summary.get("files_changed", 0),
+            "changed_files": summary.get("changed_files", []),
+            "hunks": summary.get("hunks", 0),
+            "changed_lines": summary.get("changed_lines", 0),
+            "changed_functions": summary.get("changed_functions", []),
+            "touched_symbols": summary.get("touched_symbols", []),
+            "files": compact_files,
+        }
 
     @staticmethod
     def _active_todo_is_structural_probe(active_todo: dict[str, Any]) -> bool:
@@ -1566,6 +2082,11 @@ class AdaptiveSearchMixin:
     ) -> str:
         if "post restore" in detail or "post-restore" in detail or "after restore" in detail:
             return "post_restore_validation"
+        if (
+            status == "rejected_probe_contract_mismatch"
+            or failure_class == "probe_contract_mismatch"
+        ):
+            return "post_apply_contract"
         if "design contract" in detail or status in {"design_rejected", "failed_design"}:
             return "design_contract"
         if status.startswith("rejected_todo") or failure_class in {
@@ -1602,6 +2123,7 @@ class AdaptiveSearchMixin:
         if origin in {
             "patch_apply",
             "pre_apply_contract",
+            "post_apply_contract",
             "candidate_validation",
             "metric_gate",
         }:
@@ -1625,6 +2147,8 @@ class AdaptiveSearchMixin:
         normalized = normalize_fingerprint_text(detail)
         if failure_class in {"patch_miss", "duplicate_variant", "axis_mismatch", "family_mismatch"}:
             return "avoid"
+        if failure_class == "probe_contract_mismatch":
+            return "repair_with_constraint"
         if "out of scratch space" in normalized or "out of memory" in normalized:
             return "repair_with_constraint"
         if failure_class in {"correctness_failure", "invariant_broken", "scope_too_broad"}:

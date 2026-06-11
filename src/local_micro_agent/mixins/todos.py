@@ -416,12 +416,14 @@ class TodoLifecycleMixin:
             or 1
         )
         attempts_used = int(budget.get("attempts_used", task.get("attempts", 0)) or 0)
+        target_symbols = self._normalize_string_list(task.get("target_symbols"))
+        target_regions = self._normalize_string_list(task.get("target_regions"))
         return {
             "depends_on": depends_on,
             "deliverables": deliverables,
             "read_hints": read_hints,
-            "target_symbols": self._normalize_string_list(task.get("target_symbols")),
-            "target_regions": self._normalize_string_list(task.get("target_regions")),
+            "target_symbols": target_symbols,
+            "target_regions": target_regions,
             "preserved_invariants": self._normalize_string_list(
                 task.get("preserved_invariants")
             ),
@@ -432,6 +434,12 @@ class TodoLifecycleMixin:
                 task.get("risk_evidence")
             ),
             "probe_plan": self._normalize_task_text_field(task.get("probe_plan")),
+            "probe_diff_contract": self._normalize_probe_diff_contract(
+                task.get("probe_diff_contract"),
+                deliverables=deliverables,
+                target_symbols=target_symbols,
+                target_regions=target_regions,
+            ),
             "invariant_evidence": self._normalize_string_list(
                 task.get("invariant_evidence")
             ),
@@ -500,6 +508,57 @@ class TodoLifecycleMixin:
             "explanation": str(value.get("explanation") or "").strip(),
         }
         return {key: item for key, item in normalized.items() if item}
+
+    def _normalize_probe_diff_contract(
+        self,
+        value: Any,
+        *,
+        deliverables: list[str],
+        target_symbols: list[str],
+        target_regions: list[str],
+    ) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, Any] = {}
+        for field in (
+            "allowed_files",
+            "allowed_regions",
+            "expected_changed_regions",
+            "target_symbols",
+            "forbidden_symbols",
+            "forbidden_regions",
+            "required_unchanged_regions",
+            "allowed_change_kinds",
+        ):
+            normalized[field] = self._normalize_string_list(value.get(field))
+        if not normalized["allowed_files"]:
+            normalized["allowed_files"] = list(deliverables)
+        if not normalized["allowed_regions"]:
+            normalized["allowed_regions"] = [*target_regions, *target_symbols]
+        if not normalized["expected_changed_regions"]:
+            normalized["expected_changed_regions"] = normalized["allowed_regions"]
+        if not normalized["target_symbols"]:
+            normalized["target_symbols"] = list(target_symbols)
+        for field in (
+            "max_files_changed",
+            "max_hunks",
+            "max_changed_lines",
+            "max_changed_functions",
+        ):
+            try:
+                parsed = int(value.get(field))
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                normalized[field] = parsed
+        observation = self._normalize_task_text_field(value.get("observation"))
+        if observation:
+            normalized["observation"] = observation
+        return {
+            key: item
+            for key, item in normalized.items()
+            if item not in (None, "", [], {})
+        }
 
     def _normalize_task_validator(self, value: Any) -> dict[str, str]:
         if not isinstance(value, dict):
@@ -961,6 +1020,13 @@ class TodoLifecycleMixin:
             issues.append("first structural attempt must use structural_probe")
         if not str(task.get("probe_plan", "")).strip():
             issues.append("missing probe_plan for structural task")
+        workflow = self.config.get("workflow", {})
+        if (
+            stage == "structural_probe"
+            and workflow.get("spec_probe_diff_contract_required") is True
+            and not task.get("probe_diff_contract")
+        ):
+            issues.append("missing probe_diff_contract for structural probe")
         if not self._normalize_string_list(task.get("invariant_evidence")):
             issues.append("missing invariant_evidence for structural task")
         if self._structural_probe_scope_too_broad(str(task.get("edit_scope") or "")):
@@ -1164,6 +1230,7 @@ class TodoLifecycleMixin:
             "tactic_stage": task.get("tactic_stage"),
             "risk_evidence": task.get("risk_evidence"),
             "probe_plan": task.get("probe_plan"),
+            "probe_diff_contract": task.get("probe_diff_contract"),
             "invariant_evidence": task.get("invariant_evidence"),
             "rollback_or_shrink_plan": task.get("rollback_or_shrink_plan"),
             "issues": issues,
@@ -1178,7 +1245,8 @@ class TodoLifecycleMixin:
             "If the task changes behavior ordering, data/control flow, state lifecycle, "
             "scheduling, batching, parallelism, loop structure, or side-effect placement, "
             "rewrite it as risk_level=structural with tactic_stage=structural_probe, "
-            "risk_evidence, probe_plan, invariant_evidence, and rollback_or_shrink_plan. "
+            "risk_evidence, probe_plan, probe_diff_contract, invariant_evidence, "
+            "and rollback_or_shrink_plan. "
             "The first structural task should be a small reversible probe, not a full "
             "rewrite. risk_evidence must quote an actionable field such as title or "
             "edit_scope, not a correctness rationale or invariant.",
@@ -1842,6 +1910,9 @@ class TodoLifecycleMixin:
             if isinstance(task.get("risk_evidence"), dict)
             else {},
             "probe_plan": str(task.get("probe_plan") or ""),
+            "probe_diff_contract": task.get("probe_diff_contract")
+            if isinstance(task.get("probe_diff_contract"), dict)
+            else {},
             "invariant_evidence": self._normalize_string_list(
                 task.get("invariant_evidence")
             ),
@@ -2762,6 +2833,7 @@ class TodoLifecycleMixin:
             "tactic_stage": task.get("tactic_stage"),
             "target_symbols": task.get("target_symbols"),
             "target_regions": task.get("target_regions"),
+            "probe_diff_contract": task.get("probe_diff_contract"),
             "last_observation": task.get("last_observation"),
             "design_contract": task.get("design_contract"),
             "decision_hint": task.get("decision_hint"),
@@ -3036,6 +3108,7 @@ class TodoLifecycleMixin:
                 "risk_level": active_todo.get("risk_level", ""),
                 "risk_evidence": active_todo.get("risk_evidence", {}),
                 "probe_plan": active_todo.get("probe_plan", ""),
+                "probe_diff_contract": active_todo.get("probe_diff_contract", {}),
                 "invariant_evidence": active_todo.get("invariant_evidence", []),
                 "target_symbols": active_todo.get("target_symbols", []),
                 "target_regions": active_todo.get("target_regions", []),
@@ -3397,7 +3470,12 @@ class TodoLifecycleMixin:
         if not stage.startswith("structural_"):
             return False
         failure_class = str(record.get("failure_class", ""))
-        if failure_class not in {"scope_too_broad", "invariant_broken", "guard_missing"}:
+        if failure_class not in {
+            "scope_too_broad",
+            "invariant_broken",
+            "guard_missing",
+            "probe_contract_mismatch",
+        }:
             return False
         soft_limit = int(
             self.config.get("workflow", {}).get("structural_tactic_soft_failures", 2)
@@ -3412,6 +3490,7 @@ class TodoLifecycleMixin:
                     "scope_too_broad",
                     "invariant_broken",
                     "guard_missing",
+                    "probe_contract_mismatch",
                 }
             ):
                 prior_soft += 1
@@ -3584,6 +3663,9 @@ class TodoLifecycleMixin:
             "repo_valid_after_restore",
             "repair_task_eligible",
             "memory_use",
+            "diff_contract_violations",
+            "probe_diff_summary",
+            "probe_diff_contract",
         ):
             value = candidate_record.get(key)
             if value not in (None, "", [], {}):

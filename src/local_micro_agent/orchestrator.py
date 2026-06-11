@@ -436,8 +436,11 @@ class MicroAgent(
                         "strategy_axis. Candidate reason and change reasons must "
                         "preserve the todo context, stay on its family_key when one "
                         "is present, mention the todo_id, and edit only the named "
-                        "target_symbols/target_regions. Todo drift is rejected "
-                        "before edits or tests.\n"
+                        "target_symbols/target_regions. If this todo is a "
+                        "structural_probe, its actual diff is checked after apply "
+                        "and before tests against probe_diff_contract; stay inside "
+                        "its file, hunk, line, symbol, and forbidden-region limits. "
+                        "Todo drift is rejected before edits or tests.\n"
                         f"{active_todo}"
                     )
                 if dynamic_suffix_blocks:
@@ -478,7 +481,29 @@ class MicroAgent(
             self.state.scratch["applied_changes"] = 0
             self.state.current = AgentStateName.TEST
             return
-        await self._apply_changes(decision.changes, allowed)
+        applied = await self._apply_changes(decision.changes, allowed)
+        previous_snapshot = self.state.scratch.get("pre_code_snapshot")
+        if isinstance(previous_snapshot, dict):
+            probe_rejection = self._active_probe_diff_contract_rejection(
+                previous_snapshot,
+                allowed,
+            )
+            if probe_rejection is not None:
+                status, note, extra = probe_rejection
+                current_snapshot = await self._snapshot_files(sorted(allowed))
+                patch_text = self._snapshot_patch(previous_snapshot, current_snapshot)
+                self.state.notes.append(
+                    f"Single CODE candidate rejected after diff check: {note}"
+                )
+                self.state.scratch["pre_apply_candidate_rejection"] = {
+                    "status": status,
+                    "note": note,
+                    "patch_text": patch_text,
+                    "candidate_delta_applied": applied,
+                    **extra,
+                }
+                await self._restore_snapshot(previous_snapshot)
+                self.state.scratch["applied_changes"] = 0
         self.state.current = AgentStateName.TEST
 
     async def _apply_changes(self, changes: list[CodeChange], allowed: set[str]) -> int:
@@ -784,6 +809,46 @@ class MicroAgent(
                 self.state.notes.append(
                     f"Candidate {candidate.candidate_id} is repair of {repair_parent_id}"
                 )
+
+            probe_rejection = self._active_probe_diff_contract_rejection(
+                baseline_snapshot,
+                allowed,
+            )
+            if probe_rejection is not None:
+                status, note, rejection_extra = probe_rejection
+                self.state.notes.append(
+                    f"Candidate {candidate.candidate_id} rejected after diff check: {note}"
+                )
+                extra = self._candidate_history_extra(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    patch_text=patch_text,
+                    results=[],
+                    failure_detail=note,
+                    repair_parent_id=repair_parent_id,
+                )
+                extra.update(rejection_extra)
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    extra=extra,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                await self._restore_snapshot(baseline_snapshot)
+                self.state.scratch["applied_changes"] = 0
+                continue
 
             results = await self._run_candidate_preflight(candidate, allowed)
             if not results:
@@ -1387,6 +1452,9 @@ class MicroAgent(
                 failure_detail = (
                     f"{note}; {failure_detail}" if failure_detail else note
                 )
+            rejected_patch_text = str(pre_apply_rejection.get("patch_text") or "")
+            if rejected_patch_text:
+                patch_text = rejected_patch_text
         no_change_reason = failure_detail if applied == 0 else ""
         extra = self._candidate_history_extra(
             candidate,
@@ -1399,6 +1467,15 @@ class MicroAgent(
             failure_detail=failure_detail,
             no_change_reason=no_change_reason,
         )
+        if isinstance(pre_apply_rejection, dict):
+            extra.update(
+                {
+                    key: value
+                    for key, value in pre_apply_rejection.items()
+                    if key not in {"status", "note", "patch_text"}
+                    and value not in (None, "", [], {})
+                }
+            )
         self.state.scratch["last_candidate_observation"] = extra
         if correctness_passed and applied > 0:
             extra.update(
