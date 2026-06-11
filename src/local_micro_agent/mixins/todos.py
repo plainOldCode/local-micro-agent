@@ -1946,10 +1946,9 @@ class TodoLifecycleMixin:
         if self._structural_probe_scope_too_broad(str(task.get("edit_scope") or "")):
             issues.append("structural edit_scope too broad; start with one reversible probe")
         shrink_plan = str(task.get("rollback_or_shrink_plan") or "").strip()
-        fallback_plan = str(task.get("fallback_plan") or "").strip()
         if not shrink_plan:
             issues.append("missing rollback_or_shrink_plan for structural task")
-        elif not self._plan_mentions_shrink_or_probe(shrink_plan + " " + fallback_plan):
+        elif not self._plan_mentions_shrink_or_probe(shrink_plan):
             issues.append("rollback_or_shrink_plan must describe a smaller/guarded probe")
         return issues
 
@@ -2006,37 +2005,53 @@ class TodoLifecycleMixin:
             r"\bstate\s+(lifecycle|machine|transition|ordering)\b",
             r"\bmove\b.*\b(state|effect|write|read|operation|logic)\b",
             r"\b(change|alter|replace)\b.*\b(data\s*flow|control\s*flow|loop|order|ordering|state)\b",
+            r"\b(change|alter|replace|update|remove|add)\b.*\b(signature|call\s*site|callsite|api|argument|parameter|schema|contract)\b",
+            r"\b(signature|call\s*site|callsite|api|argument|parameter|schema|contract)\b.*\b(change|alter|replace|update|remove|add)\b",
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
-    @staticmethod
-    def _structural_probe_scope_too_broad(edit_scope: str) -> bool:
+    @classmethod
+    def _structural_probe_scope_too_broad(cls, edit_scope: str) -> bool:
         text = edit_scope.lower()
         patterns = (
             r"\b(rewrite|replace|refactor|restructure)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
             r"\b(entire|whole|all)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
             r"\b(across|throughout)\b.*\b(file|module|codebase|pipeline|system)\b",
             r"\bchange\b.*\b(data\s*flow|control\s*flow|state lifecycle|ordering)\b",
+            r"\b(replace|remove|rewrite)\s+all\b",
         )
-        return any(re.search(pattern, text) for pattern in patterns)
+        return any(re.search(pattern, text) for pattern in patterns) or (
+            cls._structural_probe_action_count(text) >= 3
+        )
+
+    @staticmethod
+    def _structural_probe_action_count(text: str) -> int:
+        actions = re.findall(
+            r"\b(add|allocate|cache|change|decrement|group|hoist|increment|"
+            r"inline|initiali[sz]e|merge|move|remove|replace|rewrite|split|"
+            r"update)\b",
+            text.lower(),
+        )
+        return len(actions)
 
     @staticmethod
     def _plan_mentions_shrink_or_probe(text: str) -> bool:
         lowered = text.lower()
-        return any(
-            marker in lowered
-            for marker in (
-                "shrink",
-                "smaller",
-                "narrow",
-                "guard",
-                "probe",
-                "fallback branch",
-                "feature flag",
-                "isolate",
-                "single",
-            )
+        strong_markers = (
+            "shrink",
+            "smaller",
+            "narrow",
+            "probe",
+            "fallback branch",
+            "feature flag",
+            "isolate",
+            "single",
         )
+        if any(marker in lowered for marker in strong_markers):
+            return True
+        if "guard" not in lowered:
+            return False
+        return not re.search(r"\b(revert|restore|rollback)\b", lowered)
 
     def _reject_spec_task_for_design_contract(
         self, spec: dict[str, Any], task: dict[str, Any], issues: list[str]
