@@ -204,9 +204,12 @@ target symbol or file region.
 changes such as rewrites, reordering, batching, scheduling, parallelization,
 state lifecycle changes, data/control-flow changes, loop structure changes, and
 side-effect movement. Those tasks must declare `risk_level=structural`,
-start with `tactic_stage=structural_probe`, and provide `probe_plan`,
-`invariant_evidence`, and `rollback_or_shrink_plan`. Active structural probes
-are also constrained to a small single-region edit before apply, using
+start with `tactic_stage=structural_probe`, and provide `risk_evidence`,
+`probe_plan`, `invariant_evidence`, and `rollback_or_shrink_plan`.
+`risk_evidence` must quote an actionable task field such as `title` or
+`edit_scope`; safety explanations in `correctness_rationale`, `fallback_plan`,
+or invariant fields are not used as risk triggers. Active structural probes are
+also constrained to a small single-region edit before apply, using
 `structural_probe_max_changes` and `structural_probe_max_changed_lines`.
 
 ### Acceptance

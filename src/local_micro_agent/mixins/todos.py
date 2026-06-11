@@ -299,6 +299,9 @@ class TodoLifecycleMixin:
             "edit_scope": self._normalize_task_text_field(task.get("edit_scope")),
             "risk_level": self._normalize_risk_level(task.get("risk_level")),
             "tactic_stage": self._normalize_tactic_stage(task.get("tactic_stage")),
+            "risk_evidence": self._normalize_task_risk_evidence(
+                task.get("risk_evidence")
+            ),
             "probe_plan": self._normalize_task_text_field(task.get("probe_plan")),
             "invariant_evidence": self._normalize_string_list(
                 task.get("invariant_evidence")
@@ -345,6 +348,29 @@ class TodoLifecycleMixin:
         if normalized in {"local_edit", "structural_probe", "structural_expand"}:
             return normalized
         return ""
+
+    @staticmethod
+    def _risk_evidence_fields() -> tuple[str, ...]:
+        return (
+            "title",
+            "edit_scope",
+            "strategy_axis",
+            "family_key",
+            "expected_signal",
+        )
+
+    def _normalize_task_risk_evidence(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        field = str(value.get("field") or "").strip()
+        if field not in self._risk_evidence_fields():
+            field = ""
+        normalized = {
+            "field": field,
+            "quote": str(value.get("quote") or "").strip(),
+            "explanation": str(value.get("explanation") or "").strip(),
+        }
+        return {key: item for key, item in normalized.items() if item}
 
     def _normalize_task_validator(self, value: Any) -> dict[str, str]:
         if not isinstance(value, dict):
@@ -501,14 +527,31 @@ class TodoLifecycleMixin:
     def _spec_task_structural_risk_issues(self, task: dict[str, Any]) -> list[str]:
         if not self._spec_structural_risk_gate_enabled():
             return []
-        is_structural = self._spec_task_has_structural_risk(task)
-        if not is_structural:
-            return []
 
         issues: list[str] = []
-        if str(task.get("risk_level", "")).strip().lower() != "structural":
-            issues.append("structural task must declare risk_level=structural")
+        risk_level = str(task.get("risk_level", "")).strip().lower()
         stage = str(task.get("tactic_stage", "")).strip().lower()
+        obvious_structural = self._spec_task_has_obvious_structural_action(task)
+
+        if risk_level not in {"local", "structural"}:
+            issues.append("missing risk_level local|structural")
+        issues.extend(self._spec_task_risk_evidence_issues(task))
+
+        if risk_level == "local":
+            if stage != "local_edit":
+                issues.append("local task must use tactic_stage=local_edit")
+            if obvious_structural:
+                issues.append(
+                    "local risk_level contradicts structural action in task scope"
+                )
+            return issues
+
+        is_structural = risk_level == "structural" or obvious_structural
+        if not is_structural:
+            return issues
+
+        if risk_level != "structural":
+            issues.append("structural task must declare risk_level=structural")
         if stage not in {"structural_probe", "structural_expand"}:
             issues.append("structural task must use tactic_stage=structural_probe")
         attempts = int(task.get("attempts", 0) or 0)
@@ -534,6 +577,34 @@ class TodoLifecycleMixin:
     def _spec_task_has_structural_risk(self, task: dict[str, Any]) -> bool:
         if str(task.get("risk_level", "")).strip().lower() == "structural":
             return True
+        return self._spec_task_has_obvious_structural_action(task)
+
+    def _spec_task_risk_evidence_issues(self, task: dict[str, Any]) -> list[str]:
+        evidence = task.get("risk_evidence")
+        if not isinstance(evidence, dict) or not evidence:
+            return ["missing risk_evidence"]
+        field = str(evidence.get("field") or "").strip()
+        quote = str(evidence.get("quote") or "").strip()
+        explanation = str(evidence.get("explanation") or "").strip()
+        issues: list[str] = []
+        if field not in self._risk_evidence_fields():
+            issues.append("risk_evidence.field must name an actionable task field")
+        if not quote:
+            issues.append("missing risk_evidence.quote")
+        elif field in self._risk_evidence_fields() and not self._risk_quote_in_field(
+            task, field, quote
+        ):
+            issues.append("risk_evidence.quote must appear in the named field")
+        if not explanation:
+            issues.append("missing risk_evidence.explanation")
+        return issues
+
+    @staticmethod
+    def _risk_quote_in_field(task: dict[str, Any], field: str, quote: str) -> bool:
+        value = str(task.get(field) or "")
+        return quote in value or quote.lower() in value.lower()
+
+    def _spec_task_has_obvious_structural_action(self, task: dict[str, Any]) -> bool:
         text = " ".join(
             str(task.get(key, "") or "")
             for key in (
@@ -542,31 +613,20 @@ class TodoLifecycleMixin:
                 "family_key",
                 "expected_signal",
                 "edit_scope",
-                "correctness_rationale",
-                "fallback_plan",
             )
         ).lower()
         patterns = (
-            r"\brewrite\b",
-            r"\brefactor\b",
-            r"\brestructure\b",
+            r"\b(rewrite|replace|refactor|restructure)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
+            r"\b(entire|whole|all)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
             r"\breorder(?:ing)?\b",
-            r"\border(?:ing)?\b",
             r"\breschedul(?:e|ing)\b",
-            r"\bschedul(?:e|er|ing)\b",
-            r"\bbatch(?:ing)?\b",
-            r"\bbundle(?:s|d|ing)?\b",
-            r"\bgroup(?:ing)?\b",
-            r"\bmerge\b",
-            r"\bsplit\b",
-            r"\bparallel(?:ize|ism)?\b",
+            r"\bparallel(?:ize|ise|ization|isation)\b",
             r"\bconcurrent\b",
-            r"\bdata\s*flow\b",
-            r"\bcontrol\s*flow\b",
-            r"\bside[- ]?effect",
+            r"\b(batch|bundle|group|merge|split)\b.*\b(operation|instruction|task|item|loop|work|state|request|event)s?\b",
+            r"\b(schedule|reschedule)\b.*\b(operation|instruction|task|work|event|side[- ]?effect)s?\b",
             r"\bstate\s+(lifecycle|machine|transition|ordering)\b",
             r"\bmove\b.*\b(state|effect|write|read|operation|logic)\b",
-            r"\b(change|alter|replace)\b.*\b(loop|order|ordering|flow|state)\b",
+            r"\b(change|alter|replace)\b.*\b(data\s*flow|control\s*flow|loop|order|ordering|state)\b",
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
@@ -666,6 +726,7 @@ class TodoLifecycleMixin:
             "expected_signal": task.get("expected_signal"),
             "risk_level": task.get("risk_level"),
             "tactic_stage": task.get("tactic_stage"),
+            "risk_evidence": task.get("risk_evidence"),
             "probe_plan": task.get("probe_plan"),
             "invariant_evidence": task.get("invariant_evidence"),
             "rollback_or_shrink_plan": task.get("rollback_or_shrink_plan"),
@@ -681,8 +742,10 @@ class TodoLifecycleMixin:
             "If the task changes behavior ordering, data/control flow, state lifecycle, "
             "scheduling, batching, parallelism, loop structure, or side-effect placement, "
             "rewrite it as risk_level=structural with tactic_stage=structural_probe, "
-            "probe_plan, invariant_evidence, and rollback_or_shrink_plan. The first "
-            "structural task should be a small reversible probe, not a full rewrite.",
+            "risk_evidence, probe_plan, invariant_evidence, and rollback_or_shrink_plan. "
+            "The first structural task should be a small reversible probe, not a full "
+            "rewrite. risk_evidence must quote an actionable field such as title or "
+            "edit_scope, not a correctness rationale or invariant.",
             "Rejected task:",
             json.dumps(compact_task, ensure_ascii=False, indent=2),
         ]
@@ -1242,6 +1305,9 @@ class TodoLifecycleMixin:
             "expected_signal": str(task.get("expected_signal") or ""),
             "risk_level": str(task.get("risk_level") or ""),
             "tactic_stage": str(task.get("tactic_stage") or "local_edit"),
+            "risk_evidence": task.get("risk_evidence")
+            if isinstance(task.get("risk_evidence"), dict)
+            else {},
             "probe_plan": str(task.get("probe_plan") or ""),
             "invariant_evidence": self._normalize_string_list(
                 task.get("invariant_evidence")
@@ -2293,6 +2359,7 @@ class TodoLifecycleMixin:
                 "context": self._truncate_text(str(active_todo.get("context", "")), 700),
                 "micro_goal": active_todo.get("micro_goal"),
                 "risk_level": active_todo.get("risk_level", ""),
+                "risk_evidence": active_todo.get("risk_evidence", {}),
                 "probe_plan": active_todo.get("probe_plan", ""),
                 "invariant_evidence": active_todo.get("invariant_evidence", []),
                 "target_symbols": active_todo.get("target_symbols", []),

@@ -65,6 +65,11 @@ Output strict JSON with:
       "edit_scope": "one-sentence maximum edit boundary",
       "risk_level": "local|structural",
       "tactic_stage": "local_edit|structural_probe|structural_expand",
+      "risk_evidence": {
+        "field": "title|edit_scope|strategy_axis|family_key|expected_signal",
+        "quote": "exact source phrase from that field supporting the risk label",
+        "explanation": "why this task is local or structural"
+      },
       "probe_plan": "first smallest reversible probe when risk_level is structural",
       "invariant_evidence": ["observable invariant or diagnostic proving the probe is safe"],
       "validator": {
@@ -121,6 +126,12 @@ Rules:
 - Set risk_level to "local" and tactic_stage to "local_edit" only when the
   change is a narrow local edit that does not reorder behavior, state, data
   flow, control flow, or side effects.
+- Always provide risk_evidence for local and structural tasks. Its field must
+  be one of title, edit_scope, strategy_axis, family_key, or expected_signal,
+  and its quote must be copied from that field. Do not cite
+  correctness_rationale, fallback_plan, preserved_invariants, or
+  invariant_evidence as risk evidence; those fields explain safety, not the
+  requested edit's risk class.
 - Use acceptance.kind "synthesized" for implementation tasks unless the request supplies
   an explicit command or metric acceptance.
 - For command acceptance, include only human-supplied commands from the request or config.
