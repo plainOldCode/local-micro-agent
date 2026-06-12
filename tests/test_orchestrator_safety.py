@@ -5146,6 +5146,191 @@ Background / non-constraints
             self.assertEqual(updated["todos"][0]["attempts"], 1)
             self.assertEqual(updated["todos"][0]["non_budget_attempts"], 1)
 
+    def test_active_task_probe_contract_allows_matching_region_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "class Parser:\n"
+                "    def parse_item(self, value):\n"
+                "        return value.strip()\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_enforce_active_change_scope": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["Parser.parse_item"],
+                "target_regions": ["target.py::Parser.parse_item"],
+                "source": "spec_scheduler",
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::Parser.parse_item"],
+                    "expected_changed_regions": ["target.py::Parser.parse_item"],
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 3,
+                },
+            }
+            change = CodeChange(
+                "target.py",
+                "narrow parse_item guard",
+                target="        return value.strip()\n",
+                replacement="        return value.strip() if value else ''\n",
+                target_region="target.py::Parser.parse_item",
+            )
+
+            self.assertIsNone(agent._active_todo_change_scope_rejection([change]))
+
+    def test_active_task_probe_contract_rejects_file_and_region_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+            (repo / "other.py").write_text("def helper(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_enforce_active_change_scope": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "source": "spec_scheduler",
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 3,
+                },
+            }
+            file_drift = CodeChange(
+                "other.py",
+                "edit helper instead",
+                target="    return value\n",
+                replacement="    return value + 1\n",
+                target_region="other.py::helper",
+            )
+            region_drift = CodeChange(
+                "target.py",
+                "edit helper instead",
+                target="def parse_item(value):\n    return value\n",
+                replacement="def parse_item(value):\n    return value + 1\n",
+                target_region="target.py::helper",
+            )
+
+            file_rejection = agent._active_todo_change_scope_rejection([file_drift])
+            region_rejection = agent._active_todo_change_scope_rejection([region_drift])
+
+            self.assertIsNotNone(file_rejection)
+            self.assertEqual(file_rejection[0], "rejected_active_task_file_drift")
+            self.assertIsNotNone(region_rejection)
+            self.assertEqual(region_rejection[0], "rejected_active_task_region_drift")
+
+    def test_active_task_probe_contract_rejects_shape_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n"
+                "    left = value.strip()\n"
+                "    right = value.lower()\n"
+                "    return left or right\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                        "todo_enforce_active_change_scope": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
+                "source": "spec_scheduler",
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 2,
+                },
+            }
+            first = CodeChange(
+                "target.py",
+                "first hunk",
+                target="    left = value.strip()\n",
+                replacement="    left = value.strip() if value else ''\n",
+                target_region="target.py::parse_item",
+            )
+            second = CodeChange(
+                "target.py",
+                "second hunk",
+                target="    right = value.lower()\n",
+                replacement="    right = value.lower() if value else ''\n",
+                target_region="target.py::parse_item",
+            )
+            broad = CodeChange(
+                "target.py",
+                "too many declared lines",
+                target=(
+                    "    left = value.strip()\n"
+                    "    right = value.lower()\n"
+                    "    return left or right\n"
+                ),
+                replacement=(
+                    "    left = value.strip() if value else ''\n"
+                    "    right = value.lower() if value else ''\n"
+                    "    return left or right\n"
+                ),
+                target_region="target.py::parse_item",
+            )
+
+            hunk_rejection = agent._active_todo_change_scope_rejection([first, second])
+            line_rejection = agent._active_todo_change_scope_rejection([broad])
+
+            self.assertIsNotNone(hunk_rejection)
+            self.assertEqual(hunk_rejection[0], "rejected_active_task_shape_drift")
+            self.assertIn("max_hunks", hunk_rejection[1])
+            self.assertIsNotNone(line_rejection)
+            self.assertEqual(line_rejection[0], "rejected_active_task_shape_drift")
+            self.assertIn("max_changed_lines", line_rejection[1])
+
     def test_active_todo_contract_does_not_duplicate_scope_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

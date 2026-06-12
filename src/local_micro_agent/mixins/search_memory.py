@@ -480,8 +480,22 @@ class AdaptiveSearchMixin:
             for item in active_todo.get("target_regions", [])
             if str(item).strip()
         ] if isinstance(active_todo.get("target_regions"), list) else []
+        raw_contract = active_todo.get("probe_diff_contract")
+        spec_contract = (
+            self._probe_diff_contract_for_todo(active_todo)
+            if isinstance(raw_contract, dict) and raw_contract
+            else {}
+        )
         if not symbols and not regions:
             return None
+
+        if spec_contract:
+            shape_rejection = self._active_task_shape_contract_rejection(
+                changes,
+                spec_contract,
+            )
+            if shape_rejection is not None:
+                return shape_rejection
 
         if self._active_todo_is_structural_probe(active_todo):
             max_changes = int(workflow.get("structural_probe_max_changes", 1) or 1)
@@ -516,22 +530,93 @@ class AdaptiveSearchMixin:
             allowed_paths.update(
                 str(path).strip() for path in allowed_files if str(path).strip()
             )
+        contract_allowed_files = self._string_list_from_any(
+            spec_contract.get("allowed_files")
+        )
+        allowed_paths.update(contract_allowed_files)
 
         todo_id = str(active_todo.get("todo_id", "active todo"))
+        contract_regions = self._string_list_from_any(
+            spec_contract.get("expected_changed_regions")
+        ) or self._string_list_from_any(spec_contract.get("allowed_regions"))
         for change in changes:
             if allowed_paths and change.path not in allowed_paths:
                 return (
-                    "rejected_todo_scope_drift",
+                    (
+                        "rejected_active_task_file_drift"
+                        if spec_contract
+                        else "rejected_todo_scope_drift"
+                    ),
                     f"change path {change.path} is outside active todo {todo_id} "
                     f"target paths {', '.join(sorted(allowed_paths))}",
                 )
+            target_region = str(change.target_region or "").strip()
+            if target_region and contract_regions and target_region not in contract_regions:
+                return (
+                    "rejected_active_task_region_drift",
+                    f"change target_region {target_region} is outside active todo "
+                    f"{todo_id} contract regions {', '.join(contract_regions)}",
+                )
             if symbols and not self._change_targets_any_symbol(change, symbols):
                 return (
-                    "rejected_todo_scope_drift",
+                    (
+                        "rejected_active_task_region_drift"
+                        if spec_contract
+                        else "rejected_todo_scope_drift"
+                    ),
                     f"change for {change.path} does not target active todo {todo_id} "
                     f"symbols {', '.join(symbols)}",
                 )
         return None
+
+    def _active_task_shape_contract_rejection(
+        self,
+        changes: list[CodeChange],
+        contract: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        max_files = int(contract.get("max_files_changed", 0) or 0)
+        if max_files:
+            changed_files = {change.path for change in changes}
+            if len(changed_files) > max_files:
+                return (
+                    "rejected_active_task_shape_drift",
+                    f"candidate changes {len(changed_files)} files, "
+                    f"max_files_changed={max_files}",
+                )
+        max_hunks = int(contract.get("max_hunks", 0) or 0)
+        if max_hunks and len(changes) > max_hunks:
+            return (
+                "rejected_active_task_shape_drift",
+                f"candidate emits {len(changes)} hunks, max_hunks={max_hunks}",
+            )
+        max_lines = int(contract.get("max_changed_lines", 0) or 0)
+        if max_lines:
+            changed_lines = sum(self._declared_change_line_count(change) for change in changes)
+            if changed_lines > max_lines:
+                return (
+                    "rejected_active_task_shape_drift",
+                    f"candidate declares {changed_lines} changed lines, "
+                    f"max_changed_lines={max_lines}",
+                )
+        return None
+
+    @staticmethod
+    def _declared_change_line_count(change: CodeChange) -> int:
+        if change.start_line is not None and change.end_line is not None:
+            return max(1, int(change.end_line) - int(change.start_line) + 1)
+        if change.target is not None or change.replacement is not None:
+            old_lines = (change.target or "").splitlines()
+            new_lines = (change.replacement or "").splitlines()
+            return max(len(old_lines), len(new_lines), 1)
+        if change.patch:
+            return sum(
+                1
+                for line in change.patch.splitlines()
+                if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+            )
+        if change.content is not None:
+            return max(len(change.content.splitlines()), 1)
+        return 1
 
     def _active_probe_diff_contract_rejection(
         self,

@@ -5043,6 +5043,9 @@ class TodoLifecycleMixin:
     def _is_active_todo_drift_record(record: dict[str, Any]) -> bool:
         status = str(record.get("status", ""))
         return status in {
+            "rejected_active_task_file_drift",
+            "rejected_active_task_region_drift",
+            "rejected_active_task_shape_drift",
             "rejected_todo_axis_drift",
             "rejected_todo_family_drift",
             "rejected_todo_scope_drift",
