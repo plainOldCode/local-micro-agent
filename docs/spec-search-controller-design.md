@@ -17,6 +17,9 @@ exposes the next one:
 - graph rewrite rejection can still collapse the search frontier into
   `deferred_contract_drift + failed_design`, with terminal
   `no_recovery_possible`.
+- targeted rewrite quality failures now defer the target and move to siblings,
+  but drift recovery can still let a bad targeted rewrite collapse the sibling
+  portfolio before graph reseed is tried.
 
 The underlying issue is not the specific stop reason. It is that the controller
 treats the spec graph as the plan, not as one candidate in a bounded search.
@@ -275,6 +278,101 @@ The controller must choose from a closed set of actions:
 No transition should call an LLM unless it is explicitly `contract_rewrite`,
 `design_rewrite`, or `reseed_graph`.
 
+### Phase D.1: Target-Node Transactions
+
+Targeted rewrites must be treated as transactions on one task node, not as
+authorization to replace the selected graph.
+
+This applies especially to `active_task_drift` recovery. A drifted task is
+evidence that the active contract may be wrong or too broad. It is not evidence
+that unrelated sibling tasks should be deleted, reset, or made dependent on the
+new target. The controller should therefore apply targeted rewrite output using
+these postconditions:
+
+1. Only the target task may be replaced, deferred, or retired.
+2. Runnable sibling task ids, statuses, dependencies, budgets, and observations
+   are restored from the previous spec by default.
+3. New non-target tasks from the model are ignored unless a workflow flag later
+   enables explicit local expansion and they pass graph gates.
+4. Schedulable sibling count must not decrease because of the model output.
+5. For drift recovery, the replacement target must be materially different from
+   the failed drift shape using structured fields only:
+   `target_regions`, `tactic_stage`, `validator.kind`, and `deliverables`.
+6. If the replacement fails quality, graph, or material-diversity gates, the
+   controller defers only the target task and returns to `SCHEDULE`.
+
+In other words, a targeted rewrite can improve or retire the target node, but it
+cannot spend the sibling frontier. `portfolio_collapsed_below_min_runnable`
+should become a target-local failure outcome, not a graph-wide frontier loss.
+
+Current implementation warning:
+
+- `_merge_targeted_spec_rewrite()` currently promotes `additional_tasks` to
+  replacements when no explicit replacement exists, and appends additional
+  tasks after merge. MVP 5 must disable both behaviors in target-transaction
+  mode. A model output that omits the target but proposes unrelated new tasks is
+  a target rewrite failure, not a graph expansion.
+- Transaction telemetry must be computed from the raw model output before
+  sibling restoration. The merged spec intentionally hides omissions by
+  restoring siblings, so raw output and merged output must stay separate.
+
+Suggested helper shape:
+
+```python
+@dataclass
+class TargetedRewriteTransaction:
+    merged_spec: dict[str, Any]
+    raw_rewrite_spec: dict[str, Any]
+    target_task_id: str
+    target_outcome: str
+    drift_related: bool
+    preserved_sibling_task_ids: list[str]
+    ignored_non_target_task_ids: list[str]
+    schedulable_sibling_count_before: int
+    schedulable_sibling_count_after: int
+    replacement_task_ids: list[str]
+    issues: list[str]
+```
+
+The transaction helper should be the single place that:
+
+- splits raw rewrite tasks into target replacements and ignored non-target
+  proposals;
+- restores siblings from `previous_spec`;
+- inherits design/contract rewrite attempt counters;
+- computes graph/material-diversity issues from raw replacement tasks plus the
+  restored sibling frontier;
+- prepares telemetry for progress events, signatures, and terminal/report
+  summaries.
+
+Suggested status mapping:
+
+| Target state | Rewrite failure | Target outcome | Sibling outcome |
+| --- | --- | --- | --- |
+| `needs_design` | quality or graph gate rejected | `deferred_design_invalid` | restored |
+| `needs_contract_rewrite` | quality or graph gate rejected | `deferred_contract_drift` | restored |
+| drift-saturated task | duplicate material axes | `deferred_contract_drift` | restored |
+
+Suggested progress/signature fields:
+
+- progress event: reuse existing event names for report compatibility:
+  - `drift_recovery` for drift/contract targets;
+  - `design_rejected` for design targets.
+- action: `defer_target_preserve_siblings`
+- issue_scope: `target_task`
+- preserve evidence:
+  - `preserved_sibling_task_ids`;
+  - `schedulable_sibling_count_before`;
+  - `schedulable_sibling_count_after`;
+  - `ignored_non_target_task_ids`.
+
+Using existing event names keeps `_append_spec_progress_event()` and current
+reports useful without losing task detail fields. If a new event name is added
+later, the report/terminal summarizers must be updated in the same patch.
+
+Graph reseed should run only after the transaction returns to `SCHEDULE` and no
+runnable sibling or backtrackable graph remains.
+
 ### Phase E: Backtrack / Reseed
 
 When the selected graph has no runnable frontier:
@@ -425,6 +523,53 @@ Tests:
 - candidate budget is bounded by `spec_synth_call_budget`.
 - duplicate graph variants are excluded from sibling selection.
 
+### MVP 5: Portfolio-Preserving Targeted Recovery
+
+Scope:
+
+- Split targeted rewrite application into a target-node transaction helper.
+- Preserve sibling tasks by controller rule after quality, graph, and material
+  diversity failures.
+- Convert drift-target graph rewrite rejection into
+  `deferred_contract_drift`, not generic `deferred_design_invalid`.
+- Do not let `portfolio_collapsed_below_min_runnable` consume the whole graph
+  frontier when runnable siblings existed before the targeted rewrite.
+- Add terminal/report counters for target-local rewrite rejections and restored
+  siblings.
+
+Why next:
+
+The `9130b84` 20-loop clean run confirmed that bounded targeted quality retry
+works: `task-001` was deferred after final quality failure and the scheduler
+moved to siblings. The next failure was downstream: `task-002` and `task-003`
+hit active-task drift, then their targeted graph rewrites were rejected for
+portfolio collapse, consuming both graph reseeds after only two CODE loops.
+
+This is an error-propagation shape. A local drift recovery attempted to repair
+one active task, but the rejected rewrite still damaged the graph-level search
+frontier. MVP 5 keeps the recovery local so sibling and backtrack frontiers stay
+available.
+
+Test matrix:
+
+| Case | Scenario | Expected |
+| --- | --- | --- |
+| normal | drift target rewrites into a materially different replacement | replacement merged; sibling status/dependencies/budget/observation preserved |
+| edge | graph contract issue such as `portfolio_collapsed_below_min_runnable` | only target deferred; runnable sibling schedules next; no reseed while sibling is runnable |
+| edge | repeated drift material axes fail diversity gate | target becomes `deferred_contract_drift`; sibling frontier preserved |
+| error | raw model output has no target replacement and only unrelated new tasks | unrelated tasks are ignored, not promoted to replacement |
+| error | target id missing or malformed `task_graph` | no artifact/state pollution, or target-local failure with explicit telemetry |
+| report | target-local rejection occurs | terminal/report include target-local rejection count, preserved sibling ids, ignored non-target ids |
+
+Additional assertions:
+
+- `additional_tasks` are never appended during target-transaction mode unless an
+  explicit future config enables local expansion.
+- raw-output omissions are recorded even though the persisted merged spec keeps
+  restored siblings.
+- `graph_reseed_requested` is not emitted from a target-local rejection while
+  at least one sibling remains schedulable.
+
 ## Non-Goals
 
 - Do not encode benchmark-specific optimization tactics.
@@ -456,16 +601,16 @@ Remaining:
 
 ## Recommended Next Patch
 
-Start with MVP 1 and the minimal terminal reason fix:
+Implement MVP 5 first:
 
-1. Add failure signature artifact helpers.
-2. Emit `design_rewrite_invalid` for `graph_rewrite_rejected`.
-3. Emit signature summaries into `terminal_state.json`.
-4. Add a diagnostic stop reason for the current observed mixed case:
-   `search_frontier_exhausted_after_design_invalid`.
-5. Include `spec_synth_calls_used` / `spec_synth_call_budget` in terminal
-   output while touching terminal summaries.
+1. Add a target-node transaction helper for targeted rewrites.
+2. Make graph/quality/material-diversity rejection defer only the target task.
+3. Preserve runnable siblings from the previous spec regardless of model
+   omissions.
+4. Record ignored non-target tasks and preserved sibling ids in progress,
+   failure signatures, and terminal/report counters.
+5. Add normal, edge, and error-path tests before any M2 Max smoke.
 
-This does not solve search yet, but it turns the latest failure into a typed
-transition dataset. MVP 2 and MVP 3 can then use that dataset to backtrack and
-reseed.
+Do not increase graph reseed attempts to hide this failure. Reseed is still the
+right final escape hatch, but it should not be consumed by target-local recovery
+failures while sibling tasks remain runnable.
