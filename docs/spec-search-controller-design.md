@@ -454,8 +454,9 @@ candidate recorder should recover task identity from, in order:
 1. candidate record `spec_task_id` / `todo_id`;
 2. current `active_todo`;
 3. persisted `active_todo.json`;
-4. `run_spec.active_task_id`;
-5. the latest `scheduled` / `retry` spec progress event for the current loop.
+4. in-memory `current_spec_task_id`;
+5. `run_spec.active_task_id`;
+6. the latest `scheduled` / `retry` spec progress event for the current loop.
 
 If no task id can be recovered, record the plateau signature as graph-level
 evidence but do not charge a task-local threshold.

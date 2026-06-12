@@ -2141,6 +2141,390 @@ Background / non-constraints
             notes = "\n".join(result.notes)
             self.assertIn("Spec metric task requires improvement before close", notes)
 
+    def test_candidate_history_recovers_metric_plateau_task_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "active_todo.json").write_text(
+                json.dumps(
+                    {
+                        "todo_id": "task-002",
+                        "spec_task_id": "task-002",
+                        "status": "active",
+                        "tactic_stage": "local_edit",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "todo_attempts_path": ".local_micro_agent/todo_attempts.jsonl",
+                        "active_todo_path": ".local_micro_agent/active_todo.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            candidate = CodeCandidate(
+                "neutral",
+                [
+                    CodeChange(
+                        "target.py",
+                        "metric-neutral helper call",
+                        target="value = old()\n",
+                        replacement="value = new()\n",
+                    )
+                ],
+                "correct but no metric gain",
+                strategy_axis="general_edit",
+            )
+
+            agent._append_candidate_history(
+                candidate,
+                status="rejected",
+                metric=147734,
+                applied=1,
+                failed=True,
+                extra={
+                    "failure_class": "no_improvement",
+                    "summary": "Metric candidate=147734 baseline=147734 improved=False.",
+                    "tactic_stage": "local_edit",
+                },
+            )
+
+            record = json.loads((artifact_dir / "candidates.jsonl").read_text())
+            attempt = json.loads((artifact_dir / "todo_attempts.jsonl").read_text())
+            self.assertEqual(record["todo_id"], "task-002")
+            self.assertEqual(record["spec_task_id"], "task-002")
+            self.assertEqual(record["spec_task_identity_source"], "active_todo_file")
+            self.assertEqual(attempt["todo_id"], "task-002")
+            self.assertEqual(attempt["spec_task_id"], "task-002")
+
+    def test_metric_neutral_plateau_repeats_defer_task(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                task = {
+                    "task_id": "task-001",
+                    "title": "optimize target",
+                    "status": "in_progress",
+                    "target_regions": ["target.py::build"],
+                    "tactic_stage": "local_edit",
+                    "deliverables": ["target.py"],
+                    "acceptance": {"kind": "metric"},
+                    "budget": {"attempts_max": 4},
+                }
+                spec = {
+                    "version": 2,
+                    "spec_id": "metric-task",
+                    "objective": "Improve cycles.",
+                    "active_task_id": "task-001",
+                    "task_graph": [task],
+                }
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                            "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                            "spec_metric_neutral_plateau_same_fingerprint_limit": 2,
+                            "spec_task_attempt_budget": 4,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", max_loops=10),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task_id"] = "task-001"
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.test_results = [
+                    TestResult("python3 test.py", 0, stdout="cycles: 147734\n")
+                ]
+
+                for _ in range(2):
+                    agent.state.scratch["metric_acceptance"] = {
+                        "requires_improvement": True,
+                        "metric": 147734,
+                        "baseline": 147734,
+                        "improved": False,
+                        "failed": True,
+                        "failure_class": "no_improvement",
+                        "summary": "Metric candidate=147734 baseline=147734 improved=False.",
+                    }
+                    agent.state.scratch["last_candidate_observation"] = {
+                        "candidate_id": "neutral",
+                        "fingerprint": "same-neutral-shape",
+                        "failure_class": "no_improvement",
+                        "summary": "correctness passed without metric gain",
+                        "tactic_stage": "local_edit",
+                        "spec_task_id": "task-001",
+                        "todo_id": "task-001",
+                    }
+                    await agent._handle_spec_task_test_result(failed=True)
+
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                persisted_task = persisted["task_graph"][0]
+                rows = [
+                    json.loads(line)
+                    for line in (artifact_dir / "failure_signatures.jsonl")
+                    .read_text()
+                    .splitlines()
+                ]
+                self.assertEqual(
+                    persisted_task["status"],
+                    "deferred_no_improvement_plateau",
+                )
+                self.assertEqual(
+                    persisted_task["plateau"]["plateau_task_local_count"],
+                    2,
+                )
+                self.assertEqual(
+                    [row["failure_class"] for row in rows],
+                    ["metric_neutral_plateau", "metric_neutral_plateau"],
+                )
+                self.assertEqual(rows[-1]["status"], "deferred_no_improvement_plateau")
+                self.assertEqual(rows[-1]["plateau_task_local_count"], 2)
+                progress = [
+                    json.loads(line)
+                    for line in (artifact_dir / "spec_progress.jsonl")
+                    .read_text()
+                    .splitlines()
+                ]
+                self.assertEqual(progress[-1]["reason"], "metric_neutral_plateau")
+                self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+
+        asyncio.run(run_case())
+
+    def test_metric_neutral_plateau_without_task_identity_is_graph_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                        "spec_metric_neutral_plateau_same_fingerprint_limit": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+
+            record = agent._record_metric_neutral_plateau_signature(
+                spec={"version": 2, "spec_id": "metric-task", "task_graph": []},
+                task={},
+                candidate_record={
+                    "candidate_id": "neutral",
+                    "fingerprint": "same-neutral-shape",
+                    "failure_class": "no_improvement",
+                    "summary": "correct but no metric gain",
+                },
+                metric_observation={
+                    "requires_improvement": True,
+                    "metric": 147734,
+                    "baseline": 147734,
+                    "improved": False,
+                    "failure_class": "no_improvement",
+                    "summary": "Metric candidate=147734 baseline=147734 improved=False.",
+                },
+            )
+
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record["failure_class"], "metric_neutral_plateau")
+            self.assertEqual(record["task_id"], "")
+            self.assertNotIn("spec_task_id", record)
+            self.assertEqual(record["plateau_task_local_count"], 0)
+            self.assertEqual(record["status"], "rejected_no_improvement")
+
+    def test_portfolio_reopen_blocks_plateau_cooled_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_reopen_failed_portfolio_tasks": True,
+                        "spec_portfolio_recovery_rounds": 2,
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                        "spec_metric_neutral_plateau_region_tactic_limit": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            task = {
+                "task_id": "task-002",
+                "status": "failed",
+                "target_regions": ["target.py::build"],
+                "tactic_stage": "local_edit",
+                "deliverables": ["target.py"],
+                "budget": {"attempts_used": 4, "attempts_max": 4},
+            }
+            for index in range(2):
+                agent._append_failure_signature(
+                    phase="metric_gate",
+                    spec={"version": 2, "spec_id": "metric-task", "task_graph": [task]},
+                    task=task,
+                    status="rejected_no_improvement",
+                    failure_class="metric_neutral_plateau",
+                    issue_code=f"metric_neutral_plateau_shape_{index}",
+                    issue_scope="candidate_delta",
+                    extra={"plateau_signature_key": f"shape-{index}"},
+                )
+
+            reopened = agent._reopen_failed_spec_portfolio_tasks([task])
+
+            self.assertEqual(reopened, [])
+            self.assertEqual(task["status"], "deferred_no_improvement_plateau")
+            blocked = agent.state.scratch["spec_plateau_reopen_blocked_tasks"]
+            self.assertEqual(blocked[0]["task_id"], "task-002")
+            self.assertEqual(blocked[0]["plateau_region_tactic_count"], 2)
+
+    def test_plateau_cooldown_affects_graph_score_and_reseed_focus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            cooled_task = {
+                "task_id": "task-002",
+                "status": "failed",
+                "target_regions": ["target.py::build"],
+                "tactic_stage": "local_edit",
+                "deliverables": ["target.py"],
+            }
+            agent._append_failure_signature(
+                phase="metric_gate",
+                spec={"version": 2, "spec_id": "metric-task", "task_graph": [cooled_task]},
+                task=cooled_task,
+                status="deferred_no_improvement_plateau",
+                failure_class="metric_neutral_plateau",
+                issue_code="metric_neutral_plateau_same_shape",
+                issue_scope="candidate_delta",
+                extra={"plateau_signature_key": "same-shape"},
+            )
+            candidate_graph = {
+                "version": 2,
+                "spec_id": "candidate",
+                "task_graph": [
+                    {
+                        "task_id": "task-new",
+                        "status": "open",
+                        "target_regions": ["target.py::build"],
+                        "tactic_stage": "local_edit",
+                    }
+                ],
+            }
+
+            score = agent._spec_graph_candidate_score(candidate_graph)
+            focus = agent._spec_graph_reseed_focus(
+                candidate_graph,
+                candidate_graph["task_graph"],
+                reseed_attempt=1,
+                reseed_attempts_max=2,
+                cooldown_keys=agent._current_failure_cooldown_keys(),
+            )
+
+            self.assertEqual(score["plateau_cooldown_hits"], 1)
+            self.assertIn("Metric-neutral plateau cooldown keys", focus)
+            self.assertIn("Do not simply rename task ids", focus)
+
+    def test_spec_report_includes_metric_neutral_plateau_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            task = {
+                "task_id": "task-002",
+                "status": "deferred_no_improvement_plateau",
+                "target_regions": ["target.py::build"],
+                "tactic_stage": "local_edit",
+                "deliverables": ["target.py"],
+            }
+            spec = {
+                "version": 2,
+                "spec_id": "metric-task",
+                "objective": "Improve cycles.",
+                "task_graph": [task],
+                "last_stop_reason": "search_frontier_exhausted",
+            }
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_report_path": ".local_micro_agent/spec_report.md",
+                        "spec_terminal_state_path": ".local_micro_agent/terminal_state.json",
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                    },
+                },
+                AgentState(
+                    repo_root=repo,
+                    user_request="test",
+                    current=AgentStateName.FAILED,
+                    max_loops=10,
+                ),
+            )
+            agent.state.scratch["run_spec"] = spec
+            agent._append_failure_signature(
+                phase="metric_gate",
+                spec=spec,
+                task=task,
+                status="deferred_no_improvement_plateau",
+                failure_class="metric_neutral_plateau",
+                issue_code="metric_neutral_plateau_same_shape",
+                issue_scope="candidate_delta",
+                extra={"plateau_signature_key": "same-shape"},
+            )
+
+            agent._persist_spec_report()
+
+            report = (artifact_dir / "spec_report.md").read_text()
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            self.assertIn("## Metric-Neutral Plateau", report)
+            self.assertIn("plateau_count: 1", report)
+            self.assertEqual(terminal["metric_neutral_plateau_count"], 1)
+            self.assertEqual(terminal["metric_neutral_plateau_task_ids"], ["task-002"])
+            self.assertEqual(
+                terminal["metric_neutral_plateau_deferred_task_ids"],
+                ["task-002"],
+            )
+
     def test_spec_mode_reopens_failed_prerequisite_when_budget_remains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

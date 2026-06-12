@@ -2131,6 +2131,7 @@ class TodoLifecycleMixin:
                 1 for code in issue_codes if str(code).startswith("design_contract_")
             ),
             "drift_saturation_hits": self._spec_graph_drift_saturation_hits(spec),
+            "plateau_cooldown_hits": self._spec_graph_plateau_cooldown_hits(spec),
             "cooldown_hits": self._spec_graph_cooldown_hits(spec),
             "duplicate_hits": self._spec_graph_duplicate_hits(
                 spec,
@@ -2252,7 +2253,7 @@ class TodoLifecycleMixin:
     def _spec_graph_candidate_sort_key(
         record: dict[str, Any],
         score: dict[str, Any] | None = None,
-    ) -> tuple[int, int, int, int, int, int, int, str]:
+    ) -> tuple[int, int, int, int, int, int, int, int, str]:
         score = score if isinstance(score, dict) else record.get("score", {})
         if not isinstance(score, dict):
             score = {}
@@ -2260,6 +2261,7 @@ class TodoLifecycleMixin:
             int(score.get("quality_issues", 0) or 0),
             int(score.get("design_issues", 0) or 0),
             int(score.get("drift_saturation_hits", 0) or 0),
+            int(score.get("plateau_cooldown_hits", 0) or 0),
             int(score.get("cooldown_hits", 0) or 0),
             int(score.get("duplicate_hits", 0) or 0),
             -int(score.get("runnable_tasks", 0) or 0),
@@ -2361,7 +2363,7 @@ class TodoLifecycleMixin:
         latest = self._latest_spec_graph_candidate_events()
         valid_candidates: list[
             tuple[
-                tuple[int, int, int, int, int, int, int, str],
+                tuple[int, int, int, int, int, int, int, int, str],
                 dict[str, Any],
                 dict[str, Any],
                 dict[str, Any],
@@ -2592,6 +2594,17 @@ class TodoLifecycleMixin:
             "Cooldown keys banned for this reseed:",
             json.dumps(cooldown_keys, ensure_ascii=False, indent=2),
         ]
+        plateau_cooldown_keys = self._metric_neutral_plateau_cooldown_keys()
+        if plateau_cooldown_keys:
+            parts.extend(
+                [
+                    "Metric-neutral plateau cooldown keys:",
+                    json.dumps(plateau_cooldown_keys, ensure_ascii=False, indent=2),
+                    "At least one runnable task must be materially different from "
+                    "these plateau keys by target_regions, tactic_stage, "
+                    "validator.kind, or deliverable shape. Do not simply rename task ids.",
+                ]
+            )
         suggested_regions = self._model_suggested_drift_regions()
         if suggested_regions:
             parts.extend(
@@ -3435,6 +3448,268 @@ class TodoLifecycleMixin:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         return record
 
+    def _metric_neutral_plateau_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("spec_metric_neutral_plateau", True))
+
+    def _metric_neutral_plateau_fingerprint(self, record: dict[str, Any]) -> str:
+        explicit = str(record.get("fingerprint") or "").strip()
+        if explicit:
+            return self._normalize_failure_issue_code(explicit)
+        changes = record.get("changes")
+        if isinstance(changes, list) and changes:
+            compact_changes = []
+            for change in changes[:6]:
+                if not isinstance(change, dict):
+                    continue
+                compact_changes.append(
+                    {
+                        key: change.get(key)
+                        for key in ("path", "mode", "target", "reason")
+                        if change.get(key) not in (None, "", [], {})
+                    }
+                )
+            if compact_changes:
+                return self._normalize_failure_issue_code(
+                    self._normalize_fingerprint_text(
+                        json.dumps(compact_changes, sort_keys=True)
+                    )
+                )
+        fallback = " ".join(
+            str(record.get(key) or "")
+            for key in ("candidate_id", "strategy_axis", "reason", "summary")
+        )
+        return self._normalize_failure_issue_code(
+            self._normalize_fingerprint_text(fallback) or "candidate_shape_unknown"
+        )
+
+    def _metric_neutral_plateau_shape(
+        self,
+        task: dict[str, Any],
+        record: dict[str, Any],
+    ) -> dict[str, str]:
+        target_regions = self._failure_signature_list(task.get("target_regions"))
+        target_symbols = self._failure_signature_list(task.get("target_symbols"))
+        region_hash = self._failure_signature_target_region_hash(
+            target_regions,
+            target_symbols=target_symbols,
+        )
+        tactic_stage = str(
+            task.get("tactic_stage")
+            or record.get("tactic_stage")
+            or "tactic-unknown"
+        )
+        fingerprint = self._metric_neutral_plateau_fingerprint(record)
+        metric_delta_bucket = "neutral"
+        return {
+            "target_region_hash": region_hash,
+            "tactic_stage": tactic_stage,
+            "edit_shape_fingerprint": fingerprint,
+            "metric_delta_bucket": metric_delta_bucket,
+            "plateau_signature_key": ":".join(
+                [region_hash, tactic_stage, fingerprint, metric_delta_bucket]
+            ),
+            "plateau_cooldown_prefix": f"{region_hash}:{tactic_stage}:",
+        }
+
+    def _metric_neutral_plateau_records(
+        self, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        records = self._read_spec_jsonl(
+            self._failure_signature_path(),
+            limit=limit or _SPEC_JSONL_READ_LIMIT,
+        )
+        return [
+            record
+            for record in records
+            if str(record.get("failure_class") or "") == "metric_neutral_plateau"
+        ]
+
+    def _metric_neutral_plateau_cooldown_keys(self, *, limit: int = 8) -> list[str]:
+        keys: list[str] = []
+        for record in reversed(self._metric_neutral_plateau_records()):
+            key = str(record.get("cooldown_key") or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+            if len(keys) >= limit:
+                break
+        keys.reverse()
+        return keys
+
+    def _metric_neutral_plateau_task_count(
+        self,
+        *,
+        plateau_signature_key: str,
+        task_id: str,
+    ) -> int:
+        if not plateau_signature_key or not task_id:
+            return 0
+        return sum(
+            1
+            for record in self._metric_neutral_plateau_records()
+            if str(record.get("plateau_signature_key") or "") == plateau_signature_key
+            and str(record.get("task_id") or "") == task_id
+        )
+
+    def _metric_neutral_plateau_region_tactic_count(self, task: dict[str, Any]) -> int:
+        shape = self._metric_neutral_plateau_shape(task, {})
+        prefix = shape["plateau_cooldown_prefix"]
+        if not prefix:
+            return 0
+        return sum(
+            1
+            for record in self._metric_neutral_plateau_records()
+            if str(record.get("cooldown_key") or "").startswith(prefix)
+        )
+
+    def _record_metric_neutral_plateau_signature(
+        self,
+        *,
+        spec: dict[str, Any],
+        task: dict[str, Any],
+        candidate_record: dict[str, Any],
+        metric_observation: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self._metric_neutral_plateau_enabled():
+            return None
+        if str(metric_observation.get("failure_class") or "") != "no_improvement":
+            return None
+        if not bool(metric_observation.get("requires_improvement")):
+            return None
+        task_id = str(task.get("task_id") or "")
+        shape = self._metric_neutral_plateau_shape(task, candidate_record)
+        local_count = self._metric_neutral_plateau_task_count(
+            plateau_signature_key=shape["plateau_signature_key"],
+            task_id=task_id,
+        ) + (1 if task_id else 0)
+        region_tactic_count = self._metric_neutral_plateau_region_tactic_count(task) + 1
+        task_identity = self._candidate_task_identity_for_record(candidate_record)
+        same_fingerprint_limit = int(
+            self.config.get("workflow", {}).get(
+                "spec_metric_neutral_plateau_same_fingerprint_limit",
+                2,
+            )
+            or 0
+        )
+        status = "rejected_no_improvement"
+        if task_id and same_fingerprint_limit > 0 and local_count >= same_fingerprint_limit:
+            status = "deferred_no_improvement_plateau"
+        extra = {
+            **shape,
+            "todo_id": task_identity.get("todo_id") or candidate_record.get("todo_id"),
+            "spec_task_id": (
+                task_identity.get("spec_task_id")
+                or candidate_record.get("spec_task_id")
+                or task_id
+            ),
+            "spec_task_identity_source": task_identity.get("spec_task_identity_source"),
+            "candidate_id": candidate_record.get("candidate_id"),
+            "candidate_fingerprint": candidate_record.get("fingerprint"),
+            "metric": metric_observation.get("metric"),
+            "baseline": metric_observation.get("baseline"),
+            "improved": metric_observation.get("improved"),
+            "plateau_task_local_count": local_count,
+            "plateau_region_tactic_count": region_tactic_count,
+        }
+        issue_code = "metric_neutral_plateau_" + shape["edit_shape_fingerprint"]
+        return self._append_failure_signature(
+            phase="metric_gate",
+            spec=spec,
+            task=task if task_id else {},
+            status=status,
+            failure_class="metric_neutral_plateau",
+            issue_code=issue_code,
+            issue_scope="candidate_delta",
+            summary=str(metric_observation.get("summary") or ""),
+            extra=extra,
+        )
+
+    def _metric_neutral_plateau_reopen_block(self, task: dict[str, Any]) -> dict[str, Any]:
+        if not self._metric_neutral_plateau_enabled():
+            return {}
+        limit = int(
+            self.config.get("workflow", {}).get(
+                "spec_metric_neutral_plateau_region_tactic_limit",
+                2,
+            )
+            or 0
+        )
+        if limit <= 0:
+            return {}
+        count = self._metric_neutral_plateau_region_tactic_count(task)
+        if count < limit:
+            return {}
+        shape = self._metric_neutral_plateau_shape(task, {})
+        return {
+            "task_id": task.get("task_id"),
+            "plateau_region_tactic_count": count,
+            "plateau_region_tactic_limit": limit,
+            "plateau_cooldown_prefix": shape["plateau_cooldown_prefix"],
+            "target_region_hash": shape["target_region_hash"],
+            "tactic_stage": shape["tactic_stage"],
+        }
+
+    def _spec_graph_plateau_cooldown_hits(self, spec: dict[str, Any]) -> int:
+        cooldown_keys = self._metric_neutral_plateau_cooldown_keys()
+        if not cooldown_keys:
+            return 0
+        cooldown_prefixes = {
+            ":".join(key.split(":")[:2]) + ":"
+            for key in cooldown_keys
+            if len(key.split(":")) >= 2
+        }
+        if not cooldown_prefixes:
+            return 0
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        hits = 0
+        for task in self._schedulable_spec_tasks(tasks):
+            region_hash = self._failure_signature_target_region_hash(
+                self._failure_signature_list(task.get("target_regions")),
+                target_symbols=self._failure_signature_list(task.get("target_symbols")),
+            )
+            tactic = str(task.get("tactic_stage") or "tactic-unknown")
+            if f"{region_hash}:{tactic}:" in cooldown_prefixes:
+                hits += 1
+        return hits
+
+    def _terminal_metric_neutral_plateau_summary(
+        self,
+        failure_signatures: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        plateau_records = [
+            record
+            for record in failure_signatures
+            if str(record.get("failure_class") or "") == "metric_neutral_plateau"
+        ]
+        if not plateau_records:
+            return {}
+        task_ids = sorted(
+            {
+                str(record.get("task_id") or record.get("spec_task_id") or "")
+                for record in plateau_records
+                if str(record.get("task_id") or record.get("spec_task_id") or "")
+            }
+        )
+        deferred_task_ids = sorted(
+            {
+                str(record.get("task_id") or record.get("spec_task_id") or "")
+                for record in plateau_records
+                if str(record.get("status") or "") == "deferred_no_improvement_plateau"
+                and str(record.get("task_id") or record.get("spec_task_id") or "")
+            }
+        )
+        cooldown_keys: list[str] = []
+        for record in plateau_records:
+            key = str(record.get("cooldown_key") or "").strip()
+            if key and key not in cooldown_keys:
+                cooldown_keys.append(key)
+        return {
+            "metric_neutral_plateau_count": len(plateau_records),
+            "metric_neutral_plateau_task_ids": task_ids,
+            "metric_neutral_plateau_deferred_task_ids": deferred_task_ids,
+            "metric_neutral_plateau_cooldown_keys": cooldown_keys[-8:],
+        }
+
     @staticmethod
     def _failure_signature_list(value: Any) -> list[str]:
         if isinstance(value, list):
@@ -3518,6 +3793,7 @@ class TodoLifecycleMixin:
             "deferred_contract_drift",
             "deferred_design",
             "deferred_design_invalid",
+            "deferred_no_improvement_plateau",
             "deferred_portfolio_exhausted",
         }
 
@@ -4187,6 +4463,21 @@ class TodoLifecycleMixin:
                 open_candidates = self._schedulable_spec_tasks(tasks)
         if not open_candidates and not self._spec_global_loop_cap_reached():
             reopened = self._reopen_failed_spec_portfolio_tasks(tasks)
+            plateau_blocked = self.state.scratch.pop(
+                "spec_plateau_reopen_blocked_tasks",
+                [],
+            )
+            if plateau_blocked:
+                self._persist_run_spec(spec)
+                self._append_spec_progress_event(
+                    "portfolio_reopen_blocked",
+                    spec,
+                    extra={
+                        "reason": "metric_neutral_plateau",
+                        "blocked_tasks": plateau_blocked,
+                        "remaining_loops": self._spec_remaining_loop_budget(),
+                    },
+                )
             if reopened:
                 self._persist_run_spec(spec)
                 self._append_spec_progress_event(
@@ -4500,6 +4791,32 @@ class TodoLifecycleMixin:
                 str(item).strip() for item in deliverables
             ):
                 continue
+            plateau_block = self._metric_neutral_plateau_reopen_block(task)
+            if plateau_block:
+                task["status"] = "deferred_no_improvement_plateau"
+                task["decision_hint"] = (
+                    "metric_neutral_plateau_reopen_blocked: this task's region/tactic "
+                    "has repeated correctness-preserving but metric-neutral edits. "
+                    "Do not reopen this portfolio branch unless the next graph is "
+                    "materially different."
+                )
+                task["plateau"] = {
+                    "status": "deferred",
+                    "reason": "portfolio_reopen_blocked",
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    **plateau_block,
+                }
+                blocked = self.state.scratch.setdefault(
+                    "spec_plateau_reopen_blocked_tasks",
+                    [],
+                )
+                if isinstance(blocked, list):
+                    blocked.append(plateau_block)
+                task_id = str(task.get("task_id") or "")
+                self.state.notes.append(
+                    f"Blocked portfolio reopen for plateau-cooled spec task: {task_id}"
+                )
+                continue
             rounds = int(task.get("recovery_rounds", 0) or 0)
             if rounds >= max_rounds:
                 continue
@@ -4611,6 +4928,7 @@ class TodoLifecycleMixin:
         design_failed = self._design_failed_spec_task_ids(tasks)
         drift_deferred = self._contract_drift_deferred_spec_task_ids(tasks)
         portfolio_exhausted = self._portfolio_exhausted_spec_task_ids(tasks)
+        plateau_deferred = self._plateau_deferred_spec_task_ids(tasks)
         remaining = self._spec_remaining_loop_budget()
         stop_reason = "no_recovery_possible"
         search = spec.get("search") if isinstance(spec, dict) and isinstance(spec.get("search"), dict) else {}
@@ -4619,7 +4937,9 @@ class TodoLifecycleMixin:
         reseed_exhausted = bool(
             reseed_attempts_max > 0 and reseed_attempts >= reseed_attempts_max
         )
-        if reseed_exhausted and (design_failed or drift_deferred or portfolio_exhausted):
+        if reseed_exhausted and (
+            design_failed or drift_deferred or portfolio_exhausted or plateau_deferred
+        ):
             stop_reason = (
                 "partial_success_search_frontier_exhausted"
                 if self._spec_has_closed_task(tasks)
@@ -4643,6 +4963,8 @@ class TodoLifecycleMixin:
             )
         elif drift_deferred and self._all_remaining_spec_tasks_contract_drift_deferred(tasks):
             stop_reason = "no_runnable_tasks_after_drift_deferred"
+        elif plateau_deferred and self._all_remaining_spec_tasks_plateau_deferred(tasks):
+            stop_reason = "no_runnable_tasks_after_metric_neutral_plateau"
         elif portfolio_exhausted and self._all_remaining_spec_tasks_exhausted(tasks):
             stop_reason = "no_runnable_tasks_after_portfolio_exhausted"
         elif (
@@ -4663,6 +4985,7 @@ class TodoLifecycleMixin:
             "design_failed_tasks": design_failed,
             "drift_deferred_tasks": drift_deferred,
             "portfolio_exhausted_tasks": portfolio_exhausted,
+            "plateau_deferred_tasks": plateau_deferred,
             "graph_reseed_attempts": reseed_attempts,
             "graph_reseed_attempts_max": reseed_attempts_max,
             "graph_reseed_exhausted": reseed_exhausted,
@@ -4695,6 +5018,16 @@ class TodoLifecycleMixin:
             for task in tasks
             if isinstance(task, dict)
             and str(task.get("status")) == "deferred_portfolio_exhausted"
+            and str(task.get("task_id") or "")
+        ]
+
+    @staticmethod
+    def _plateau_deferred_spec_task_ids(tasks: list[Any]) -> list[str]:
+        return [
+            str(task.get("task_id") or "")
+            for task in tasks
+            if isinstance(task, dict)
+            and str(task.get("status")) == "deferred_no_improvement_plateau"
             and str(task.get("task_id") or "")
         ]
 
@@ -4765,6 +5098,7 @@ class TodoLifecycleMixin:
     def _all_remaining_spec_tasks_exhausted(self, tasks: list[Any]) -> bool:
         exhausted_statuses = {
             "deferred_contract_drift",
+            "deferred_no_improvement_plateau",
             "deferred_portfolio_exhausted",
         }
         saw_remaining = False
@@ -4776,6 +5110,19 @@ class TodoLifecycleMixin:
                 continue
             saw_remaining = True
             if status not in exhausted_statuses:
+                return False
+        return saw_remaining
+
+    def _all_remaining_spec_tasks_plateau_deferred(self, tasks: list[Any]) -> bool:
+        saw_remaining = False
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status == "closed":
+                continue
+            saw_remaining = True
+            if status != "deferred_no_improvement_plateau":
                 return False
         return saw_remaining
 
@@ -5520,6 +5867,74 @@ class TodoLifecycleMixin:
                 "metric_no_improvement: tests passed but the measured metric did not "
                 "improve. Ensure any new branch or helper is called by the benchmark path."
             )
+        plateau_record = self._record_metric_neutral_plateau_signature(
+            spec=spec,
+            task=task,
+            candidate_record=candidate_observation
+            if isinstance(candidate_observation, dict)
+            else {},
+            metric_observation=metric_observation,
+        )
+        plateau_limit = int(
+            self.config.get("workflow", {}).get(
+                "spec_metric_neutral_plateau_same_fingerprint_limit",
+                2,
+            )
+            or 0
+        )
+        if (
+            plateau_record
+            and plateau_limit > 0
+            and int(plateau_record.get("plateau_task_local_count", 0) or 0)
+            >= plateau_limit
+            and str(plateau_record.get("task_id") or "")
+        ):
+            await self._restore_spec_task_boundary_snapshot()
+            self.state.scratch.pop("spec_task_boundary_snapshot", None)
+            task["status"] = "deferred_no_improvement_plateau"
+            task["decision_hint"] = (
+                "metric_neutral_plateau: correctness passed but the same metric-neutral "
+                "candidate shape repeated for this task. Stop reopening this branch and "
+                "move to a materially different sibling, backtrack, or graph reseed."
+            )
+            task["plateau"] = {
+                "status": "deferred",
+                "reason": "metric_neutral_plateau",
+                "plateau_signature_key": plateau_record.get("plateau_signature_key"),
+                "plateau_task_local_count": plateau_record.get(
+                    "plateau_task_local_count"
+                ),
+                "plateau_region_tactic_count": plateau_record.get(
+                    "plateau_region_tactic_count"
+                ),
+                "cooldown_key": plateau_record.get("cooldown_key"),
+                "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+            task["last_observation"]["plateau_signature_key"] = plateau_record.get(
+                "plateau_signature_key"
+            )
+            task["last_observation"]["plateau_task_local_count"] = plateau_record.get(
+                "plateau_task_local_count"
+            )
+            spec["active_task_id"] = None
+            self.state.loop_count += 1
+            self._persist_run_spec(spec)
+            self._append_spec_progress_event(
+                "deferred",
+                spec,
+                task,
+                extra={
+                    "reason": "metric_neutral_plateau",
+                    "action": "defer_no_improvement_plateau",
+                    "plateau_signature_key": plateau_record.get(
+                        "plateau_signature_key"
+                    ),
+                    "cooldown_key": plateau_record.get("cooldown_key"),
+                    "remaining_loops": self._spec_remaining_loop_budget(),
+                },
+            )
+            self.state.current = AgentStateName.SCHEDULE
+            return
         if self._should_rewrite_spec_after_task_failure(task, failed):
             await self._restore_spec_task_boundary_snapshot()
             self.state.scratch.pop("spec_task_boundary_snapshot", None)
@@ -6442,6 +6857,38 @@ class TodoLifecycleMixin:
                 ]
             )
         failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
+        plateau_summary = self._terminal_metric_neutral_plateau_summary(
+            failure_signatures
+        )
+        if plateau_summary:
+            lines.extend(
+                [
+                    "",
+                    "## Metric-Neutral Plateau",
+                    "",
+                    "- plateau_count: "
+                    + str(plateau_summary.get("metric_neutral_plateau_count", 0)),
+                    "- plateau_task_ids: "
+                    + json.dumps(
+                        plateau_summary.get("metric_neutral_plateau_task_ids", []),
+                        ensure_ascii=False,
+                    ),
+                    "- plateau_deferred_task_ids: "
+                    + json.dumps(
+                        plateau_summary.get(
+                            "metric_neutral_plateau_deferred_task_ids", []
+                        ),
+                        ensure_ascii=False,
+                    ),
+                    "- plateau_cooldown_keys: "
+                    + json.dumps(
+                        plateau_summary.get(
+                            "metric_neutral_plateau_cooldown_keys", []
+                        ),
+                        ensure_ascii=False,
+                    ),
+                ]
+            )
         if failure_signatures:
             class_counts = self._count_jsonl_values(
                 failure_signatures, "failure_class"
@@ -6521,6 +6968,9 @@ class TodoLifecycleMixin:
             spec_events,
         )
         failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
+        plateau_summary = self._terminal_metric_neutral_plateau_summary(
+            failure_signatures
+        )
         graph_candidates = self._read_spec_jsonl(self._spec_graph_candidates_path())
         search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
         terminal = {
@@ -6584,6 +7034,7 @@ class TodoLifecycleMixin:
         terminal.update(drift_recovery_summary)
         terminal.update(portfolio_recovery_summary)
         terminal.update(targeted_rewrite_summary)
+        terminal.update(plateau_summary)
         if survivor:
             terminal["survivor"] = survivor
         if trajectory_quality:
@@ -7765,6 +8216,104 @@ class TodoLifecycleMixin:
             }:
                 return ""
         return str(active_todo.get("todo_id", ""))
+
+    def _candidate_task_identity_for_record(
+        self, record: dict[str, Any]
+    ) -> dict[str, str]:
+        def build(source: str, todo_id: Any = "", spec_task_id: Any = "") -> dict[str, str]:
+            todo = str(todo_id or "").strip()
+            spec_task = str(spec_task_id or "").strip()
+            if self._spec_mode_enabled():
+                if not spec_task and todo:
+                    spec_task = todo
+                if not todo and spec_task:
+                    todo = spec_task
+            if not todo and not spec_task:
+                return {}
+            result = {"spec_task_identity_source": source}
+            if todo:
+                result["todo_id"] = todo
+            if spec_task:
+                result["spec_task_id"] = spec_task
+            return result
+
+        identity = build(
+            "candidate_record",
+            record.get("todo_id"),
+            record.get("spec_task_id"),
+        )
+        if identity:
+            return identity
+
+        active_todo = self.state.scratch.get("active_todo")
+        if isinstance(active_todo, dict) and active_todo.get("status") in {
+            "active",
+            "attempted",
+            "validated",
+        }:
+            identity = build(
+                "active_todo",
+                active_todo.get("todo_id"),
+                active_todo.get("spec_task_id"),
+            )
+            if identity:
+                return identity
+
+        persisted_todo = self._load_active_todo()
+        if isinstance(persisted_todo, dict) and persisted_todo.get("status") in {
+            "active",
+            "attempted",
+            "validated",
+        }:
+            self.state.scratch["active_todo"] = persisted_todo
+            identity = build(
+                "active_todo_file",
+                persisted_todo.get("todo_id"),
+                persisted_todo.get("spec_task_id"),
+            )
+            if identity:
+                return identity
+
+        current_spec_task_id = str(
+            self.state.scratch.get("current_spec_task_id") or ""
+        ).strip()
+        identity = build(
+            "current_spec_task",
+            current_spec_task_id,
+            current_spec_task_id,
+        )
+        if identity:
+            return identity
+
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict) or not spec:
+            spec = self._load_run_spec(self._run_spec_path())
+            if spec:
+                self.state.scratch["run_spec"] = spec
+        if isinstance(spec, dict):
+            identity = build("run_spec_active_task", spec.get("active_task_id"), spec.get("active_task_id"))
+            if identity:
+                return identity
+
+        progress_path = self._workflow_artifact_path(
+            "spec_progress_path", ".local_micro_agent/spec_progress.jsonl"
+        )
+        events = self._read_spec_jsonl(progress_path, limit=_SPEC_JSONL_READ_LIMIT)
+        current_loop = self.state.loop_count
+        for require_current_loop in (True, False):
+            for event in reversed(events):
+                if str(event.get("event") or "") not in {"scheduled", "retry"}:
+                    continue
+                if require_current_loop and int(event.get("loop", -1) or -1) != current_loop:
+                    continue
+                task_id = event.get("task_id") or event.get("active_task_id")
+                identity = build("spec_progress_event", task_id, task_id)
+                if identity:
+                    return identity
+        structural_todo_id = self._active_todo_id_for_record(record)
+        if structural_todo_id:
+            return build("structural_active_todo", structural_todo_id, "")
+        return {}
 
     def _active_todo_spec_task_id(self) -> str:
         if self._todo_contract_soft_now():

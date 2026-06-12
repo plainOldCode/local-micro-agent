@@ -1157,10 +1157,12 @@ class CandidateRecordsMixin:
                     if value not in (None, "", [], {})
                 }
             )
-        if not record.get("todo_id"):
-            structural_todo_id = self._active_todo_id_for_record(record)
-            if structural_todo_id:
-                record["todo_id"] = structural_todo_id
+        task_identity = self._candidate_task_identity_for_record(record)
+        if task_identity:
+            for key in ("todo_id", "spec_task_id", "spec_task_identity_source"):
+                value = task_identity.get(key)
+                if value and not record.get(key):
+                    record[key] = value
         if self._is_patch_application_failure_record(record):
             record["budget_counted"] = False
         if self._is_structural_learning_record(record):
