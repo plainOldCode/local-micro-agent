@@ -1767,16 +1767,26 @@ class TodoLifecycleMixin:
         for task in tasks:
             if not isinstance(task, dict):
                 continue
-            regions = task.get("target_regions")
-            region = ""
-            if isinstance(regions, list) and regions:
-                region = str(regions[0])
+            raw_regions = task.get("target_regions")
+            if isinstance(raw_regions, list) and raw_regions:
+                regions = [
+                    str(region) for region in raw_regions if str(region).strip()
+                ]
             else:
                 deliverables = task.get("deliverables")
-                if isinstance(deliverables, list) and deliverables:
-                    region = str(deliverables[0])
+                regions = (
+                    [
+                        str(deliverable)
+                        for deliverable in deliverables
+                        if str(deliverable).strip()
+                    ]
+                    if isinstance(deliverables, list)
+                    else []
+                )
             tactic = str(task.get("tactic_stage") or task.get("risk_level") or "")
-            if region or tactic:
+            if not regions and tactic:
+                regions = [""]
+            for region in regions:
                 signature.append(f"{region}:{tactic}")
         return sorted(dict.fromkeys(signature))
 

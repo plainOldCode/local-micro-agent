@@ -8814,6 +8814,33 @@ Background / non-constraints
 
         asyncio.run(run_case())
 
+    def test_spec_graph_signature_preserves_all_graph_targets(self) -> None:
+        spec = {
+            "version": 2,
+            "task_graph": [
+                {
+                    "task_id": "task-001",
+                    "target_regions": ["alpha.py::pack", "beta.py::bundle"],
+                    "tactic_stage": "structural_probe",
+                },
+                {
+                    "task_id": "task-002",
+                    "deliverables": ["gamma.py", "delta.py"],
+                    "risk_level": "local",
+                },
+            ],
+        }
+
+        self.assertEqual(
+            MicroAgent._spec_graph_signature(spec),
+            [
+                "alpha.py::pack:structural_probe",
+                "beta.py::bundle:structural_probe",
+                "delta.py:local",
+                "gamma.py:local",
+            ],
+        )
+
     def test_structural_tactic_creates_structural_probe_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             agent = MicroAgent(
