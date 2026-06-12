@@ -4974,6 +4974,11 @@ class TodoLifecycleMixin:
                 drift_recovery.get("same_fingerprint_streak")
             )
             if drift_recovery.get("action") == "rewrite" and not self._spec_global_loop_cap_reached():
+                drift_telemetry = (
+                    drift_recovery.get("drift_telemetry")
+                    if isinstance(drift_recovery.get("drift_telemetry"), dict)
+                    else {}
+                )
                 task["status"] = "needs_contract_rewrite"
                 task["decision_hint"] = (
                     "repeated_active_task_drift_requires_contract_rewrite: CODE "
@@ -5003,6 +5008,7 @@ class TodoLifecycleMixin:
                             "same_fingerprint_streak"
                         ),
                         "fingerprint": drift_recovery.get("fingerprint"),
+                        **drift_telemetry,
                     },
                 )
                 self._append_failure_signature(
@@ -5021,6 +5027,7 @@ class TodoLifecycleMixin:
                             "same_fingerprint_streak"
                         ),
                         "drift_fingerprint": drift_recovery.get("fingerprint"),
+                        **drift_telemetry,
                     },
                 )
                 rewrite_focus = self._spec_design_rewrite_focus(
@@ -5034,6 +5041,11 @@ class TodoLifecycleMixin:
                 )
                 self.state.current = AgentStateName.SPEC_SYNTH
                 return
+            drift_telemetry = (
+                drift_recovery.get("drift_telemetry")
+                if isinstance(drift_recovery.get("drift_telemetry"), dict)
+                else {}
+            )
             task["status"] = "deferred_contract_drift"
             task["decision_hint"] = (
                 "contract_drift_streak_deferred: active-task drift repeated after "
@@ -5062,6 +5074,7 @@ class TodoLifecycleMixin:
                         "same_fingerprint_streak"
                     ),
                     "fingerprint": drift_recovery.get("fingerprint"),
+                    **drift_telemetry,
                 },
             )
             self._append_failure_signature(
@@ -5080,6 +5093,7 @@ class TodoLifecycleMixin:
                         "same_fingerprint_streak"
                     ),
                     "drift_fingerprint": drift_recovery.get("fingerprint"),
+                    **drift_telemetry,
                 },
             )
             self.state.current = AgentStateName.SCHEDULE
@@ -5200,6 +5214,7 @@ class TodoLifecycleMixin:
         next_rewrite = prior_rewrites + 1
         action = "rewrite" if max_rewrites > 0 and prior_rewrites < max_rewrites else "defer"
         summary = self._active_task_drift_rewrite_summary(task_id, latest)
+        drift_telemetry = self._active_task_drift_record_extra(latest, task=task)
         return {
             "action": action,
             "per_task_streak": per_task_streak,
@@ -5209,7 +5224,119 @@ class TodoLifecycleMixin:
             "rewrite_attempts": min(next_rewrite, max(prior_rewrites, max_rewrites)),
             "rewrite_attempts_max": max_rewrites,
             "summary": summary,
+            "drift_telemetry": drift_telemetry,
         }
+
+    def _active_task_drift_record_extra(
+        self,
+        attempt: dict[str, Any],
+        *,
+        task: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source = task if isinstance(task, dict) else self._active_task_drift_source()
+        declared_regions = self._normalize_string_list(source.get("target_regions"))
+        declared_symbols = self._normalize_string_list(source.get("target_symbols"))
+        attempted_regions = self._active_task_drift_attempted_regions(attempt)
+        tactic_stage = str(
+            attempt.get("tactic_stage") or source.get("tactic_stage") or "tactic-unknown"
+        )
+        fingerprint = self._normalize_failure_issue_code(
+            self._active_task_drift_fingerprint(attempt)
+        )
+        region_hash = self._failure_signature_target_region_hash(
+            declared_regions,
+            target_symbols=declared_symbols,
+        )
+        extra: dict[str, Any] = {
+            "drift_declared_regions": declared_regions,
+            "drift_declared_symbols": declared_symbols,
+            "drift_attempted_regions": attempted_regions,
+            "drift_target_region_hash": region_hash,
+            "drift_cooldown_key": ":".join(
+                [region_hash, tactic_stage or "tactic-unknown", fingerprint]
+            ),
+        }
+        pairs = self._active_task_drift_region_pairs(
+            declared_regions,
+            attempted_regions,
+        )
+        if pairs:
+            extra["drift_region_pairs"] = pairs
+        return {
+            key: value
+            for key, value in extra.items()
+            if value not in (None, "", [], {})
+        }
+
+    def _active_task_drift_source(self) -> dict[str, Any]:
+        task = self.state.scratch.get("current_spec_task")
+        if isinstance(task, dict) and task:
+            return task
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+        return active_todo if isinstance(active_todo, dict) else {}
+
+    def _active_task_drift_attempted_regions(self, attempt: dict[str, Any]) -> list[str]:
+        regions: list[str] = []
+        changes = attempt.get("changes")
+        if isinstance(changes, list):
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                target_region = str(change.get("target_region") or "").strip()
+                if target_region:
+                    regions.append(target_region)
+                    continue
+                path = str(change.get("path") or "").strip()
+                if path:
+                    regions.append(path)
+        summary = attempt.get("probe_diff_summary")
+        if isinstance(summary, dict):
+            changed_files = self._normalize_string_list(summary.get("changed_files"))
+            for symbol in self._normalize_string_list(summary.get("touched_symbols")):
+                if "::" in symbol:
+                    regions.append(symbol)
+            if len(changed_files) == 1:
+                path = changed_files[0]
+                for function in self._normalize_string_list(summary.get("changed_functions")):
+                    if "::" in function:
+                        regions.append(function)
+                    else:
+                        regions.append(f"{path}::{function}")
+            else:
+                regions.extend(self._normalize_string_list(summary.get("changed_functions")))
+            regions.extend(changed_files)
+        detail = " ".join(
+            str(attempt.get(key) or "")
+            for key in ("failure_detail", "no_change_reason", "summary")
+        )
+        regions.extend(
+            match.strip()
+            for match in re.findall(r"change target_region\s+([^ ]+)\s+is outside", detail)
+            if match.strip()
+        )
+        regions.extend(
+            match.strip()
+            for match in re.findall(r"change path\s+([^ ]+)\s+is outside", detail)
+            if match.strip()
+        )
+        return list(dict.fromkeys(region for region in regions if region))
+
+    @staticmethod
+    def _active_task_drift_region_pairs(
+        declared_regions: list[str],
+        attempted_regions: list[str],
+    ) -> list[dict[str, str]]:
+        if not attempted_regions:
+            return []
+        if not declared_regions:
+            return [{"declared": "", "attempted": attempted} for attempted in attempted_regions]
+        pairs: list[dict[str, str]] = []
+        for declared in declared_regions:
+            for attempted in attempted_regions:
+                pairs.append({"declared": declared, "attempted": attempted})
+        return pairs
 
     def _latest_active_task_drift_attempt(self, task_id: str) -> dict[str, Any] | None:
         for attempt in reversed(self._recent_todo_attempts(task_id)):
@@ -5759,6 +5886,7 @@ class TodoLifecycleMixin:
         candidate_events: list[dict[str, Any]],
         spec_events: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
         drift_records = [
             record
             for record in candidate_events
@@ -5786,11 +5914,40 @@ class TodoLifecycleMixin:
                 current_streak = 1
                 previous_task_id = task_id
             max_streak = max(max_streak, current_streak)
+        attempted_region_counts = self._count_drift_regions(
+            drift_records,
+            "drift_attempted_regions",
+        )
+        pair_counts = self._count_drift_region_pairs(drift_records)
+        cooldown_key_counts = self._count_drift_regions(
+            drift_records,
+            "drift_cooldown_key",
+        )
+        saturation_threshold = int(
+            workflow.get("spec_drift_saturation_threshold", 3) or 0
+        )
+        saturated_keys = {
+            key: count
+            for key, count in cooldown_key_counts.items()
+            if saturation_threshold > 0 and count >= saturation_threshold
+        }
         recovery_events = [
             event
             for event in spec_events
             if isinstance(event, dict) and str(event.get("event")) == "drift_recovery"
         ]
+        duplicate_rewrite_rejections = [
+            event
+            for event in spec_events
+            if isinstance(event, dict)
+            and str(event.get("event")) == "drift_recovery"
+            and str(event.get("action")) == "rewrite_rejected_duplicate_drift"
+        ]
+        saved_budget = sum(
+            int(event.get("spec_budget_saved_by_drift_backoff", 0) or 0)
+            for event in spec_events
+            if isinstance(event, dict)
+        )
         return {
             "active_task_drift_count": len(drift_records),
             "max_active_task_drift_streak": max_streak,
@@ -5802,7 +5959,67 @@ class TodoLifecycleMixin:
                 and str(task.get("status")) == "deferred_contract_drift"
                 and str(task.get("task_id") or "")
             ],
+            "active_task_drift_attempted_region_counts": attempted_region_counts,
+            "active_task_drift_region_pair_counts": pair_counts,
+            "drift_cooldown_key_counts": cooldown_key_counts,
+            "drift_saturation_threshold": saturation_threshold,
+            "same_region_drift_saturation_count": len(saturated_keys),
+            "same_region_drift_saturated_keys": saturated_keys,
+            "targeted_rewrite_rejected_duplicate_drift": len(
+                duplicate_rewrite_rejections
+            ),
+            "spec_budget_saved_by_drift_backoff": saved_budget,
         }
+
+    def _count_drift_regions(
+        self,
+        records: list[dict[str, Any]],
+        key: str,
+        *,
+        limit: int = 12,
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for record in records:
+            raw = record.get(key)
+            values = raw if isinstance(raw, list) else [raw]
+            for value in values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                counts[text] = counts.get(text, 0) + 1
+        return dict(
+            sorted(
+                counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:limit]
+        )
+
+    def _count_drift_region_pairs(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        limit: int = 12,
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for record in records:
+            raw_pairs = record.get("drift_region_pairs")
+            if not isinstance(raw_pairs, list):
+                continue
+            for pair in raw_pairs:
+                if not isinstance(pair, dict):
+                    continue
+                declared = str(pair.get("declared") or "").strip() or "<undeclared>"
+                attempted = str(pair.get("attempted") or "").strip()
+                if not attempted:
+                    continue
+                key = f"{declared} -> {attempted}"
+                counts[key] = counts.get(key, 0) + 1
+        return dict(
+            sorted(
+                counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:limit]
+        )
 
     def _terminal_portfolio_recovery_summary(
         self,

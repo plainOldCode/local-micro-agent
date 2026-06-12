@@ -72,6 +72,7 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertEqual(workflow["spec_active_task_drift_streak_limit"], 3)
         self.assertEqual(workflow["spec_active_task_drift_same_fingerprint_limit"], 2)
         self.assertEqual(workflow["spec_active_task_drift_rewrite_attempts"], 1)
+        self.assertEqual(workflow["spec_drift_saturation_threshold"], 3)
         self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 2)
 
     def test_explicit_workflow_key_wins_over_preset(self) -> None:

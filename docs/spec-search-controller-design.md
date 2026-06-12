@@ -151,6 +151,20 @@ because task ids are graph-local and cannot reliably match across sibling or
 reseeded graphs. `target_region_hash` should be stable but compact. It should
 use the declared target region string first, not the raw patch body.
 
+For active-task drift, signatures and candidate records also carry drift
+target telemetry:
+
+- `drift_declared_regions` / `drift_declared_symbols`: the active contract;
+- `drift_attempted_regions`: structured regions from candidate metadata or
+  post-apply diff summaries;
+- `drift_region_pairs`: compact `declared -> attempted` pairs for later
+  retarget/reseed analysis;
+- `drift_cooldown_key`: the same cooldown-key namespace used by signatures.
+
+This turns repeated drift into a search signal without making policy decisions
+from prose. Backoff and reseed policy should consume these structured fields,
+not natural-language edit-scope similarity.
+
 ## Controller Loop
 
 ### Phase A: Spec Search

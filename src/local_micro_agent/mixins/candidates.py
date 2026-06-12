@@ -1175,6 +1175,7 @@ class CandidateRecordsMixin:
             record["recovery_hint"] = (
                 "Retry the same active task using only its declared contract."
             )
+            record.update(self._active_task_drift_record_extra(record))
         self.state.scratch["last_candidate_observation"] = dict(record)
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")

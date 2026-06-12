@@ -4799,6 +4799,12 @@ Background / non-constraints
                         "budget_counted": False,
                         "fingerprint": f"drift-{index}",
                         "summary": "outside active task",
+                        "changes": [
+                            {
+                                "path": "target.py",
+                                "target_region": "target.py::Parser.build",
+                            }
+                        ],
                     }
                     for index in range(3)
                 ]
@@ -4861,6 +4867,23 @@ Background / non-constraints
                 self.assertEqual(signature["target_region_hash"], "ece45896")
                 self.assertIn("drift_2", signature["cooldown_key"])
                 self.assertNotIn("task-001", signature["cooldown_key"])
+                self.assertEqual(
+                    signature["drift_declared_regions"],
+                    ["target.py::parse_item"],
+                )
+                self.assertEqual(
+                    signature["drift_attempted_regions"],
+                    ["target.py::Parser.build"],
+                )
+                self.assertEqual(
+                    signature["drift_region_pairs"],
+                    [
+                        {
+                            "declared": "target.py::parse_item",
+                            "attempted": "target.py::Parser.build",
+                        }
+                    ],
+                )
 
         asyncio.run(run_case())
 
@@ -5098,6 +5121,14 @@ Background / non-constraints
                             "status": "rejected_todo_scope_drift",
                             "failure_class": "active_task_drift",
                             "budget_counted": False,
+                            "drift_attempted_regions": ["target.py::helper"],
+                            "drift_region_pairs": [
+                                {
+                                    "declared": "target.py::parse_item",
+                                    "attempted": "target.py::helper",
+                                }
+                            ],
+                            "drift_cooldown_key": "ece45896:local_edit:scope_drift",
                         }
                     )
                     for index in range(3)
@@ -5122,6 +5153,19 @@ Background / non-constraints
             self.assertEqual(terminal["max_active_task_drift_streak"], 3)
             self.assertEqual(terminal["drift_recovery_count"], 1)
             self.assertEqual(terminal["drift_deferred_task_ids"], ["task-001"])
+            self.assertEqual(
+                terminal["active_task_drift_attempted_region_counts"],
+                {"target.py::helper": 3},
+            )
+            self.assertEqual(
+                terminal["active_task_drift_region_pair_counts"],
+                {"target.py::parse_item -> target.py::helper": 3},
+            )
+            self.assertEqual(terminal["same_region_drift_saturation_count"], 1)
+            self.assertEqual(
+                terminal["same_region_drift_saturated_keys"],
+                {"ece45896:local_edit:scope_drift": 3},
+            )
 
     def test_terminal_report_summarizes_portfolio_recovery_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7062,6 +7106,7 @@ Background / non-constraints
                 "status": "active",
                 "strategy_axis": "general_edit",
                 "target_symbols": ["parse_item"],
+                "target_regions": ["target.py::parse_item"],
                 "source": "spec_scheduler",
             }
             (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
@@ -7080,7 +7125,15 @@ Background / non-constraints
             agent.state.scratch["active_todo"] = todo
             candidate = CodeCandidate(
                 "drift",
-                [CodeChange("target.py", "edit helper", target="old", replacement="new")],
+                [
+                    CodeChange(
+                        "target.py",
+                        "edit helper",
+                        target="old",
+                        replacement="new",
+                        target_region="target.py::helper",
+                    )
+                ],
                 "edit helper",
                 strategy_axis="general_edit",
             )
@@ -7103,6 +7156,17 @@ Background / non-constraints
             self.assertEqual(observation["failure_class"], "active_task_drift")
             self.assertEqual(observation["failure_origin"], "pre_apply_contract")
             self.assertFalse(observation["budget_counted"])
+            self.assertEqual(observation["drift_declared_regions"], ["target.py::parse_item"])
+            self.assertEqual(observation["drift_attempted_regions"], ["target.py::helper"])
+            self.assertEqual(
+                observation["drift_region_pairs"],
+                [
+                    {
+                        "declared": "target.py::parse_item",
+                        "attempted": "target.py::helper",
+                    }
+                ],
+            )
 
     def test_active_task_probe_contract_allows_matching_region_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
