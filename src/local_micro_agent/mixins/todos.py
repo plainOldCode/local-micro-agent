@@ -49,6 +49,17 @@ class TodoLifecycleMixin:
                 previous_spec,
                 rewrite_target_task_id,
             )
+            graph_generation_origin = str(
+                self.state.scratch.get("spec_graph_generation_origin") or ""
+            ).strip()
+            graph_parent_id = str(
+                self.state.scratch.get("spec_graph_parent_graph_id") or ""
+            ).strip()
+            graph_origin = (
+                "targeted_design_rewrite"
+                if targeted_rewrite
+                else (graph_generation_origin or "spec_synth")
+            )
             if not targeted_rewrite:
                 self.state.scratch.pop("run_spec", None)
             focus = "\n\n".join(
@@ -109,6 +120,12 @@ class TodoLifecycleMixin:
                 if not spec:
                     return
                 preserved_task_ids: list[str] = []
+                self._apply_spec_graph_generation_metadata(
+                    spec,
+                    previous_spec=previous_spec,
+                    origin=graph_origin,
+                    parent_graph_id=graph_parent_id,
+                )
                 if targeted_rewrite:
                     spec, preserved_task_ids = self._merge_targeted_spec_rewrite(
                         previous_spec,
@@ -125,7 +142,7 @@ class TodoLifecycleMixin:
                             spec,
                             event="candidate_rejected",
                             status="rejected_graph_contract",
-                            origin="targeted_design_rewrite",
+                            origin=graph_origin,
                             issues=graph_issues,
                             parent_graph_id=self._spec_graph_id(previous_spec),
                         )
@@ -136,6 +153,8 @@ class TodoLifecycleMixin:
                         )
                         self.state.scratch.pop("spec_rewrite_focus", None)
                         self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        self.state.scratch.pop("spec_graph_generation_origin", None)
+                        self.state.scratch.pop("spec_graph_parent_graph_id", None)
                         return
                     spec["last_rewrite_mode"] = "targeted_design_rewrite"
                     spec["last_rewrite_target_task_id"] = rewrite_target_task_id
@@ -151,21 +170,19 @@ class TodoLifecycleMixin:
                         spec,
                         event="candidate_selected",
                         status="selected",
-                        origin=(
-                            "targeted_design_rewrite"
-                            if targeted_rewrite
-                            else "spec_synth"
-                        ),
+                        origin=graph_origin,
                         quality_report=quality_report,
                         parent_graph_id=(
                             self._spec_graph_id(previous_spec)
                             if targeted_rewrite
-                            else ""
+                            else graph_parent_id
                         ),
                     )
                     self._persist_run_spec(spec)
                     self.state.scratch.pop("spec_rewrite_focus", None)
                     self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                    self.state.scratch.pop("spec_graph_generation_origin", None)
+                    self.state.scratch.pop("spec_graph_parent_graph_id", None)
                     if targeted_rewrite:
                         self._append_spec_progress_event(
                             "rewrite_merged",
@@ -204,25 +221,25 @@ class TodoLifecycleMixin:
                     spec,
                     event="candidate_rejected",
                     status="rejected_quality",
-                    origin=(
-                        "targeted_design_rewrite"
-                        if targeted_rewrite
-                        else "spec_synth"
-                    ),
+                    origin=graph_origin,
                     quality_report=quality_report,
                     parent_graph_id=(
                         self._spec_graph_id(previous_spec)
                         if targeted_rewrite
-                        else ""
+                        else graph_parent_id
                     ),
                 )
                 if quality_attempt >= quality_attempts:
                     if self._maybe_persist_soft_fallback_spec(spec, quality_report):
                         self.state.scratch.pop("spec_rewrite_focus", None)
                         self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        self.state.scratch.pop("spec_graph_generation_origin", None)
+                        self.state.scratch.pop("spec_graph_parent_graph_id", None)
                         return
                     self.state.scratch.pop("spec_rewrite_focus", None)
                     self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                    self.state.scratch.pop("spec_graph_generation_origin", None)
+                    self.state.scratch.pop("spec_graph_parent_graph_id", None)
                     self.state.notes.append(
                         "Run spec discarded: quality gate issues remain"
                     )
@@ -1601,6 +1618,46 @@ class TodoLifecycleMixin:
             safe_id = "graph-unknown"
         return self._spec_graph_candidate_sidecar_dir() / f"{safe_id}.json"
 
+    def _apply_spec_graph_generation_metadata(
+        self,
+        spec: dict[str, Any],
+        *,
+        previous_spec: dict[str, Any],
+        origin: str,
+        parent_graph_id: str = "",
+    ) -> None:
+        if not isinstance(spec, dict) or int(spec.get("version", 1) or 1) < 2:
+            return
+        if not str(origin or "").startswith("reseed"):
+            return
+        search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
+        if not search:
+            search = {}
+            spec["search"] = search
+        previous_search = (
+            previous_spec.get("search")
+            if isinstance(previous_spec.get("search"), dict)
+            else {}
+        )
+        parent_graph_id = parent_graph_id or self._spec_graph_id(previous_spec)
+        if parent_graph_id:
+            search.setdefault("parent_graph_id", parent_graph_id)
+        attempts = int(previous_search.get("reseed_attempts", 0) or 0)
+        attempts_max = int(
+            previous_search.get(
+                "reseed_attempts_max",
+                self._spec_graph_reseed_attempts_max(),
+            )
+            or 0
+        )
+        if attempts:
+            search["reseed_attempts"] = attempts
+        if attempts_max:
+            search["reseed_attempts_max"] = attempts_max
+        cooldown_keys = self._current_failure_cooldown_keys()
+        if cooldown_keys:
+            search["cooldown_keys"] = cooldown_keys
+
     def _ensure_spec_search_metadata(
         self,
         spec: dict[str, Any],
@@ -1759,6 +1816,240 @@ class TodoLifecycleMixin:
             "cooldown_hits": 0,
             "duplicate_hits": 0,
         }
+
+    def _latest_spec_graph_candidate_events(self) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+            graph_id = str(record.get("graph_id") or "")
+            if graph_id:
+                latest[graph_id] = record
+        return latest
+
+    def _load_spec_graph_candidate_sidecar(
+        self,
+        record: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        raw_path = str(record.get("spec_sidecar_path") or "").strip()
+        if not raw_path:
+            return None
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = self.state.repo_root / path
+        try:
+            spec = json.loads(path.read_text(errors="replace"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+        return spec if isinstance(spec, dict) else None
+
+    def _spec_graph_reseed_attempts_max(self) -> int:
+        workflow = self.config.get("workflow", {})
+        return int(workflow.get("spec_graph_reseed_attempts", 0) or 0)
+
+    def _current_failure_cooldown_keys(self, limit: int = 8) -> list[str]:
+        keys: list[str] = []
+        for record in reversed(self._read_spec_jsonl(self._failure_signature_path())):
+            key = str(record.get("cooldown_key") or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+            if len(keys) >= limit:
+                break
+        keys.reverse()
+        return keys
+
+    def _maybe_select_backtrackable_spec_graph(
+        self,
+        current_spec: dict[str, Any],
+    ) -> bool:
+        current_graph_id = self._spec_graph_id(current_spec)
+        latest = self._latest_spec_graph_candidate_events()
+        for graph_id, record in latest.items():
+            if graph_id == current_graph_id:
+                continue
+            if str(record.get("status") or "") != "backtrackable":
+                continue
+            candidate = self._load_spec_graph_candidate_sidecar(record)
+            if not isinstance(candidate, dict):
+                continue
+            quality_report = self._spec_quality_report(candidate, attempt=0)
+            if self._spec_quality_report_failed(quality_report):
+                self._append_spec_graph_candidate_event(
+                    candidate,
+                    event="candidate_rejected",
+                    status="rejected_stale",
+                    origin="graph_backtrack",
+                    quality_report=quality_report,
+                    parent_graph_id=current_graph_id,
+                )
+                continue
+            candidate_tasks = (
+                candidate.get("task_graph")
+                if isinstance(candidate.get("task_graph"), list)
+                else []
+            )
+            if not self._schedulable_spec_tasks(candidate_tasks):
+                self._append_spec_graph_candidate_event(
+                    candidate,
+                    event="candidate_rejected",
+                    status="rejected_stale",
+                    origin="graph_backtrack",
+                    issues=["backtrackable graph has no schedulable task"],
+                    parent_graph_id=current_graph_id,
+                )
+                continue
+            self._append_spec_graph_candidate_event(
+                candidate,
+                event="candidate_selected",
+                status="selected_backtrack",
+                origin="graph_backtrack",
+                quality_report=quality_report,
+                parent_graph_id=current_graph_id,
+            )
+            self._persist_run_spec(candidate)
+            self._append_spec_progress_event(
+                "graph_backtracked",
+                candidate,
+                extra={
+                    "from_graph_id": current_graph_id,
+                    "selected_graph_id": self._spec_graph_id(candidate),
+                    "remaining_loops": self._spec_remaining_loop_budget(),
+                },
+            )
+            self.state.notes.append(
+                "Selected backtrackable spec graph: " + self._spec_graph_id(candidate)
+            )
+            self.state.current = AgentStateName.SCHEDULE
+            return True
+        return False
+
+    def _maybe_request_spec_graph_reseed(
+        self,
+        spec: dict[str, Any],
+        tasks: list[Any],
+    ) -> bool:
+        attempts_max = self._spec_graph_reseed_attempts_max()
+        if attempts_max <= 0:
+            return False
+        if self._spec_global_loop_cap_reached():
+            return False
+        search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
+        if not search:
+            search = {}
+            spec["search"] = search
+        attempts = int(search.get("reseed_attempts", 0) or 0)
+        if attempts >= attempts_max:
+            return False
+        next_attempt = attempts + 1
+        search["reseed_attempts"] = next_attempt
+        search["reseed_attempts_max"] = attempts_max
+        cooldown_keys = self._current_failure_cooldown_keys()
+        if cooldown_keys:
+            search["cooldown_keys"] = cooldown_keys
+        self.state.scratch["spec_rewrite_focus"] = self._spec_graph_reseed_focus(
+            spec,
+            tasks,
+            reseed_attempt=next_attempt,
+            reseed_attempts_max=attempts_max,
+            cooldown_keys=cooldown_keys,
+        )
+        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+        self.state.scratch["spec_graph_generation_origin"] = (
+            "reseed_after_graph_frontier_exhausted"
+        )
+        self.state.scratch["spec_graph_parent_graph_id"] = self._spec_graph_id(spec)
+        self._persist_run_spec(spec)
+        self._append_spec_progress_event(
+            "graph_reseed_requested",
+            spec,
+            extra={
+                "graph_id": self._spec_graph_id(spec),
+                "reseed_attempt": next_attempt,
+                "reseed_attempts_max": attempts_max,
+                "cooldown_keys": cooldown_keys,
+                "remaining_loops": self._spec_remaining_loop_budget(),
+            },
+        )
+        self.state.notes.append(
+            f"Spec graph frontier exhausted; requesting reseed "
+            f"{next_attempt}/{attempts_max}"
+        )
+        self.state.current = AgentStateName.SPEC_SYNTH
+        return True
+
+    def _maybe_recover_spec_search_frontier(
+        self,
+        spec: dict[str, Any],
+        tasks: list[Any],
+    ) -> bool:
+        if self._maybe_select_backtrackable_spec_graph(spec):
+            return True
+        return self._maybe_request_spec_graph_reseed(spec, tasks)
+
+    def _spec_graph_reseed_focus(
+        self,
+        spec: dict[str, Any],
+        tasks: list[Any],
+        *,
+        reseed_attempt: int,
+        reseed_attempts_max: int,
+        cooldown_keys: list[str],
+    ) -> str:
+        task_summaries: list[dict[str, Any]] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            compact = {
+                "task_id": task.get("task_id"),
+                "status": task.get("status"),
+                "title": task.get("title"),
+                "target_regions": task.get("target_regions"),
+                "target_symbols": task.get("target_symbols"),
+                "tactic_stage": task.get("tactic_stage"),
+                "decision_hint": task.get("decision_hint"),
+                "last_observation": task.get("last_observation"),
+            }
+            task_summaries.append(
+                {
+                    key: value
+                    for key, value in compact.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        signatures = self._read_spec_jsonl(self._failure_signature_path())[-6:]
+        compact_signatures = [
+            {
+                key: record.get(key)
+                for key in (
+                    "failure_class",
+                    "issue_code",
+                    "issue_scope",
+                    "target_regions",
+                    "target_symbols",
+                    "tactic_stage",
+                    "cooldown_key",
+                    "summary",
+                )
+                if record.get(key) not in (None, "", [], {})
+            }
+            for record in signatures
+        ]
+        return "\n\n".join(
+            [
+                "The selected spec graph has no runnable frontier. Generate a new "
+                "candidate graph instead of repairing the same task graph.",
+                f"Reseed attempt {reseed_attempt}/{reseed_attempts_max}.",
+                "Do not repeat any failed shape identified by cooldown_keys. The new "
+                "graph must include at least one runnable local_edit task or a "
+                "materially narrower structural_probe with a concrete diff contract.",
+                "Preserve closed/survivor evidence as facts only; do not copy closed "
+                "tasks as already-completed graph nodes.",
+                "Current exhausted graph tasks:",
+                json.dumps(task_summaries, ensure_ascii=False, indent=2),
+                "Recent failure signatures:",
+                json.dumps(compact_signatures, ensure_ascii=False, indent=2),
+                "Cooldown keys banned for this reseed:",
+                json.dumps(cooldown_keys, ensure_ascii=False, indent=2),
+            ]
+        )
 
     @staticmethod
     def _spec_graph_signature(spec: dict[str, Any]) -> list[str]:
@@ -2037,16 +2328,17 @@ class TodoLifecycleMixin:
                     target_task = task
                     break
         if isinstance(target_task, dict):
-            target_task["status"] = "failed_design"
+            target_task["status"] = "deferred_design_invalid"
             target_task["design_contract"] = {
-                "status": "failed_design",
+                "status": "deferred_design_invalid",
                 "issues": issues,
                 "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }
             target_task["decision_hint"] = (
                 "graph_rewrite_rejected: SPEC rewrite would collapse or delete "
-                "the runnable portfolio. Keep sibling tasks and retry only with a "
-                "materially narrower replacement."
+                "the runnable portfolio. Defer this design-invalid task while the "
+                "controller tries a sibling graph or reseed with a materially "
+                "narrower replacement."
             )
             spec["active_task_id"] = None
             spec["last_design_contract_issues"] = {
@@ -2988,7 +3280,9 @@ class TodoLifecycleMixin:
                         },
                     )
         if not open_candidates:
-            blocked_extra = self._spec_blocked_event_extra(tasks)
+            if self._maybe_recover_spec_search_frontier(spec, tasks):
+                return
+            blocked_extra = self._spec_blocked_event_extra(tasks, spec=spec)
             partial_success = (
                 blocked_extra.get("stop_reason")
                 in {
@@ -3356,7 +3650,12 @@ class TodoLifecycleMixin:
                     blocking.add(dep_id)
         return blocking
 
-    def _spec_blocked_event_extra(self, tasks: list[Any]) -> dict[str, Any]:
+    def _spec_blocked_event_extra(
+        self,
+        tasks: list[Any],
+        *,
+        spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         failed_prerequisites = sorted(self._failed_spec_prerequisite_ids(tasks))
         blocked_tasks = self._spec_blocked_task_ids(tasks)
         design_failed = self._design_failed_spec_task_ids(tasks)
@@ -3364,7 +3663,15 @@ class TodoLifecycleMixin:
         portfolio_exhausted = self._portfolio_exhausted_spec_task_ids(tasks)
         remaining = self._spec_remaining_loop_budget()
         stop_reason = "no_recovery_possible"
-        if design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
+        search = spec.get("search") if isinstance(spec, dict) and isinstance(spec.get("search"), dict) else {}
+        reseed_attempts = int(search.get("reseed_attempts", 0) or 0)
+        reseed_attempts_max = int(search.get("reseed_attempts_max", 0) or 0)
+        reseed_exhausted = bool(
+            reseed_attempts_max > 0 and reseed_attempts >= reseed_attempts_max
+        )
+        if reseed_exhausted and (design_failed or drift_deferred or portfolio_exhausted):
+            stop_reason = "search_frontier_exhausted_after_graph_reseed_exhausted"
+        elif design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
             stop_reason = (
                 "partial_success_design_deferred"
                 if self._spec_has_closed_task(tasks)
@@ -3402,6 +3709,8 @@ class TodoLifecycleMixin:
             "design_failed_tasks": design_failed,
             "drift_deferred_tasks": drift_deferred,
             "portfolio_exhausted_tasks": portfolio_exhausted,
+            "graph_reseed_attempts": reseed_attempts,
+            "graph_reseed_attempts_max": reseed_attempts_max,
         }
 
     @staticmethod
@@ -4962,6 +5271,7 @@ class TodoLifecycleMixin:
         )
         failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
         graph_candidates = self._read_spec_jsonl(self._spec_graph_candidates_path())
+        search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -4978,6 +5288,12 @@ class TodoLifecycleMixin:
             ),
             "spec_synth_model_profile": spec_model_profile,
             "spec_id": spec.get("spec_id"),
+            "selected_graph_id": self._spec_graph_id(spec),
+            "graph_reseed_attempts": int(search.get("reseed_attempts", 0) or 0),
+            "graph_reseed_attempts_max": int(
+                search.get("reseed_attempts_max", 0) or 0
+            ),
+            "cooldown_keys": search.get("cooldown_keys", []),
             "active_task_id": spec.get("active_task_id"),
             "progress": progress,
             "pending_spec_rewrite_reason": spec.get("pending_spec_rewrite_reason"),

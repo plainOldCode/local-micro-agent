@@ -111,6 +111,7 @@ _SPEC: dict[str, Any] = {
     "spec_active_task_drift_same_fingerprint_limit": 2,
     "spec_active_task_drift_rewrite_attempts": 1,
     "spec_portfolio_recovery_rounds": 2,
+    "spec_graph_reseed_attempts": 2,
     "continue_after_improvement": False,
     "deterministic_test_decision": True,
 }

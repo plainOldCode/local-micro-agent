@@ -2620,6 +2620,260 @@ Background / non-constraints
                 progress_events,
             )
 
+    def test_spec_mode_selects_backtrackable_graph_before_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            sidecar_dir = artifact_dir / "spec_graph_candidates"
+            sidecar_dir.mkdir(parents=True)
+            current_spec = {
+                "version": 2,
+                "spec_id": "current",
+                "search": {"graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "drifted contract",
+                        "status": "deferred_contract_drift",
+                        "deliverables": ["target.py"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "invalid design",
+                        "status": "deferred_design_invalid",
+                        "deliverables": ["target.py"],
+                    },
+                ],
+            }
+            sibling_spec = {
+                "version": 2,
+                "spec_id": "sibling",
+                "search": {"graph_id": "graph-0002", "parent_graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-101",
+                        "title": "fresh sibling",
+                        "deliverables": ["target.py"],
+                        "target_regions": ["target.py::parse_item"],
+                    }
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(current_spec) + "\n")
+            (sidecar_dir / "graph-0002.json").write_text(json.dumps(sibling_spec) + "\n")
+            (artifact_dir / "spec_graph_candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": "spec_graph_candidate.v1",
+                        "event": "candidate_created",
+                        "status": "backtrackable",
+                        "origin": "test",
+                        "graph_id": "graph-0002",
+                        "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0002.json",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_graph_reseed_attempts": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["spec_id"], "sibling")
+            graph_events = (artifact_dir / "spec_graph_candidates.jsonl").read_text()
+            self.assertIn('"status": "selected_backtrack"', graph_events)
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "graph_backtracked"', progress_events)
+
+    def test_spec_mode_rejects_stale_backtrackable_graph_and_requests_reseed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            sidecar_dir = artifact_dir / "spec_graph_candidates"
+            sidecar_dir.mkdir(parents=True)
+            current_spec = {
+                "version": 2,
+                "spec_id": "current",
+                "search": {"graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "invalid design",
+                        "status": "deferred_design_invalid",
+                        "deliverables": ["target.py"],
+                    }
+                ],
+            }
+            stale_spec = {
+                "version": 2,
+                "spec_id": "stale",
+                "search": {"graph_id": "graph-0002", "parent_graph_id": "graph-0001"},
+                "task_graph": [],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(current_spec) + "\n")
+            (sidecar_dir / "graph-0002.json").write_text(json.dumps(stale_spec) + "\n")
+            (artifact_dir / "spec_graph_candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": "spec_graph_candidate.v1",
+                        "event": "candidate_created",
+                        "status": "backtrackable",
+                        "origin": "test",
+                        "graph_id": "graph-0002",
+                        "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0002.json",
+                    }
+                )
+                + "\n"
+            )
+            (artifact_dir / "failure_signatures.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": "failure_signature.v1",
+                        "failure_class": "design_rewrite_invalid",
+                        "issue_code": "single_broad_structural_task",
+                        "cooldown_key": "abcd1234:structural_probe:single_broad_structural_task",
+                        "summary": "broad structural task",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_graph_reseed_attempts": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["search"]["reseed_attempts"], 1)
+            self.assertIn(
+                "abcd1234:structural_probe:single_broad_structural_task",
+                agent.state.scratch["spec_rewrite_focus"],
+            )
+            graph_events = (artifact_dir / "spec_graph_candidates.jsonl").read_text()
+            self.assertIn('"status": "rejected_stale"', graph_events)
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "graph_reseed_requested"', progress_events)
+
+            reseeded_spec = json.dumps(
+                {
+                    "version": 2,
+                    "spec_id": "reseeded",
+                    "task_graph": [
+                        {
+                            "task_id": "task-101",
+                            "title": "fresh local probe",
+                            "deliverables": ["target.py"],
+                            "target_regions": ["target.py::fresh_probe"],
+                        }
+                    ],
+                }
+            )
+            agent.models = _StaticModelManager(reseeded_spec)
+
+            asyncio.run(agent._maybe_refresh_run_spec(force=True))
+
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["spec_id"], "reseeded")
+            self.assertEqual(persisted["search"]["parent_graph_id"], "graph-0001")
+            self.assertEqual(persisted["search"]["reseed_attempts"], 1)
+            self.assertIn(
+                "abcd1234:structural_probe:single_broad_structural_task",
+                persisted["search"]["cooldown_keys"],
+            )
+            graph_events = [
+                json.loads(line)
+                for line in (artifact_dir / "spec_graph_candidates.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(graph_events[-1]["status"], "selected")
+            self.assertEqual(
+                graph_events[-1]["origin"],
+                "reseed_after_graph_frontier_exhausted",
+            )
+            self.assertEqual(graph_events[-1]["parent_graph_id"], "graph-0001")
+
+    def test_spec_mode_reports_graph_reseed_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "reseed-exhausted",
+                "search": {
+                    "graph_id": "graph-0001",
+                    "reseed_attempts": 1,
+                    "reseed_attempts_max": 1,
+                },
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "invalid design",
+                        "status": "deferred_design_invalid",
+                        "deliverables": ["target.py"],
+                    }
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_graph_reseed_attempts": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "search_frontier_exhausted_after_graph_reseed_exhausted",
+            )
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn(
+                '"stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted"',
+                progress_events,
+            )
+
     def test_spec_mode_schedules_open_sibling_without_reopening_exhausted_portfolio_task(
         self,
     ) -> None:
@@ -4850,7 +5104,10 @@ Background / non-constraints
 
                 persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
                 self.assertEqual(persisted["spec_id"], "previous")
-                self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
+                self.assertEqual(
+                    persisted["task_graph"][0]["status"],
+                    "deferred_design_invalid",
+                )
                 progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
                 self.assertIn('"event": "graph_rewrite_rejected"', progress)
                 self.assertIn("only one broad structural task", progress)
