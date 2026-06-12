@@ -179,6 +179,16 @@ class TodoLifecycleMixin:
                         ),
                     )
                     self._persist_run_spec(spec)
+                    if not targeted_rewrite:
+                        await self._maybe_generate_backtrackable_spec_graphs(
+                            selected_spec=spec,
+                            base_focus=focus,
+                            role=role,
+                            call_site=call_site,
+                            fallback_role=fallback_role,
+                            graph_origin=graph_origin,
+                            parent_graph_id=graph_parent_id,
+                        )
                     self.state.scratch.pop("spec_rewrite_focus", None)
                     self.state.scratch.pop("spec_rewrite_target_task_id", None)
                     self.state.scratch.pop("spec_graph_generation_origin", None)
@@ -289,6 +299,147 @@ class TodoLifecycleMixin:
             "soft fallback advisory"
         )
         return True
+
+    async def _maybe_generate_backtrackable_spec_graphs(
+        self,
+        *,
+        selected_spec: dict[str, Any],
+        base_focus: str,
+        role: str,
+        call_site: str,
+        fallback_role: str,
+        graph_origin: str,
+        parent_graph_id: str,
+    ) -> None:
+        if not str(graph_origin or "").startswith("reseed"):
+            return
+        candidate_count = self._spec_graph_candidate_count()
+        if candidate_count <= 1:
+            return
+        selected_search = (
+            selected_spec.get("search")
+            if isinstance(selected_spec.get("search"), dict)
+            else {}
+        )
+        parent_graph_id = parent_graph_id or str(
+            selected_search.get("parent_graph_id") or ""
+        )
+        seen_signatures = {
+            tuple(self._spec_graph_signature(selected_spec)),
+            *self._existing_spec_graph_signature_set(),
+        }
+        for index in range(2, candidate_count + 1):
+            diversity_context = self._spec_graph_candidate_diversity_context(
+                seen_signatures,
+                candidate_index=index,
+                candidate_count=candidate_count,
+            )
+            prompt_focus = "\n\n".join(
+                part for part in (base_focus, diversity_context) if part.strip()
+            )
+            prompt = spec_prompt(self.state, focus=prompt_focus)
+            if not self._consume_spec_synth_call_budget(f"{call_site}_candidate"):
+                return
+            candidate = await self._request_run_spec_from_model(
+                role=role,
+                prompt=prompt,
+                call_site=f"{call_site}_candidate",
+                fallback_role=fallback_role,
+            )
+            if not candidate:
+                return
+            self._apply_spec_graph_generation_metadata(
+                candidate,
+                previous_spec=selected_spec,
+                origin=graph_origin,
+                parent_graph_id=parent_graph_id,
+            )
+            signature = tuple(self._spec_graph_signature(candidate))
+            if signature in seen_signatures:
+                self._append_spec_graph_candidate_event(
+                    candidate,
+                    event="candidate_rejected",
+                    status="duplicate_variant",
+                    origin=graph_origin,
+                    issues=["duplicate graph variant"],
+                    parent_graph_id=parent_graph_id,
+                )
+                continue
+            seen_signatures.add(signature)
+            quality_report = self._spec_quality_report(candidate, attempt=0)
+            if self._spec_quality_report_failed(quality_report):
+                self._append_spec_graph_candidate_event(
+                    candidate,
+                    event="candidate_rejected",
+                    status="rejected_quality",
+                    origin=graph_origin,
+                    quality_report=quality_report,
+                    parent_graph_id=parent_graph_id,
+                )
+                continue
+            tasks = (
+                candidate.get("task_graph")
+                if isinstance(candidate.get("task_graph"), list)
+                else []
+            )
+            if not self._schedulable_spec_tasks(tasks):
+                self._append_spec_graph_candidate_event(
+                    candidate,
+                    event="candidate_rejected",
+                    status="rejected_quality",
+                    origin=graph_origin,
+                    issues=["candidate graph has no schedulable task"],
+                    parent_graph_id=parent_graph_id,
+                )
+                continue
+            self._append_spec_graph_candidate_event(
+                candidate,
+                event="candidate_created",
+                status="backtrackable",
+                origin=graph_origin,
+                quality_report=quality_report,
+                parent_graph_id=parent_graph_id,
+            )
+            self._append_spec_progress_event(
+                "graph_candidate_backtrackable",
+                candidate,
+                extra={
+                    "candidate_index": index,
+                    "candidate_count": candidate_count,
+                    "parent_graph_id": parent_graph_id,
+                    "graph_signature": list(signature),
+                },
+            )
+
+    def _spec_graph_candidate_count(self) -> int:
+        workflow = self.config.get("workflow", {})
+        return int(workflow.get("spec_graph_candidate_count", 1) or 1)
+
+    def _existing_spec_graph_signature_set(self) -> set[tuple[str, ...]]:
+        signatures: set[tuple[str, ...]] = set()
+        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+            signature = record.get("graph_signature")
+            if isinstance(signature, list):
+                normalized = tuple(str(item) for item in signature)
+                if normalized:
+                    signatures.add(normalized)
+        return signatures
+
+    @staticmethod
+    def _spec_graph_candidate_diversity_context(
+        seen_signatures: set[tuple[str, ...]],
+        *,
+        candidate_index: int,
+        candidate_count: int,
+    ) -> str:
+        compact = [list(signature) for signature in sorted(seen_signatures)]
+        return (
+            f"Generate graph candidate {candidate_index}/{candidate_count}. "
+            "Do not repeat any already proposed graph signature. Choose a different "
+            "target region or tactic stage, while staying grounded in writable source "
+            "regions and recent failure cooldowns.\n"
+            + json.dumps(compact, ensure_ascii=False, indent=2)
+        )
 
     def _run_spec_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
@@ -1690,6 +1841,11 @@ class TodoLifecycleMixin:
     def _next_spec_graph_id(self) -> str:
         max_id = 0
         pattern = re.compile(r"^graph-(\d+)$")
+        current_spec = self._load_run_spec(self._run_spec_path())
+        if isinstance(current_spec, dict):
+            match = pattern.match(self._spec_graph_id(current_spec))
+            if match:
+                max_id = max(max_id, int(match.group(1)))
         for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
             match = pattern.match(str(record.get("graph_id") or ""))
             if match:

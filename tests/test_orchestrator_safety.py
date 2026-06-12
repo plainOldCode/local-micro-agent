@@ -2823,6 +2823,203 @@ Background / non-constraints
             )
             self.assertEqual(graph_events[-1]["parent_graph_id"], "graph-0001")
 
+    def test_spec_reseed_candidate_count_records_backtrackable_variants(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                current_spec = {
+                    "version": 2,
+                    "spec_id": "current",
+                    "search": {"graph_id": "graph-0001"},
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "invalid design",
+                            "status": "deferred_design_invalid",
+                            "deliverables": ["target.py"],
+                        }
+                    ],
+                }
+                (artifact_dir / "run_spec.json").write_text(
+                    json.dumps(current_spec) + "\n"
+                )
+                selected = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "selected",
+                        "task_graph": [
+                            {
+                                "task_id": "task-101",
+                                "title": "selected target",
+                                "deliverables": ["target.py"],
+                                "target_regions": ["target.py::selected"],
+                            }
+                        ],
+                    }
+                )
+                duplicate = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "duplicate",
+                        "task_graph": [
+                            {
+                                "task_id": "task-201",
+                                "title": "duplicate target",
+                                "deliverables": ["target.py"],
+                                "target_regions": ["target.py::selected"],
+                            }
+                        ],
+                    }
+                )
+                sibling = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "sibling",
+                        "task_graph": [
+                            {
+                                "task_id": "task-301",
+                                "title": "sibling target",
+                                "deliverables": ["target.py"],
+                                "target_regions": ["target.py::sibling"],
+                            }
+                        ],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {"reasoner": "sequence", "default": "sequence"},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_graph_reseed_attempts": 1,
+                            "spec_graph_candidate_count": 3,
+                            "spec_synth_call_budget": 3,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", max_loops=10),
+                )
+                agent.models = _SequenceModelManager([selected, duplicate, sibling])
+                agent.state.loop_count = 4
+
+                agent._schedule_spec_task()
+                await agent._maybe_refresh_run_spec(force=True)
+
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                self.assertEqual(persisted["spec_id"], "selected")
+                self.assertEqual(persisted["search"]["graph_id"], "graph-0002")
+                events = [
+                    json.loads(line)
+                    for line in (
+                        artifact_dir / "spec_graph_candidates.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(
+                    [event["status"] for event in events],
+                    ["selected", "duplicate_variant", "backtrackable"],
+                )
+                self.assertEqual(events[-1]["parent_graph_id"], "graph-0001")
+                self.assertEqual(agent._spec_synth_call_count(), 3)
+                self.assertTrue(
+                    (
+                        artifact_dir
+                        / "spec_graph_candidates"
+                        / f"{events[-1]['graph_id']}.json"
+                    ).exists()
+                )
+
+        asyncio.run(run_case())
+
+    def test_spec_reseed_candidate_count_respects_spec_synth_budget(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                current_spec = {
+                    "version": 2,
+                    "spec_id": "current",
+                    "search": {"graph_id": "graph-0001"},
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "status": "deferred_design_invalid",
+                            "deliverables": ["target.py"],
+                        }
+                    ],
+                }
+                (artifact_dir / "run_spec.json").write_text(
+                    json.dumps(current_spec) + "\n"
+                )
+                selected = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "selected",
+                        "task_graph": [
+                            {
+                                "task_id": "task-101",
+                                "deliverables": ["target.py"],
+                                "target_regions": ["target.py::selected"],
+                            }
+                        ],
+                    }
+                )
+                sibling = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "sibling",
+                        "task_graph": [
+                            {
+                                "task_id": "task-201",
+                                "deliverables": ["target.py"],
+                                "target_regions": ["target.py::sibling"],
+                            }
+                        ],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {"reasoner": "sequence", "default": "sequence"},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_graph_reseed_attempts": 1,
+                            "spec_graph_candidate_count": 3,
+                            "spec_synth_call_budget": 2,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", max_loops=10),
+                )
+                agent.models = _SequenceModelManager([selected, sibling])
+                agent.state.loop_count = 4
+
+                agent._schedule_spec_task()
+                await agent._maybe_refresh_run_spec(force=True)
+
+                events = [
+                    json.loads(line)
+                    for line in (
+                        artifact_dir / "spec_graph_candidates.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(
+                    [event["status"] for event in events],
+                    ["selected", "backtrackable"],
+                )
+                self.assertEqual(agent._spec_synth_call_count(), 2)
+                self.assertTrue(agent.state.scratch["spec_synth_budget_exhausted"])
+
+        asyncio.run(run_case())
+
     def test_spec_mode_reports_graph_reseed_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
