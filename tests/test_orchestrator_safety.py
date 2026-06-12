@@ -2787,6 +2787,7 @@ Background / non-constraints
                 {
                     "version": 2,
                     "spec_id": "reseeded",
+                    "search": {"graph_id": "model-supplied-id"},
                     "task_graph": [
                         {
                             "task_id": "task-101",
@@ -2803,6 +2804,7 @@ Background / non-constraints
 
             persisted = json.loads((artifact_dir / "run_spec.json").read_text())
             self.assertEqual(persisted["spec_id"], "reseeded")
+            self.assertNotEqual(persisted["search"]["graph_id"], "model-supplied-id")
             self.assertEqual(persisted["search"]["parent_graph_id"], "graph-0001")
             self.assertEqual(persisted["search"]["reseed_attempts"], 1)
             self.assertIn(
@@ -2873,6 +2875,65 @@ Background / non-constraints
                 '"stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted"',
                 progress_events,
             )
+
+    def test_spec_mode_preserves_partial_success_after_graph_reseed_exhaustion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "partial-reseed-exhausted",
+                "search": {
+                    "graph_id": "graph-0001",
+                    "reseed_attempts": 1,
+                    "reseed_attempts_max": 1,
+                },
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "closed task",
+                        "status": "closed",
+                        "deliverables": ["target.py"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "invalid design",
+                        "status": "deferred_design_invalid",
+                        "deliverables": ["target.py"],
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_graph_reseed_attempts": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.DONE)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "partial_success_search_frontier_exhausted",
+            )
+            self.assertEqual(persisted["task_graph"][1]["status"], "deferred_design")
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"graph_reseed_exhausted": true', progress_events)
 
     def test_spec_mode_schedules_open_sibling_without_reopening_exhausted_portfolio_task(
         self,

@@ -387,6 +387,7 @@ class TodoLifecycleMixin:
         if not spec:
             self.state.notes.append("Run spec discarded: no task_graph")
             return {}
+        spec.pop("search", None)
         return spec
 
     def _spec_two_call_synthesis_enabled(self, force: bool) -> bool:
@@ -3670,7 +3671,11 @@ class TodoLifecycleMixin:
             reseed_attempts_max > 0 and reseed_attempts >= reseed_attempts_max
         )
         if reseed_exhausted and (design_failed or drift_deferred or portfolio_exhausted):
-            stop_reason = "search_frontier_exhausted_after_graph_reseed_exhausted"
+            stop_reason = (
+                "partial_success_search_frontier_exhausted"
+                if self._spec_has_closed_task(tasks)
+                else "search_frontier_exhausted_after_graph_reseed_exhausted"
+            )
         elif design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
             stop_reason = (
                 "partial_success_design_deferred"
@@ -3711,6 +3716,7 @@ class TodoLifecycleMixin:
             "portfolio_exhausted_tasks": portfolio_exhausted,
             "graph_reseed_attempts": reseed_attempts,
             "graph_reseed_attempts_max": reseed_attempts_max,
+            "graph_reseed_exhausted": reseed_exhausted,
         }
 
     @staticmethod
