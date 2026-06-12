@@ -59,6 +59,7 @@ Output strict JSON with:
   "task_graph": [
     {
       "task_id": "task-001",
+      "hypothesis_id": "accepted-hypothesis-id",
       "title": "short task",
       "strategy_axis": "axis_or_general_edit",
       "family_key": "lowercase_snake_case_or_empty",
@@ -172,6 +173,11 @@ Rules:
   only from writable allowed_target_regions. Read-only or imported symbols may
   be cited as context, hazards, invariants, or read_hints, but must not be
   changed targets.
+- When accepted SPEC hypothesis options are supplied, create runnable
+  implementation tasks only from those options. Every runnable task must copy
+  one accepted `hypothesis_id`, and its target_regions must stay within that
+  option's change_boundary.regions. If no hypothesis option was accepted, do
+  not invent implementation tasks from free-form analysis or rejected prose.
 - When a SPEC_IDEA advisory brief is supplied, do not silently drift away from
   its first feasible writable target. Either make that target the first runnable
   task, or add an `idea_rejection_reason:` entry to known_facts or
@@ -209,13 +215,36 @@ SPEC_THINK_BRIEF_SYSTEM = """You are the SPEC_THINK_BRIEF node in a local coding
 Do not write code and do not emit run_spec JSON.
 Analyze the request, plan, source, semantic facts, grounding facts, and recent
 failures so a separate no-think JSON finalizer can produce a bounded run spec.
-Output compact Markdown only with these sections:
-- Objective interpretation
-- Writable target regions
-- Rejected or recently failed shapes
-- Required material-difference axes
-- Smallest guarded probe candidates
-- Finalizer constraints to enforce
+Output compact Markdown only. Domain-specific symbols, APIs, algorithms, and
+failure terms are allowed inside fields, but do not rely on prose paragraphs.
+
+Emit 1-5 typed hypothesis options in this exact block form:
+
+BEGIN_HYPOTHESIS_OPTION hyp-short-id
+hypothesis: What causal claim this option tests and why it helps the objective.
+change_boundary.regions: relative/path.py::symbol
+change_boundary.kind: local_edit|structural_probe|structural_expand|other
+change_boundary.minimality_claim: Why this is the smallest resolvable boundary.
+causal_evidence: Source, test, metric, or failure-log evidence for the claim.
+expected_signal.validator_kind: metric|command|synthesized|diagnostic
+expected_signal.command_or_metric: Which configured command, metric, or signal observes it.
+expected_signal.success_condition: What concrete observation counts as improvement or safety.
+invariants: Behavior, API, data-flow, or correctness constraints to preserve.
+fallback.on_failure: Which axis to abandon, shrink, or retarget if this fails.
+fallback.preserve: Which siblings, invariants, or facts must remain usable.
+why_not_smaller: Why the controller should not split this boundary further.
+END_HYPOTHESIS_OPTION
+
+Rules:
+- The controller validates structure only; it will not interpret domain terms
+  or split your option into smaller tasks for you.
+- Use change_boundary.regions from deterministic writable grounding facts when
+  they are supplied.
+- If an idea is broad, explain why it cannot be made smaller in why_not_smaller
+  or leave it out.
+- Do not emit run_spec JSON, task_graph JSON, code, patches, or shell commands.
+- Options that omit evidence, observable signal, fallback, boundary, or
+  why_not_smaller may be rejected before the finalizer runs.
 
 This is an analysis-only brief. It may use thinking internally, but the visible
 brief must be concise and must not contain JSON run-spec artifacts."""

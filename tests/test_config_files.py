@@ -107,6 +107,10 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(workflow["spec_thinking_brief_model_role"], "reasoner")
         self.assertTrue(workflow["spec_thinking_brief_accept_reasoning_only"])
         self.assertEqual(workflow["spec_thinking_brief_char_limit"], 8000)
+        self.assertTrue(workflow["spec_hypothesis_brief_enabled"])
+        self.assertEqual(workflow["spec_hypothesis_max_options"], 5)
+        self.assertTrue(workflow["spec_hypothesis_require_expected_signal"])
+        self.assertTrue(workflow["spec_hypothesis_require_why_not_smaller"])
         self.assertEqual(workflow["spec_finalize_model_role"], "spec_synth")
         self.assertEqual(
             workflow["candidate_history_path"],

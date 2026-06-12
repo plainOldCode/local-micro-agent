@@ -644,6 +644,18 @@ class TodoLifecycleMixin:
             ".local_micro_agent/spec_think_brief_meta.json",
         )
 
+    def _spec_hypothesis_options_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_hypothesis_options_path",
+            ".local_micro_agent/spec_hypothesis_options.json",
+        )
+
+    def _spec_hypothesis_option_rejections_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_hypothesis_option_rejections_path",
+            ".local_micro_agent/spec_hypothesis_option_rejections.jsonl",
+        )
+
     def _spec_synthesis_constraints_path(self) -> Path:
         return self._workflow_artifact_path(
             "spec_synthesis_constraints_path",
@@ -723,6 +735,7 @@ class TodoLifecycleMixin:
         targeted_rewrite: bool,
     ) -> str:
         workflow = self.config.get("workflow", {})
+        self._reset_spec_hypothesis_options("pending_spec_think_brief")
         role = str(
             workflow.get("spec_thinking_brief_model_role")
             or workflow.get("spec_idea_model_role")
@@ -823,8 +836,387 @@ class TodoLifecycleMixin:
                 "constraints, and workflow constraints.\n"
                 + brief
             )
+            hypothesis_context = self._spec_hypothesis_options_context(brief)
+            if hypothesis_context:
+                context_parts.append(hypothesis_context)
         context_parts.append(self._spec_synthesis_constraints_context())
         return "\n\n".join(part for part in context_parts if part.strip())
+
+    def _spec_hypothesis_brief_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("spec_hypothesis_brief_enabled"))
+
+    def _spec_hypothesis_options_context(self, brief: str) -> str:
+        if not self._spec_hypothesis_brief_enabled():
+            return ""
+        payload = self._normalize_spec_hypothesis_options(brief)
+        path = self._spec_hypothesis_options_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        rejections_path = self._spec_hypothesis_option_rejections_path()
+        rejections_path.parent.mkdir(parents=True, exist_ok=True)
+        rejected = payload.get("rejected", [])
+        if rejected:
+            rejections_path.write_text(
+                "".join(
+                    json.dumps(record, ensure_ascii=False) + "\n"
+                    for record in rejected
+                    if isinstance(record, dict)
+                )
+            )
+        elif rejections_path.exists():
+            rejections_path.write_text("")
+        self.state.scratch["spec_hypothesis_options"] = payload
+        accepted = payload.get("accepted", [])
+        self.state.notes.append(
+            "Normalized spec hypothesis options: "
+            f"{len(accepted)} accepted, {len(rejected)} rejected"
+        )
+        compact = {
+            "accepted": accepted,
+            "rejected": [
+                {
+                    "hypothesis_id": record.get("hypothesis_id"),
+                    "issues": record.get("issues", []),
+                }
+                for record in rejected
+                if isinstance(record, dict)
+            ],
+        }
+        if accepted:
+            return (
+                "Accepted SPEC hypothesis options follow. The no-think "
+                "finalizer may create runnable implementation tasks only from "
+                "these options. Every runnable task must copy one accepted "
+                "`hypothesis_id` and keep target_regions within that option's "
+                "change_boundary.regions.\n"
+                + json.dumps(compact, ensure_ascii=False, indent=2)
+            )
+        return (
+            "No SPEC hypothesis option passed controller validation. The "
+            "no-think finalizer must not create runnable implementation tasks "
+            "from free-form analysis or rejected options.\n"
+            + json.dumps(compact, ensure_ascii=False, indent=2)
+        )
+
+    def _reset_spec_hypothesis_options(self, reason: str) -> None:
+        if not self._spec_hypothesis_brief_enabled():
+            return
+        self.state.scratch.pop("spec_hypothesis_options", None)
+        payload = {
+            "version": 1,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "reason": str(reason or "reset"),
+            "accepted": [],
+            "rejected": [],
+            "accepted_count": 0,
+            "rejected_count": 0,
+        }
+        path = self._spec_hypothesis_options_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        rejections_path = self._spec_hypothesis_option_rejections_path()
+        rejections_path.parent.mkdir(parents=True, exist_ok=True)
+        rejections_path.write_text("")
+
+    def _normalize_spec_hypothesis_options(self, brief: str) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        max_options = max(1, int(workflow.get("spec_hypothesis_max_options", 5) or 5))
+        blocks = self._extract_spec_hypothesis_option_blocks(brief)[:max_options]
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for raw_id, body in blocks:
+            option = self._parse_spec_hypothesis_option(raw_id, body)
+            issues = self._validate_spec_hypothesis_option(option)
+            if issues:
+                rejected.append(
+                    {
+                        "hypothesis_id": option.get("hypothesis_id"),
+                        "issues": issues,
+                        "option": option,
+                    }
+                )
+            else:
+                accepted.append(option)
+        if not blocks and brief.strip():
+            rejected.append(
+                {
+                    "hypothesis_id": "",
+                    "issues": ["missing_hypothesis_option_blocks"],
+                    "raw_preview": self._slice_text(brief.strip(), 1200),
+                }
+            )
+        return {
+            "version": 1,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "source_chars": len(brief),
+            "accepted": accepted,
+            "rejected": rejected,
+            "accepted_count": len(accepted),
+            "rejected_count": len(rejected),
+        }
+
+    @staticmethod
+    def _extract_spec_hypothesis_option_blocks(brief: str) -> list[tuple[str, str]]:
+        blocks: list[tuple[str, str]] = []
+        pattern = re.compile(
+            r"BEGIN_HYPOTHESIS_OPTION\s+([^\n\r]+)\s*(.*?)\s*END_HYPOTHESIS_OPTION",
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in pattern.finditer(brief):
+            raw_id = match.group(1).strip()
+            body = match.group(2).strip()
+            if raw_id or body:
+                blocks.append((raw_id, body))
+        return blocks
+
+    def _parse_spec_hypothesis_option(self, raw_id: str, body: str) -> dict[str, Any]:
+        fields = self._parse_spec_hypothesis_fields(body)
+        hypothesis_id = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", raw_id).strip("-")[:80]
+        regions = self._split_spec_hypothesis_values(
+            self._spec_hypothesis_field(
+                fields,
+                "change_boundary.regions",
+                "change_boundary_regions",
+                "target_regions",
+                "regions",
+            )
+        )
+        evidence = self._split_spec_hypothesis_values(
+            self._spec_hypothesis_field(fields, "causal_evidence", "evidence")
+        )
+        invariants = self._split_spec_hypothesis_values(
+            self._spec_hypothesis_field(fields, "invariants", "preserved_invariants")
+        )
+        fallback_preserve = self._split_spec_hypothesis_values(
+            self._spec_hypothesis_field(
+                fields,
+                "fallback.preserve",
+                "fallback_preserve",
+                "preserve",
+            )
+        )
+        return {
+            "hypothesis_id": hypothesis_id,
+            "hypothesis": self._spec_hypothesis_field(fields, "hypothesis"),
+            "change_boundary": {
+                "regions": regions,
+                "kind": self._spec_hypothesis_field(
+                    fields,
+                    "change_boundary.kind",
+                    "change_boundary_kind",
+                    "boundary_kind",
+                    "kind",
+                ),
+                "minimality_claim": self._spec_hypothesis_field(
+                    fields,
+                    "change_boundary.minimality_claim",
+                    "change_boundary_minimality_claim",
+                    "minimality_claim",
+                ),
+            },
+            "causal_evidence": [
+                {"source": "brief", "claim": item} for item in evidence if item
+            ],
+            "expected_signal": {
+                "validator_kind": self._spec_hypothesis_field(
+                    fields,
+                    "expected_signal.validator_kind",
+                    "expected_signal_validator_kind",
+                    "validator_kind",
+                ),
+                "command_or_metric": self._spec_hypothesis_field(
+                    fields,
+                    "expected_signal.command_or_metric",
+                    "expected_signal_command_or_metric",
+                    "command_or_metric",
+                ),
+                "success_condition": self._spec_hypothesis_field(
+                    fields,
+                    "expected_signal.success_condition",
+                    "expected_signal_success_condition",
+                    "success_condition",
+                    "expected_signal",
+                ),
+            },
+            "invariants": invariants,
+            "fallback": {
+                "on_failure": self._spec_hypothesis_field(
+                    fields,
+                    "fallback.on_failure",
+                    "fallback_on_failure",
+                    "on_failure",
+                    "fallback",
+                ),
+                "preserve": fallback_preserve,
+            },
+            "why_not_smaller": self._spec_hypothesis_field(
+                fields,
+                "why_not_smaller",
+                "why_not_smaller_claim",
+            ),
+        }
+
+    @staticmethod
+    def _parse_spec_hypothesis_fields(body: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        current_key = ""
+        for raw_line in body.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            candidate = stripped.lstrip("-* ").strip()
+            match = re.match(r"^([A-Za-z0-9_. -]+):\s*(.*)$", candidate)
+            if match:
+                key = re.sub(
+                    r"[^a-z0-9.]+",
+                    "_",
+                    match.group(1).strip().lower(),
+                ).strip("_")
+                current_key = key
+                value = match.group(2).strip()
+                if value:
+                    fields[key] = value
+                else:
+                    fields.setdefault(key, "")
+                continue
+            if current_key:
+                fields[current_key] = (
+                    fields.get(current_key, "") + "\n" + candidate
+                ).strip()
+        return fields
+
+    @staticmethod
+    def _spec_hypothesis_field(fields: dict[str, str], *keys: str) -> str:
+        for key in keys:
+            normalized = re.sub(r"[^a-z0-9.]+", "_", key.lower()).strip("_")
+            value = str(fields.get(normalized) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _split_spec_hypothesis_values(value: str) -> list[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        parts: list[str] = []
+        for line in raw.splitlines():
+            stripped = line.strip().lstrip("-* ").strip()
+            if not stripped:
+                continue
+            if "," in stripped:
+                parts.extend(part.strip() for part in stripped.split(","))
+            else:
+                parts.append(stripped)
+        return [part for part in parts if part]
+
+    def _validate_spec_hypothesis_option(self, option: dict[str, Any]) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        issues: list[str] = []
+        hypothesis_id = str(option.get("hypothesis_id") or "").strip()
+        if not hypothesis_id:
+            issues.append("missing_hypothesis_id")
+        if not str(option.get("hypothesis") or "").strip():
+            issues.append("missing_hypothesis")
+        boundary = option.get("change_boundary")
+        boundary = boundary if isinstance(boundary, dict) else {}
+        regions = self._normalize_string_list(boundary.get("regions"))
+        if not regions:
+            issues.append("missing_change_boundary_regions")
+        facts = self._current_spec_grounding_facts()
+        allowed_regions = {
+            str(region)
+            for region in facts.get("allowed_target_regions", []) or []
+            if str(region).strip()
+        }
+        writable_files = {
+            str(path)
+            for path in facts.get("writable_files", []) or []
+            if str(path).strip()
+        }
+        for region in regions:
+            region_path = region.split("::", 1)[0]
+            file_level_region = "::" not in region and region_path in writable_files
+            if allowed_regions and region not in allowed_regions and not file_level_region:
+                issues.append(f"unresolved_or_non_writable_boundary:{region}")
+        boundary_kind = str(boundary.get("kind") or "").strip().lower()
+        if not boundary_kind:
+            issues.append("missing_change_boundary_kind")
+        if not str(boundary.get("minimality_claim") or "").strip():
+            issues.append("missing_minimality_claim")
+        evidence = option.get("causal_evidence")
+        if not isinstance(evidence, list) or not any(
+            isinstance(item, dict) and str(item.get("claim") or "").strip()
+            for item in evidence
+        ):
+            issues.append("missing_causal_evidence")
+        expected = option.get("expected_signal")
+        expected = expected if isinstance(expected, dict) else {}
+        if workflow.get("spec_hypothesis_require_expected_signal", True):
+            if not str(expected.get("validator_kind") or "").strip():
+                issues.append("missing_expected_signal_validator_kind")
+            if not str(expected.get("success_condition") or "").strip():
+                issues.append("missing_expected_signal_success_condition")
+        if not self._normalize_string_list(option.get("invariants")):
+            issues.append("missing_invariants")
+        fallback = option.get("fallback")
+        fallback = fallback if isinstance(fallback, dict) else {}
+        if not str(fallback.get("on_failure") or "").strip():
+            issues.append("missing_fallback_on_failure")
+        if not self._normalize_string_list(fallback.get("preserve")):
+            issues.append("missing_fallback_preserve")
+        if workflow.get("spec_hypothesis_require_why_not_smaller", True):
+            if not str(option.get("why_not_smaller") or "").strip():
+                issues.append("missing_why_not_smaller")
+        elif workflow.get("spec_hypothesis_require_why_not_smaller_for_structural", True):
+            broad_kinds = {
+                "structural",
+                "structural_probe",
+                "structural_expand",
+                "class",
+                "dataflow",
+                "schema",
+                "unknown",
+                "other",
+            }
+            if (
+                (boundary_kind in broad_kinds or len(regions) > 1)
+                and not str(option.get("why_not_smaller") or "").strip()
+            ):
+                issues.append("missing_why_not_smaller")
+        return list(dict.fromkeys(issues))
+
+    def _accepted_spec_hypothesis_options(self) -> dict[str, dict[str, Any]]:
+        if not self._spec_hypothesis_brief_enabled():
+            return {}
+        payload = self.state.scratch.get("spec_hypothesis_options")
+        if not isinstance(payload, dict):
+            path = self._spec_hypothesis_options_path()
+            if path.exists():
+                try:
+                    loaded = json.loads(path.read_text(errors="replace"))
+                except json.JSONDecodeError:
+                    loaded = {}
+                payload = loaded if isinstance(loaded, dict) else {}
+            else:
+                payload = {}
+        accepted = payload.get("accepted") if isinstance(payload, dict) else []
+        options: dict[str, dict[str, Any]] = {}
+        if isinstance(accepted, list):
+            for option in accepted:
+                if isinstance(option, dict):
+                    hypothesis_id = str(option.get("hypothesis_id") or "").strip()
+                    if hypothesis_id:
+                        options[hypothesis_id] = option
+        return options
 
     def _provider_thinking_enabled(self, role: str) -> bool | None:
         provider = self._provider_for_role(role)
@@ -1310,6 +1702,7 @@ class TodoLifecycleMixin:
         issues: list[dict[str, Any]] = []
         for task in tasks:
             issues.extend(self._spec_task_quality_issues(spec, task))
+        issues.extend(self._spec_hypothesis_task_quality_issues(tasks))
         preferred = self._spec_idea_preferred_target_region()
         if preferred:
             runnable = self._schedulable_spec_tasks(spec.get("task_graph", []))
@@ -1349,6 +1742,77 @@ class TodoLifecycleMixin:
                             "failure memory."
                         ),
                     }
+                )
+        return issues
+
+    def _spec_hypothesis_task_quality_issues(
+        self,
+        tasks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not self._spec_hypothesis_brief_enabled():
+            return []
+        issues: list[dict[str, Any]] = []
+        accepted = self._accepted_spec_hypothesis_options()
+        if not accepted:
+            for task in tasks:
+                task_id = str(task.get("task_id") or "")
+                issues.append(
+                    self._spec_quality_issue(
+                        "hypothesis_option_missing",
+                        task_id,
+                        "no accepted SPEC hypothesis option is available for this runnable task",
+                        (
+                            "Do not synthesize runnable tasks from free-form thinking "
+                            "brief prose. Produce a typed hypothesis option that passes "
+                            "controller validation, then copy its hypothesis_id into "
+                            "the task."
+                        ),
+                    )
+                )
+            return issues
+        for task in tasks:
+            task_id = str(task.get("task_id") or "")
+            hypothesis_id = str(task.get("hypothesis_id") or "").strip()
+            if not hypothesis_id:
+                issues.append(
+                    self._spec_quality_issue(
+                        "hypothesis_id_missing",
+                        task_id,
+                        "runnable task has no hypothesis_id",
+                        "Copy hypothesis_id from one accepted SPEC hypothesis option.",
+                    )
+                )
+                continue
+            option = accepted.get(hypothesis_id)
+            if not option:
+                issues.append(
+                    self._spec_quality_issue(
+                        "hypothesis_id_unknown",
+                        task_id,
+                        f"unknown hypothesis_id={hypothesis_id}",
+                        "Use only accepted SPEC hypothesis option ids.",
+                    )
+                )
+                continue
+            boundary = option.get("change_boundary")
+            boundary = boundary if isinstance(boundary, dict) else {}
+            option_regions = set(self._normalize_string_list(boundary.get("regions")))
+            task_regions = self._normalize_string_list(task.get("target_regions"))
+            if task_regions and option_regions and not set(task_regions).issubset(option_regions):
+                issues.append(
+                    self._spec_quality_issue(
+                        "hypothesis_boundary_mismatch",
+                        task_id,
+                        (
+                            f"task target_regions={task_regions} are outside "
+                            f"hypothesis {hypothesis_id} regions={sorted(option_regions)}"
+                        ),
+                        (
+                            "Keep task target_regions within the accepted hypothesis "
+                            "change_boundary.regions, or produce a new accepted "
+                            "hypothesis option for the different boundary."
+                        ),
+                    )
                 )
         return issues
 
@@ -1821,6 +2285,7 @@ class TodoLifecycleMixin:
             task_id = str(task.get("task_id") or f"task-{index:03d}").strip()
             normalized = {
                 "task_id": task_id,
+                "hypothesis_id": str(task.get("hypothesis_id") or "").strip(),
                 "replaces_task_id": str(task.get("replaces_task_id") or "").strip(),
                 "title": str(task.get("title") or task_id).strip(),
                 "strategy_axis": axis,
