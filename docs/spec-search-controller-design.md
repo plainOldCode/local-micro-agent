@@ -757,22 +757,22 @@ Remaining:
 
 ## Recommended Next Patch
 
-Implement MVP 6.1 next:
+Implement MVP 7 next:
 
-1. Bind metric-neutral plateau evidence to the current candidate/test
-   transition.
-2. Ignore stale metric observations when the latest candidate is an active-task
-   drift, pre-apply reject, graph/design reject, or any non-metric-neutral
-   transition.
-3. Require plateau records to carry a current `candidate_id`, `loop`,
-   recovered task identity, metric, baseline, and `improved=false`.
-4. Record ignored stale observations as controller diagnostics, not as
-   `metric_neutral_plateau` signatures.
+1. Add a runner-agnostic thinking/analysis response abstraction that can capture
+   Ollama `message.thinking`, OpenAI-compatible `reasoning_content`, or plain
+   `content` fallback.
+2. Introduce `SPEC_THINK_BRIEF` as an analysis-only call site. It must never be
+   parsed as run-spec JSON and must not use tool/JSON mode.
+3. Extract controller-owned `SpecSynthesisConstraints` from the thinking brief,
+   deterministic grounding facts, and recent failure signatures.
+4. Keep `SPEC_FINALIZE` no-think and strict JSON. It consumes the brief plus
+   constraints and must not rely on hidden reasoning.
 5. Add normal, edge, and error tests before any M2 Max smoke.
 
-Do not increase graph reseed attempts or portfolio recovery rounds to hide this
-failure. The goal is to spend fewer loops on known metric-neutral shapes and make
-the next frontier materially different.
+Do not increase graph reseed attempts or portfolio recovery rounds to hide SPEC
+artifact failures. The goal is to use reasoning where it is helpful, then force
+the final artifact through bounded controller-owned constraints.
 
 ### MVP 6.1: Transition-Bound Plateau Evidence
 
@@ -813,3 +813,262 @@ Required tests:
 | normal | current candidate and current metric observation are both no-improvement | one plateau signature is written |
 | edge | metric observation is no-improvement but candidate id or loop differs | no plateau signature; ignored diagnostic recorded |
 | error | active-task drift follows a stale no-improvement metric observation | no plateau signature and no plateau terminal count |
+
+### MVP 7: Runner-Agnostic SPEC Thinking Brief
+
+The `3fbfa5a` 20-loop smoke validated plateau attribution but still exhausted
+the SPEC synthesis budget (`24/24`) in quality/reseed paths. The remaining
+failure is not that the controller lacks prompts or failure memory; it is that
+analysis, generation, and strict JSON finalization are still too tightly coupled.
+When Qwen thinking is enabled, several local serving stacks can return useful
+reasoning in a provider-specific field while leaving final `content` empty.
+When thinking is disabled, the strict JSON finalizer is cleaner but loses the
+analysis needed to choose a different exploration direction.
+
+The controller should split SPEC synthesis into three lanes:
+
+1. **Thinking brief lane**: analysis-only, provider-aware, non-JSON.
+2. **Constraint lane**: deterministic controller extraction from brief,
+   grounding, config, and recent failures.
+3. **No-think finalizer lane**: strict run-spec JSON only.
+
+#### Runner Response Abstraction
+
+Add a small response type at the model-runtime boundary:
+
+```python
+@dataclass
+class ModelTextParts:
+    content: str
+    reasoning: str
+    usage: dict[str, Any]
+    source: Literal["content", "reasoning", "mixed", "empty"]
+```
+
+Provider mapping:
+
+- Ollama native:
+  - final text: `message.content`
+  - thinking text: `message.thinking`
+  - request control: `think: true|false`
+- OpenAI-compatible / LM Studio / reasoning proxy:
+  - final text: `message.content`
+  - thinking text: `message.reasoning_content`, `message.thinking`, or
+    `message.reasoning`
+  - request control: provider-specific `think`, `enable_thinking`,
+    `enableThinking`, or `extra_body.chat_template_kwargs.enable_thinking`
+- Content-only providers:
+  - final text: `content`
+  - thinking text: empty
+  - brief lane falls back to `content`
+
+Streaming must preserve the same distinction. Today Ollama stream chunks can
+carry `{"kind": "reasoning"}`, while OpenAI-compatible reasoning chunks are
+passed through the callback as plain strings. MVP 7 should make stream chunks
+provider-neutral before the brief lane relies on them:
+
+- `{"kind": "reasoning", "content": "..."}`
+- `{"kind": "content", "content": "..."}`
+- `{"kind": "meta", ...}` when token/finish data is available
+
+Existing `_model_chat()` should keep returning strict final `content` for normal
+call sites and should still reject reasoning-only responses by default. Add a
+separate `_model_thinking_brief()` path that accepts reasoning-only output for
+explicit analysis call sites and returns the best available brief text:
+
+1. prefer non-empty final `content`;
+2. otherwise use non-empty `reasoning`;
+3. otherwise return an empty brief and let finalizer continue with deterministic
+   facts only.
+
+This keeps the existing JSON and CODE paths safe while allowing Qwen thinking to
+be used where empty final content is not fatal.
+
+#### SPEC_THINK_BRIEF Call Site
+
+Add `SPEC_THINK_BRIEF_SYSTEM` as a replacement for the current advisory
+`SPEC_IDEA` role when `workflow.spec_thinking_brief_enabled=true`.
+
+Rules:
+
+- Do not emit run-spec JSON.
+- Do not use tool calls or JSON mode.
+- Use deterministic context only:
+  - user request and plan;
+  - focused source/semantic facts;
+  - grounding facts;
+  - recent failure signatures/cooldown keys;
+  - current rewrite/reseed focus;
+  - optional externally supplied advisory evidence.
+- Output compact Markdown sections:
+  - Objective interpretation;
+  - likely writable target regions;
+  - rejected/recently failed shapes;
+  - required material-difference axes;
+  - smallest guarded probe candidates;
+  - finalizer constraints to enforce.
+
+Persist artifacts separately:
+
+- `.local_micro_agent/spec_think_brief.md`
+- `.local_micro_agent/spec_think_brief_meta.json`
+- optional `.local_micro_agent/spec_think_raw_reasoning.md` when raw reasoning
+  must be retained for debugging and `workflow.log_raw_model_outputs=true`
+
+Meta fields:
+
+- `provider_kind`, `provider_model`, `call_site`, `role`;
+- `content_chars`, `reasoning_chars`, `selected_source`;
+- `reasoning_only_response`;
+- `thinking_enabled`;
+- optional `preserve_thinking_enabled`;
+- prompt/output token usage when available.
+
+Raw reasoning can be large and provider-dependent. The finalizer should consume
+a compact brief or extracted constraints, not an unbounded reasoning trace. If
+the selected source is `reasoning`, the controller should cap the persisted
+brief to `workflow.spec_thinking_brief_char_limit` and keep the raw trace only
+under the existing raw-output/debug logging policy.
+
+#### Controller-Owned Constraints
+
+The brief is advisory. The controller must convert it into a compact
+`SpecSynthesisConstraints` object before finalization:
+
+```json
+{
+  "allowed_target_regions": ["perf_takehome.py::fn"],
+  "banned_cooldown_keys": ["region_hash:structural_probe:issue"],
+  "banned_issue_codes": ["design_contract_rollback_or_shrink_plan_missing"],
+  "required_material_difference": {
+    "target_region": true,
+    "tactic_stage": true,
+    "validator_kind": false,
+    "deliverables": false
+  },
+  "probe_contract": {
+    "max_files_changed": 1,
+    "max_hunks": 2,
+    "max_changed_lines": 20,
+    "max_changed_functions": 1
+  },
+  "minimum_runnable_local_edit_tasks": 1,
+  "forbidden_task_shapes": ["broad_structural_probe_without_guard"],
+  "must_preserve_sibling_frontier": true
+}
+```
+
+Constraint sources, in priority order:
+
+1. deterministic workflow config;
+2. writable/grounding facts;
+3. current target-node transaction/reseed focus;
+4. recent failure signatures and plateau/drift cooldown keys;
+5. thinking brief suggestions that are consistent with 1-4.
+
+The model may suggest constraints, but it does not own them. If a suggested
+target is not writable/resolvable, the controller drops it and records why.
+
+#### Finalizer Contract
+
+`SPEC_FINALIZE` remains no-think strict JSON. Its prompt receives:
+
+- deterministic source/semantic/grounding context;
+- the thinking brief as advisory Markdown;
+- `SpecSynthesisConstraints` as strict JSON;
+- quality feedback from the previous rejected finalizer output.
+
+The finalizer must:
+
+- satisfy every controller constraint;
+- echo only allowed target regions in tasks/probe contracts;
+- avoid banned cooldown keys and issue codes;
+- produce at least one runnable local-edit or guarded structural-probe task when
+  the search frontier is not terminal;
+- include an explicit `constraint_satisfaction` known fact or decision rule when
+  it intentionally rejects the brief's first suggested target.
+
+Quality gates remain authoritative. However, repeated finalizer rejection for
+the same issue should not simply ask the same model to try again. After the
+configured retry cap, the controller should either:
+
+- apply a deterministic shrink/repair template for the failed fields; or
+- defer the target locally and move to sibling/backtrack/reseed with updated
+  constraints.
+
+#### Optional External Evidence
+
+External search should be a controller capability, not a hidden model behavior.
+Use it only in the thinking brief lane and only for general grounding:
+
+Allowed:
+
+- official API/library/language documentation;
+- error messages and known framework semantics;
+- general algorithm or performance technique references.
+
+Disallowed:
+
+- benchmark-specific solution search;
+- take-home problem title search;
+- copying answer code;
+- hidden test or leaderboard probing.
+
+External evidence must be stored as compact citations/snippets in a separate
+brief input section and must not widen CODE writable files.
+
+#### Config
+
+Suggested workflow keys:
+
+```json
+{
+  "spec_thinking_brief_enabled": true,
+  "spec_thinking_brief_model_role": "reasoner",
+  "spec_thinking_brief_call_sites": [
+    "spec_think_brief",
+    "spec_think_brief_rewrite",
+    "spec_think_brief_reseed"
+  ],
+  "spec_thinking_brief_accept_reasoning_only": true,
+  "spec_thinking_brief_preserve_thinking": false,
+  "spec_thinking_brief_external_search": false,
+  "spec_finalizer_no_think": true
+}
+```
+
+Provider-level thinking should remain declarative:
+
+- Ollama roles can set `think=true` only for the brief model.
+- OpenAI-compatible Qwen roles can set thinking through explicit provider fields
+  or `extra_body.chat_template_kwargs.enable_thinking=true`.
+- Finalizer/coder/tester roles should set thinking off through the runner's
+  supported mechanism.
+
+`preserve_thinking` should be treated as an experiment flag for the brief lane
+only. It may improve agentic consistency, but it also consumes context and must
+not leak hidden reasoning into final JSON prompts.
+
+#### Tests
+
+| kind | case | expected |
+|---|---|---|
+| normal | Ollama response has `message.thinking` and empty `message.content` for `spec_think_brief` | brief is accepted, persisted, and marked `selected_source=reasoning`; finalizer still receives no-think JSON prompt |
+| normal | OpenAI-compatible response has `reasoning_content` plus final `content` | brief uses final content, records reasoning chars in meta, and preserves current `_model_chat()` behavior for JSON call sites |
+| edge | content-only provider lacks reasoning fields | brief falls back to content and meta says `selected_source=content` |
+| edge | thinking brief is empty but finalizer can run from deterministic grounding facts | no terminal failure; note says finalizer used facts only |
+| edge | provider-specific `enable_thinking` is unsupported or ignored | brief path degrades to content-only; finalizer remains no-think |
+| error | reasoning-only response occurs on `run_spec`, `code`, or JSON repair call site | existing rejection remains active |
+| error | thinking brief suggests a non-writable target or benchmark-specific search result | controller drops it from constraints and records rejection reason |
+| report | OpenAI-compatible streaming emits reasoning chunks | stream artifacts keep reasoning/content chunks distinguishable |
+| report | run uses thinking brief | terminal/spec report include brief source, reasoning chars, content chars, and whether reasoning-only was accepted |
+
+#### Non-Goals
+
+- Do not expose hidden reasoning to CODE as instructions.
+- Do not require every provider to support thinking.
+- Do not parse final JSON out of thinking text.
+- Do not solve artifact quality by increasing SPEC call budget.
+- Do not make external search mandatory for ordinary local coding tasks.
+- Do not allow external search to change writable files, metric commands, or task
+  objectives.
