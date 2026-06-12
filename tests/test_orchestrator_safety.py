@@ -2429,6 +2429,16 @@ Background / non-constraints
             self.assertIn('"event": "portfolio_exhausted"', progress_events)
             self.assertIn('"event": "blocked"', progress_events)
             self.assertIn('"portfolio_exhausted_tasks": ["task-001"]', progress_events)
+            signatures = [
+                json.loads(line)
+                for line in (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(signatures[0]["failure_class"], "portfolio_exhausted")
+            self.assertEqual(
+                signatures[0]["issue_code"],
+                "portfolio_recovery_budget_exhausted",
+            )
 
     def test_spec_mode_reports_blocked_for_mixed_drift_and_portfolio_exhaustion(
         self,
@@ -2492,6 +2502,60 @@ Background / non-constraints
             progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
             self.assertIn('"drift_deferred_tasks": ["task-001"]', progress_events)
             self.assertIn('"portfolio_exhausted_tasks": ["task-002"]', progress_events)
+
+    def test_spec_mode_reports_blocked_for_mixed_drift_and_design_invalid(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "mixed-design-invalid",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "drifted contract",
+                        "status": "deferred_contract_drift",
+                        "deliverables": ["target.txt"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "invalid design",
+                        "status": "failed_design",
+                        "deliverables": ["target.txt"],
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "max_code_test_loops": 10,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "search_frontier_exhausted_after_design_invalid",
+            )
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"design_failed_tasks": ["task-002"]', progress_events)
+            self.assertIn('"drift_deferred_tasks": ["task-001"]', progress_events)
 
     def test_spec_mode_schedules_open_sibling_without_reopening_exhausted_portfolio_task(
         self,
@@ -3970,6 +4034,13 @@ Background / non-constraints
                 )
                 self.assertEqual(progress_event["event"], "drift_recovery")
                 self.assertEqual(progress_event["action"], "rewrite")
+                signature = json.loads(
+                    (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(signature["failure_class"], "active_task_drift")
+                self.assertEqual(signature["status"], "needs_contract_rewrite")
+                self.assertIn("drift_2", signature["cooldown_key"])
+                self.assertNotIn("task-001", signature["cooldown_key"])
 
         asyncio.run(run_case())
 
@@ -4143,6 +4214,13 @@ Background / non-constraints
                 )
                 self.assertEqual(progress_event["event"], "drift_recovery")
                 self.assertEqual(progress_event["action"], "defer")
+                signature = json.loads(
+                    (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(signature["failure_class"], "active_task_drift")
+                self.assertEqual(signature["status"], "deferred_contract_drift")
+                self.assertIn("same_drift", signature["cooldown_key"])
+                self.assertNotIn("task-001", signature["cooldown_key"])
 
                 agent._schedule_spec_task()
 
@@ -4704,6 +4782,27 @@ Background / non-constraints
                 progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
                 self.assertIn('"event": "graph_rewrite_rejected"', progress)
                 self.assertIn("only one broad structural task", progress)
+                signatures = [
+                    json.loads(line)
+                    for line in (
+                        repo / ".local_micro_agent" / "failure_signatures.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(len(signatures), 1)
+                signature = signatures[0]
+                self.assertEqual(signature["phase"], "graph_rewrite")
+                self.assertEqual(signature["failure_class"], "design_rewrite_invalid")
+                self.assertEqual(
+                    signature["issue_code"],
+                    "single_broad_structural_task",
+                )
+                self.assertEqual(signature["issue_scope"], "spec_graph")
+                self.assertIn(
+                    "structural_probe:single_broad_structural_task",
+                    signature["cooldown_key"],
+                )
+                self.assertNotIn("task-001", signature["cooldown_key"])
 
         asyncio.run(run_case())
 
@@ -5075,6 +5174,18 @@ Background / non-constraints
             )
             agent.state.scratch["spec_synth_call_count"] = 1
             agent.state.scratch["spec_synth_budget_exhausted"] = True
+            (artifact_dir / "failure_signatures.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": "failure_signature.v1",
+                        "failure_class": "design_rewrite_invalid",
+                        "issue_code": "single_broad_structural_task",
+                        "cooldown_key": "abcd1234:structural_probe:single_broad_structural_task",
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
 
             agent._persist_spec_report()
 
@@ -5083,10 +5194,25 @@ Background / non-constraints
             self.assertEqual(terminal["stop_reason"], "spec_budget_exhausted")
             self.assertTrue(terminal["zero_code_attempt"])
             self.assertEqual(terminal["spec_synth_call_count"], 1)
+            self.assertEqual(terminal["spec_synth_calls_used"], 1)
             self.assertEqual(terminal["spec_synth_call_budget"], 1)
             self.assertTrue(terminal["spec_synth_budget_exhausted"])
+            self.assertEqual(
+                terminal["failure_signature_counts"],
+                {"design_rewrite_invalid": 1},
+            )
+            self.assertEqual(
+                terminal["failure_signature_issue_counts"],
+                {"single_broad_structural_task": 1},
+            )
+            self.assertEqual(
+                terminal["last_failure_signature"]["cooldown_key"],
+                "abcd1234:structural_probe:single_broad_structural_task",
+            )
             self.assertIn("stop_reason: `spec_budget_exhausted`", report)
             self.assertIn("spec_synth_call_count: 1", report)
+            self.assertIn("spec_synth_calls_used: 1", report)
+            self.assertIn("## Failure Signatures", report)
 
     def test_valid_spec_design_contract_becomes_active_todo_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1804,6 +1804,17 @@ class TodoLifecycleMixin:
             target_task,
             extra={"issues": issues, "target_task_id": target_task_id},
         )
+        self._append_failure_signature(
+            phase="graph_rewrite",
+            spec=spec,
+            task=target_task,
+            status="graph_rewrite_rejected",
+            failure_class="design_rewrite_invalid",
+            issue_code=self._failure_issue_code(issues),
+            issue_scope="spec_graph",
+            summary="; ".join(issues),
+            extra={"issues": issues, "target_task_id": target_task_id},
+        )
         self.state.notes.append(
             "Rejected SPEC graph rewrite: " + "; ".join(issues)
         )
@@ -1851,6 +1862,135 @@ class TodoLifecycleMixin:
             record.update(extra)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def _failure_signature_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "failure_signatures_path",
+            ".local_micro_agent/failure_signatures.jsonl",
+        )
+
+    def _append_failure_signature(
+        self,
+        *,
+        phase: str,
+        spec: dict[str, Any] | None = None,
+        task: dict[str, Any] | None = None,
+        status: str,
+        failure_class: str,
+        issue_code: str,
+        issue_scope: str,
+        summary: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not self._spec_mode_enabled():
+            return None
+        spec = spec if isinstance(spec, dict) else {}
+        task = task if isinstance(task, dict) else {}
+        target_regions = self._failure_signature_list(task.get("target_regions"))
+        target_symbols = self._failure_signature_list(task.get("target_symbols"))
+        task_id = str(task.get("task_id") or "")
+        graph_id = self._spec_graph_id(spec)
+        tactic_stage = str(task.get("tactic_stage") or "")
+        region_hash = self._failure_signature_target_region_hash(
+            target_regions,
+            task_id=task_id,
+        )
+        issue_code = self._normalize_failure_issue_code(issue_code)
+        record = {
+            "schema": "failure_signature.v1",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "created_loop": self.state.loop_count,
+            "fsm_step": self.state.fsm_step_count,
+            "graph_id": graph_id,
+            "spec_id": spec.get("spec_id"),
+            "phase": phase,
+            "task_id": task_id,
+            "status": status,
+            "failure_class": failure_class,
+            "issue_code": issue_code,
+            "issue_scope": issue_scope,
+            "target_regions": target_regions,
+            "target_symbols": target_symbols,
+            "tactic_stage": tactic_stage,
+            "target_region_hash": region_hash,
+            "episode_fingerprint": ":".join(
+                [
+                    graph_id,
+                    phase,
+                    task_id or "task-unknown",
+                    tactic_stage or "tactic-unknown",
+                    issue_code,
+                    region_hash,
+                ]
+            ),
+            "cooldown_key": ":".join(
+                [region_hash, tactic_stage or "tactic-unknown", issue_code]
+            ),
+            "summary": self._truncate_text(str(summary or ""), 800),
+        }
+        if extra:
+            record.update(
+                {
+                    key: value
+                    for key, value in extra.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        path = self._failure_signature_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return record
+
+    @staticmethod
+    def _failure_signature_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+        if value not in (None, "", [], {}):
+            return [str(value)]
+        return []
+
+    @staticmethod
+    def _failure_signature_target_region_hash(
+        target_regions: list[str],
+        *,
+        task_id: str = "",
+    ) -> str:
+        source = "|".join(target_regions) if target_regions else task_id or "unknown"
+        return hashlib.sha1(source.encode("utf-8")).hexdigest()[:8]
+
+    @staticmethod
+    def _spec_graph_id(spec: dict[str, Any]) -> str:
+        search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
+        graph_id = str(search.get("graph_id") or "").strip()
+        if graph_id:
+            return graph_id
+        spec_id = str(spec.get("spec_id") or "").strip()
+        return spec_id or "graph-unknown"
+
+    @staticmethod
+    def _failure_issue_code(issues: list[str] | str) -> str:
+        if isinstance(issues, str):
+            texts = [issues]
+        else:
+            texts = [str(issue) for issue in issues if str(issue).strip()]
+        joined = " ".join(texts).lower()
+        if "only one broad structural task" in joined:
+            return "single_broad_structural_task"
+        if "collapsed portfolio below" in joined:
+            return "portfolio_collapsed_below_min_runnable"
+        if "dropped runnable sibling" in joined:
+            return "dropped_runnable_sibling_tasks"
+        if "no schedulable task" in joined:
+            return "no_schedulable_task"
+        if not texts:
+            return "unspecified"
+        return TodoLifecycleMixin._normalize_failure_issue_code(texts[0])
+
+    @staticmethod
+    def _normalize_failure_issue_code(issue_code: Any) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(issue_code or "").lower()).strip("_")
+        return normalized[:80] or "unspecified"
 
     def _run_spec_progress(self, spec: dict[str, Any]) -> dict[str, int]:
         tasks = spec.get("task_graph")
@@ -2558,6 +2698,25 @@ class TodoLifecycleMixin:
                 exhausted = self._defer_exhausted_spec_portfolio_tasks(tasks)
                 if exhausted:
                     self._persist_run_spec(spec)
+                    for task in tasks:
+                        if (
+                            isinstance(task, dict)
+                            and str(task.get("task_id") or "") in exhausted
+                        ):
+                            self._append_failure_signature(
+                                phase="portfolio_recovery",
+                                spec=spec,
+                                task=task,
+                                status="deferred_portfolio_exhausted",
+                                failure_class="portfolio_exhausted",
+                                issue_code="portfolio_recovery_budget_exhausted",
+                                issue_scope="spec_task",
+                                summary=str(task.get("decision_hint") or ""),
+                                extra={
+                                    "recovery_rounds": task.get("recovery_rounds"),
+                                    "remaining_loops": self._spec_remaining_loop_budget(),
+                                },
+                            )
                     self._append_spec_progress_event(
                         "portfolio_exhausted",
                         spec,
@@ -2945,6 +3104,12 @@ class TodoLifecycleMixin:
                 if self._spec_has_closed_task(tasks)
                 else "spec_design_contract_incomplete"
             )
+        elif (
+            design_failed
+            and drift_deferred
+            and self._all_remaining_spec_tasks_design_or_drift_exhausted(tasks)
+        ):
+            stop_reason = "search_frontier_exhausted_after_design_invalid"
         elif drift_deferred and self._all_remaining_spec_tasks_contract_drift_deferred(tasks):
             stop_reason = "no_runnable_tasks_after_drift_deferred"
         elif portfolio_exhausted and self._all_remaining_spec_tasks_exhausted(tasks):
@@ -3042,6 +3207,24 @@ class TodoLifecycleMixin:
                 continue
             saw_remaining = True
             if status != "deferred_contract_drift":
+                return False
+        return saw_remaining
+
+    def _all_remaining_spec_tasks_design_or_drift_exhausted(self, tasks: list[Any]) -> bool:
+        exhausted_statuses = {
+            "deferred_contract_drift",
+            "deferred_design_invalid",
+            "failed_design",
+        }
+        saw_remaining = False
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status == "closed":
+                continue
+            saw_remaining = True
+            if status not in exhausted_statuses:
                 return False
         return saw_remaining
 
@@ -3904,6 +4087,24 @@ class TodoLifecycleMixin:
                         "fingerprint": drift_recovery.get("fingerprint"),
                     },
                 )
+                self._append_failure_signature(
+                    phase="active_task",
+                    spec=spec,
+                    task=task,
+                    status="needs_contract_rewrite",
+                    failure_class="active_task_drift",
+                    issue_code=str(drift_recovery.get("fingerprint") or "active_task_drift"),
+                    issue_scope="candidate_delta",
+                    summary=str(drift_recovery.get("summary") or ""),
+                    extra={
+                        "action": "rewrite",
+                        "per_task_streak": drift_recovery.get("per_task_streak"),
+                        "same_fingerprint_streak": drift_recovery.get(
+                            "same_fingerprint_streak"
+                        ),
+                        "drift_fingerprint": drift_recovery.get("fingerprint"),
+                    },
+                )
                 rewrite_focus = self._spec_design_rewrite_focus(
                     task,
                     ["repeated active_task_drift"],
@@ -3943,6 +4144,24 @@ class TodoLifecycleMixin:
                         "same_fingerprint_streak"
                     ),
                     "fingerprint": drift_recovery.get("fingerprint"),
+                },
+            )
+            self._append_failure_signature(
+                phase="active_task",
+                spec=spec,
+                task=task,
+                status="deferred_contract_drift",
+                failure_class="active_task_drift",
+                issue_code=str(drift_recovery.get("fingerprint") or "active_task_drift"),
+                issue_scope="candidate_delta",
+                summary=str(drift_recovery.get("summary") or ""),
+                extra={
+                    "action": "defer",
+                    "per_task_streak": drift_recovery.get("per_task_streak"),
+                    "same_fingerprint_streak": drift_recovery.get(
+                        "same_fingerprint_streak"
+                    ),
+                    "drift_fingerprint": drift_recovery.get("fingerprint"),
                 },
             )
             self.state.current = AgentStateName.SCHEDULE
@@ -4395,6 +4614,31 @@ class TodoLifecycleMixin:
                     ).lower(),
                 ]
             )
+        failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
+        if failure_signatures:
+            class_counts = self._count_jsonl_values(
+                failure_signatures, "failure_class"
+            )
+            issue_counts = self._count_jsonl_values(failure_signatures, "issue_code")
+            lines.extend(
+                [
+                    "",
+                    "## Failure Signatures",
+                    "",
+                    "- failure_class_counts: "
+                    + json.dumps(class_counts, ensure_ascii=False, sort_keys=True),
+                    "- issue_code_counts: "
+                    + json.dumps(issue_counts, ensure_ascii=False, sort_keys=True),
+                ]
+            )
+            latest = failure_signatures[-1]
+            lines.extend(
+                [
+                    f"- latest_failure_class: `{latest.get('failure_class', '')}`",
+                    f"- latest_issue_code: `{latest.get('issue_code', '')}`",
+                    f"- latest_cooldown_key: `{latest.get('cooldown_key', '')}`",
+                ]
+            )
         spec_model_profile = self._spec_synth_profile_summary()
         lines.extend(
             [
@@ -4402,6 +4646,7 @@ class TodoLifecycleMixin:
                 "## SPEC Calls",
                 "",
                 f"- spec_synth_call_count: {self._spec_synth_call_count()}",
+                f"- spec_synth_calls_used: {self._spec_synth_call_count()}",
                 f"- spec_synth_call_budget: {self._spec_synth_call_budget()}",
                 f"- spec_model_call_count: {spec_model_profile.get('model_call_count', 0)}",
                 f"- spec_model_elapsed_ms: {spec_model_profile.get('elapsed_ms', 0)}",
@@ -4445,6 +4690,7 @@ class TodoLifecycleMixin:
             tasks,
             spec_events,
         )
+        failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -4454,6 +4700,7 @@ class TodoLifecycleMixin:
             "max_code_test_loops": self.state.max_loops,
             "zero_code_attempt": self.state.loop_count == 0 and not candidate_events,
             "spec_synth_call_count": self._spec_synth_call_count(),
+            "spec_synth_calls_used": self._spec_synth_call_count(),
             "spec_synth_call_budget": self._spec_synth_call_budget(),
             "spec_synth_budget_exhausted": bool(
                 self.state.scratch.get("spec_synth_budget_exhausted")
@@ -4475,8 +4722,17 @@ class TodoLifecycleMixin:
             "candidate_failure_class_counts": self._count_jsonl_values(
                 candidate_events, "failure_class"
             ),
+            "failure_signature_counts": self._count_jsonl_values(
+                failure_signatures, "failure_class"
+            ),
+            "failure_signature_issue_counts": self._count_jsonl_values(
+                failure_signatures, "issue_code"
+            ),
             "last_spec_progress_event": spec_events[-1] if spec_events else None,
             "last_candidate_event": candidate_events[-1] if candidate_events else None,
+            "last_failure_signature": (
+                failure_signatures[-1] if failure_signatures else None
+            ),
         }
         terminal.update(drift_recovery_summary)
         terminal.update(portfolio_recovery_summary)
