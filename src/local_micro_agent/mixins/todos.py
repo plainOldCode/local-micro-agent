@@ -2680,7 +2680,7 @@ class TodoLifecycleMixin:
         open_statuses = {"open"}
         if self._spec_design_contract_gate_enabled():
             open_statuses.add("needs_design")
-            open_statuses.add("needs_contract_rewrite")
+        open_statuses.add("needs_contract_rewrite")
         candidates = []
         for task in tasks:
             if not isinstance(task, dict):
@@ -4490,7 +4490,14 @@ class TodoLifecycleMixin:
         max_streak = 0
         current_streak = 0
         previous_task_id = ""
-        for record in drift_records:
+        for record in candidate_events:
+            if not isinstance(record, dict) or not (
+                str(record.get("failure_class")) == "active_task_drift"
+                or self._is_active_todo_drift_record(record)
+            ):
+                current_streak = 0
+                previous_task_id = ""
+                continue
             task_id = str(record.get("todo_id") or record.get("spec_task_id") or "")
             if task_id and task_id == previous_task_id:
                 current_streak += 1

@@ -4049,6 +4049,89 @@ Background / non-constraints
             self.assertEqual(terminal["drift_recovery_count"], 1)
             self.assertEqual(terminal["drift_deferred_task_ids"], ["task-001"])
 
+    def test_needs_contract_rewrite_is_schedulable_without_design_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            tasks = [
+                {
+                    "task_id": "task-001",
+                    "status": "needs_contract_rewrite",
+                    "title": "rewrite drifted contract",
+                }
+            ]
+
+            schedulable = agent._schedulable_spec_tasks(tasks)
+
+            self.assertEqual([task["task_id"] for task in schedulable], ["task-001"])
+
+    def test_terminal_drift_streak_resets_on_non_drift_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "spec_terminal_state_path": ".local_micro_agent/terminal_state.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=4),
+            )
+            agent.state.scratch["run_spec"] = {
+                "version": 2,
+                "spec_id": "drift-report",
+                "task_graph": [{"task_id": "task-001", "status": "open"}],
+            }
+            events = [
+                {
+                    "loop": 0,
+                    "todo_id": "task-001",
+                    "status": "rejected_todo_scope_drift",
+                    "failure_class": "active_task_drift",
+                    "budget_counted": False,
+                },
+                {
+                    "loop": 1,
+                    "todo_id": "task-001",
+                    "status": "rejected_correctness",
+                    "failure_class": "correctness_failure",
+                },
+                {
+                    "loop": 2,
+                    "todo_id": "task-001",
+                    "status": "rejected_todo_scope_drift",
+                    "failure_class": "active_task_drift",
+                    "budget_counted": False,
+                },
+                {
+                    "loop": 3,
+                    "todo_id": "task-001",
+                    "status": "rejected_todo_scope_drift",
+                    "failure_class": "active_task_drift",
+                    "budget_counted": False,
+                },
+            ]
+            (artifact_dir / "candidates.jsonl").write_text(
+                "\n".join(json.dumps(event) for event in events) + "\n"
+            )
+
+            agent._persist_spec_report()
+
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            self.assertEqual(terminal["active_task_drift_count"], 3)
+            self.assertEqual(terminal["max_active_task_drift_streak"], 2)
+
     def test_targeted_spec_rewrite_preserves_omitted_sibling_tasks(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
