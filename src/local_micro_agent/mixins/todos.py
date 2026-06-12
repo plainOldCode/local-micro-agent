@@ -903,6 +903,7 @@ class TodoLifecycleMixin:
         return max(0, budget - self._spec_synth_call_count())
 
     def _consume_spec_synth_call_budget(self, call_site: str) -> bool:
+        self.state.scratch.pop("spec_synth_budget_reserved_at", None)
         budget = self._spec_synth_call_budget()
         used = self._spec_synth_call_count()
         if budget is not None and used >= budget:
@@ -953,8 +954,27 @@ class TodoLifecycleMixin:
             return False
         if "rewrite" not in call_site:
             return False
+        if not self._targeted_rewrite_reseed_reserve_applies():
+            return False
         remaining = max(0, budget - used)
         return remaining <= reserved
+
+    def _targeted_rewrite_reseed_reserve_applies(self) -> bool:
+        target_task_id = str(
+            self.state.scratch.get("spec_rewrite_target_task_id") or ""
+        ).strip()
+        if not target_task_id:
+            return False
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict) or not spec:
+            spec = self._current_run_spec_snapshot()
+        tasks = spec.get("task_graph") if isinstance(spec, dict) else []
+        if not isinstance(tasks, list):
+            return False
+        target_task = self._spec_task_by_id(tasks, target_task_id)
+        return isinstance(target_task, dict) and self._task_requires_drift_material_diversity(
+            target_task
+        )
 
     def _spec_gate_soft_fallback_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("spec_gate_soft_fallback"))
@@ -5785,13 +5805,42 @@ class TodoLifecycleMixin:
         return pairs
 
     def _latest_active_task_drift_attempt(self, task_id: str) -> dict[str, Any] | None:
+        observation = self.state.scratch.get("last_candidate_observation")
         for attempt in reversed(self._recent_todo_attempts(task_id)):
             if (
                 int(attempt.get("loop", -1)) == self.state.loop_count
                 and self._attempt_is_active_task_drift(attempt)
             ):
+                if isinstance(observation, dict) and self._attempt_is_active_task_drift(
+                    observation
+                ):
+                    observation_task_id = str(
+                        observation.get("todo_id")
+                        or observation.get("spec_task_id")
+                        or task_id
+                    )
+                    observation_loop = int(
+                        observation.get("loop", self.state.loop_count) or self.state.loop_count
+                    )
+                    observation_candidate_id = str(
+                        observation.get("candidate_id") or ""
+                    )
+                    attempt_candidate_id = str(attempt.get("candidate_id") or "")
+                    if (
+                        observation_task_id == task_id
+                        and observation_loop == int(attempt.get("loop", -1))
+                        and (
+                            not observation_candidate_id
+                            or not attempt_candidate_id
+                            or observation_candidate_id == attempt_candidate_id
+                        )
+                    ):
+                        merged = dict(attempt)
+                        merged.update(observation)
+                        merged.setdefault("todo_id", task_id)
+                        merged.setdefault("loop", self.state.loop_count)
+                        return merged
                 return attempt
-        observation = self.state.scratch.get("last_candidate_observation")
         if isinstance(observation, dict) and self._attempt_is_active_task_drift(observation):
             record = dict(observation)
             record.setdefault("todo_id", task_id)
@@ -7512,6 +7561,13 @@ class TodoLifecycleMixin:
             "repo_valid_after_restore",
             "repair_task_eligible",
             "memory_use",
+            "changes",
+            "drift_declared_regions",
+            "drift_declared_symbols",
+            "drift_attempted_regions",
+            "drift_region_pairs",
+            "drift_target_region_hash",
+            "drift_cooldown_key",
             "diff_contract_violations",
             "probe_diff_summary",
             "probe_diff_contract",

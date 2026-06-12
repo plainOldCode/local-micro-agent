@@ -3097,24 +3097,79 @@ Background / non-constraints
                 },
                 AgentState(repo_root=repo, user_request="test", max_loops=10),
             )
+            agent.state.scratch["run_spec"] = {
+                "version": 2,
+                "spec_id": "reserved-drift",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "target_regions": ["target.py::parse_item"],
+                        "tactic_stage": "local_edit",
+                        "contract_rewrite": {"reason": "repeated_active_task_drift"},
+                    }
+                ],
+            }
+            agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
             agent.state.scratch["spec_synth_call_count"] = 3
 
             rewrite_allowed = agent._consume_spec_synth_call_budget(
                 "spec_synth_rewrite"
             )
-            reseed_allowed = agent._consume_spec_synth_call_budget(
-                "spec_synth_reseed"
-            )
-
             self.assertFalse(rewrite_allowed)
-            self.assertTrue(reseed_allowed)
-            self.assertEqual(agent.state.scratch["spec_synth_call_count"], 4)
             self.assertEqual(
                 agent.state.scratch["spec_synth_budget_reserved_at"][
                     "reserved_for_reseed"
                 ],
                 2,
             )
+            reseed_allowed = agent._consume_spec_synth_call_budget(
+                "spec_synth_reseed"
+            )
+
+            self.assertTrue(reseed_allowed)
+            self.assertEqual(agent.state.scratch["spec_synth_call_count"], 4)
+            self.assertNotIn("spec_synth_budget_reserved_at", agent.state.scratch)
+
+    def test_reseed_reserved_budget_does_not_block_non_drift_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_synth_call_budget": 5,
+                        "spec_reseed_reserved_synth_calls": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.scratch["run_spec"] = {
+                "version": 2,
+                "spec_id": "reserved-design",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_design",
+                        "target_regions": ["target.py::parse_item"],
+                        "tactic_stage": "local_edit",
+                        "design_contract": {"status": "rejected"},
+                    }
+                ],
+            }
+            agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+            agent.state.scratch["spec_synth_call_count"] = 3
+
+            rewrite_allowed = agent._consume_spec_synth_call_budget(
+                "spec_synth_rewrite"
+            )
+
+            self.assertTrue(rewrite_allowed)
+            self.assertEqual(agent.state.scratch["spec_synth_call_count"], 4)
+            self.assertNotIn("spec_synth_budget_reserved_at", agent.state.scratch)
 
     def test_reseed_reserved_budget_defers_targeted_drift_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7607,6 +7662,22 @@ Background / non-constraints
                         "attempted": "target.py::helper",
                     }
                 ],
+            )
+            attempts = [
+                json.loads(line)
+                for line in (artifact_dir / "todo_attempts.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                attempts[0]["drift_declared_regions"],
+                ["target.py::parse_item"],
+            )
+            self.assertEqual(attempts[0]["drift_attempted_regions"], ["target.py::helper"])
+            self.assertEqual(attempts[0]["drift_cooldown_key"], observation["drift_cooldown_key"])
+            latest = agent._latest_active_task_drift_attempt("task-001")
+            self.assertIsNotNone(latest)
+            self.assertEqual(
+                latest["drift_attempted_regions"],
+                ["target.py::helper"],
             )
 
     def test_active_task_probe_contract_allows_matching_region_shape(self) -> None:
