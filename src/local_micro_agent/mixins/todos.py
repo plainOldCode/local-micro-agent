@@ -121,6 +121,14 @@ class TodoLifecycleMixin:
                         rewrite_target_task_id,
                     )
                     if graph_issues:
+                        self._append_spec_graph_candidate_event(
+                            spec,
+                            event="candidate_rejected",
+                            status="rejected_graph_contract",
+                            origin="targeted_design_rewrite",
+                            issues=graph_issues,
+                            parent_graph_id=self._spec_graph_id(previous_spec),
+                        )
                         self._reject_spec_graph_rewrite(
                             previous_spec,
                             rewrite_target_task_id,
@@ -139,6 +147,22 @@ class TodoLifecycleMixin:
                 )
                 self._persist_spec_quality_report(quality_report)
                 if not self._spec_quality_report_failed(quality_report):
+                    self._append_spec_graph_candidate_event(
+                        spec,
+                        event="candidate_selected",
+                        status="selected",
+                        origin=(
+                            "targeted_design_rewrite"
+                            if targeted_rewrite
+                            else "spec_synth"
+                        ),
+                        quality_report=quality_report,
+                        parent_graph_id=(
+                            self._spec_graph_id(previous_spec)
+                            if targeted_rewrite
+                            else ""
+                        ),
+                    )
                     self._persist_run_spec(spec)
                     self.state.scratch.pop("spec_rewrite_focus", None)
                     self.state.scratch.pop("spec_rewrite_target_task_id", None)
@@ -176,6 +200,22 @@ class TodoLifecycleMixin:
                         "quality_issue_codes": issue_codes,
                     },
                 )
+                self._append_spec_graph_candidate_event(
+                    spec,
+                    event="candidate_rejected",
+                    status="rejected_quality",
+                    origin=(
+                        "targeted_design_rewrite"
+                        if targeted_rewrite
+                        else "spec_synth"
+                    ),
+                    quality_report=quality_report,
+                    parent_graph_id=(
+                        self._spec_graph_id(previous_spec)
+                        if targeted_rewrite
+                        else ""
+                    ),
+                )
                 if quality_attempt >= quality_attempts:
                     if self._maybe_persist_soft_fallback_spec(spec, quality_report):
                         self.state.scratch.pop("spec_rewrite_focus", None)
@@ -211,6 +251,13 @@ class TodoLifecycleMixin:
             "report": quality_report,
         }
         spec["last_quality_gate_issues"] = quality_report.get("issues", [])
+        self._append_spec_graph_candidate_event(
+            spec,
+            event="candidate_selected",
+            status="selected_soft_fallback",
+            origin="quality_soft_fallback",
+            quality_report=quality_report,
+        )
         self._persist_run_spec(spec)
         self._append_spec_progress_event(
             "quality_soft_fallback",
@@ -1282,6 +1329,8 @@ class TodoLifecycleMixin:
         }
         if version >= 2:
             normalized_spec["progress"] = self._run_spec_progress(normalized_spec)
+        if isinstance(spec.get("search"), dict):
+            normalized_spec["search"] = copy.deepcopy(spec["search"])
         return normalized_spec
 
     def _normalize_run_spec_v2_task(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -1525,6 +1574,7 @@ class TodoLifecycleMixin:
         )
 
     def _persist_run_spec(self, spec: dict[str, Any]) -> None:
+        self._ensure_spec_search_metadata(spec, origin="persisted")
         spec["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         if int(spec.get("version", 1) or 1) >= 2:
             spec["progress"] = self._run_spec_progress(spec)
@@ -1532,6 +1582,203 @@ class TodoLifecycleMixin:
         path = self._run_spec_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+
+    def _spec_graph_candidates_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_graph_candidates_path",
+            ".local_micro_agent/spec_graph_candidates.jsonl",
+        )
+
+    def _spec_graph_candidate_sidecar_dir(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_graph_candidate_dir",
+            ".local_micro_agent/spec_graph_candidates",
+        )
+
+    def _spec_graph_candidate_sidecar_path(self, graph_id: str) -> Path:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", graph_id).strip("_")
+        if not safe_id:
+            safe_id = "graph-unknown"
+        return self._spec_graph_candidate_sidecar_dir() / f"{safe_id}.json"
+
+    def _ensure_spec_search_metadata(
+        self,
+        spec: dict[str, Any],
+        *,
+        origin: str = "unknown",
+        parent_graph_id: str = "",
+    ) -> dict[str, Any]:
+        if not isinstance(spec, dict) or int(spec.get("version", 1) or 1) < 2:
+            return {}
+        search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
+        if not search:
+            search = {}
+            spec["search"] = search
+        if not str(search.get("graph_id") or "").strip():
+            search["graph_id"] = self._next_spec_graph_id()
+            search["created_loop"] = self.state.loop_count
+            search["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if parent_graph_id and not str(search.get("parent_graph_id") or "").strip():
+            search["parent_graph_id"] = parent_graph_id
+        search.setdefault("origin", origin)
+        search["last_seen_loop"] = self.state.loop_count
+        search.setdefault(
+            "spec_synth_calls_used_at_selection",
+            self._spec_synth_call_count(),
+        )
+        search["spec_synth_calls_used"] = self._spec_synth_call_count()
+        return search
+
+    def _next_spec_graph_id(self) -> str:
+        max_id = 0
+        pattern = re.compile(r"^graph-(\d+)$")
+        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+            match = pattern.match(str(record.get("graph_id") or ""))
+            if match:
+                max_id = max(max_id, int(match.group(1)))
+        sidecar_dir = self._spec_graph_candidate_sidecar_dir()
+        if sidecar_dir.exists():
+            for path in sidecar_dir.glob("graph-*.json"):
+                match = pattern.match(path.stem)
+                if match:
+                    max_id = max(max_id, int(match.group(1)))
+        return f"graph-{max_id + 1:04d}"
+
+    def _append_spec_graph_candidate_event(
+        self,
+        spec: dict[str, Any],
+        *,
+        event: str,
+        status: str,
+        origin: str,
+        quality_report: dict[str, Any] | None = None,
+        issues: list[str] | None = None,
+        parent_graph_id: str = "",
+    ) -> dict[str, Any] | None:
+        if not self._spec_mode_enabled() or not isinstance(spec, dict):
+            return None
+        search = self._ensure_spec_search_metadata(
+            spec,
+            origin=origin,
+            parent_graph_id=parent_graph_id,
+        )
+        graph_id = str(search.get("graph_id") or "")
+        if not graph_id:
+            return None
+        sidecar_path = self._spec_graph_candidate_sidecar_path(graph_id)
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+        if self._spec_graph_candidate_event_seen(graph_id, event, status):
+            return None
+        issue_codes = self._spec_graph_candidate_issue_codes(
+            quality_report=quality_report,
+            issues=issues,
+        )
+        record = {
+            "schema": "spec_graph_candidate.v1",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": event,
+            "status": status,
+            "origin": origin,
+            "graph_id": graph_id,
+            "parent_graph_id": search.get("parent_graph_id", ""),
+            "spec_id": spec.get("spec_id"),
+            "loop": self.state.loop_count,
+            "fsm_step": self.state.fsm_step_count,
+            "score": self._spec_graph_candidate_score(spec, quality_report),
+            "graph_signature": self._spec_graph_signature(spec),
+            "issue_codes": issue_codes,
+            "spec_sidecar_path": str(
+                sidecar_path.relative_to(self.state.repo_root)
+                if sidecar_path.is_relative_to(self.state.repo_root)
+                else sidecar_path
+            ),
+            "spec_synth_calls_used": self._spec_synth_call_count(),
+            "spec_synth_call_budget": self._spec_synth_call_budget(),
+        }
+        path = self._spec_graph_candidates_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return record
+
+    def _spec_graph_candidate_event_seen(
+        self,
+        graph_id: str,
+        event: str,
+        status: str,
+    ) -> bool:
+        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+            if (
+                str(record.get("graph_id") or "") == graph_id
+                and str(record.get("event") or "") == event
+                and str(record.get("status") or "") == status
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _spec_graph_candidate_issue_codes(
+        *,
+        quality_report: dict[str, Any] | None = None,
+        issues: list[str] | None = None,
+    ) -> list[str]:
+        codes: list[str] = []
+        if isinstance(quality_report, dict):
+            raw_codes = quality_report.get("issue_codes")
+            if isinstance(raw_codes, list):
+                codes.extend(str(code) for code in raw_codes if str(code).strip())
+            for issue in quality_report.get("issues", []):
+                if isinstance(issue, dict) and str(issue.get("code") or "").strip():
+                    codes.append(str(issue["code"]))
+        if issues:
+            codes.extend(TodoLifecycleMixin._failure_issue_code(issue) for issue in issues)
+        return list(dict.fromkeys(codes))
+
+    def _spec_graph_candidate_score(
+        self,
+        spec: dict[str, Any],
+        quality_report: dict[str, Any] | None = None,
+    ) -> dict[str, int]:
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        issues = (
+            quality_report.get("issues", [])
+            if isinstance(quality_report, dict)
+            and isinstance(quality_report.get("issues"), list)
+            else []
+        )
+        issue_codes = self._spec_graph_candidate_issue_codes(
+            quality_report=quality_report
+        )
+        return {
+            "runnable_tasks": len(self._schedulable_spec_tasks(tasks)),
+            "quality_issues": len(issues),
+            "design_issues": sum(
+                1 for code in issue_codes if str(code).startswith("design_contract_")
+            ),
+            "cooldown_hits": 0,
+            "duplicate_hits": 0,
+        }
+
+    @staticmethod
+    def _spec_graph_signature(spec: dict[str, Any]) -> list[str]:
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        signature: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            regions = task.get("target_regions")
+            region = ""
+            if isinstance(regions, list) and regions:
+                region = str(regions[0])
+            else:
+                deliverables = task.get("deliverables")
+                if isinstance(deliverables, list) and deliverables:
+                    region = str(deliverables[0])
+            tactic = str(task.get("tactic_stage") or task.get("risk_level") or "")
+            if region or tactic:
+                signature.append(f"{region}:{tactic}")
+        return sorted(dict.fromkeys(signature))
 
     def _merge_targeted_spec_rewrite(
         self,
@@ -4704,6 +4951,7 @@ class TodoLifecycleMixin:
             spec_events,
         )
         failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
+        graph_candidates = self._read_spec_jsonl(self._spec_graph_candidates_path())
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -4741,10 +4989,19 @@ class TodoLifecycleMixin:
             "failure_signature_issue_counts": self._count_jsonl_values(
                 failure_signatures, "issue_code"
             ),
+            "graph_candidate_counts": self._count_jsonl_values(
+                graph_candidates, "status"
+            ),
+            "graph_candidate_event_counts": self._count_jsonl_values(
+                graph_candidates, "event"
+            ),
             "last_spec_progress_event": spec_events[-1] if spec_events else None,
             "last_candidate_event": candidate_events[-1] if candidate_events else None,
             "last_failure_signature": (
                 failure_signatures[-1] if failure_signatures else None
+            ),
+            "last_graph_candidate_event": (
+                graph_candidates[-1] if graph_candidates else None
             ),
         }
         terminal.update(drift_recovery_summary)

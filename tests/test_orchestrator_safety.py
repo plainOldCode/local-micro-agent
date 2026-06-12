@@ -3323,6 +3323,10 @@ Background / non-constraints
                         "version": 2,
                         "spec_id": "resume",
                         "objective": "resume from task two",
+                        "search": {
+                            "graph_id": "graph-0042",
+                            "origin": "prior_run",
+                        },
                         "task_graph": [
                             {
                                 "task_id": "task-001",
@@ -3383,6 +3387,9 @@ Background / non-constraints
             self.assertEqual((repo / "a.txt").read_text(), "done-a")
             self.assertEqual((repo / "b.txt").read_text(), "done-b")
             self.assertIn("Resumed run spec", "\n".join(result.notes))
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["search"]["graph_id"], "graph-0042")
+            self.assertFalse((artifact_dir / "spec_graph_candidates.jsonl").exists())
             report = (artifact_dir / "spec_report.md").read_text()
             self.assertIn("status: `done`", report)
             self.assertIn("progress: 2/2 closed", report)
@@ -4847,6 +4854,21 @@ Background / non-constraints
                 progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
                 self.assertIn('"event": "graph_rewrite_rejected"', progress)
                 self.assertIn("only one broad structural task", progress)
+                graph_events = [
+                    json.loads(line)
+                    for line in (
+                        repo / ".local_micro_agent" / "spec_graph_candidates.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(len(graph_events), 1)
+                self.assertEqual(graph_events[0]["event"], "candidate_rejected")
+                self.assertEqual(graph_events[0]["status"], "rejected_graph_contract")
+                self.assertEqual(graph_events[0]["origin"], "targeted_design_rewrite")
+                self.assertEqual(
+                    graph_events[0]["issue_codes"],
+                    ["single_broad_structural_task"],
+                )
                 signatures = [
                     json.loads(line)
                     for line in (
@@ -7529,6 +7551,21 @@ Background / non-constraints
 
             spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
             self.assertEqual(spec["spec_id"], "fallback")
+            self.assertEqual(spec["search"]["graph_id"], "graph-0001")
+            graph_events = [
+                json.loads(line)
+                for line in (
+                    repo / ".local_micro_agent" / "spec_graph_candidates.jsonl"
+                ).read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(graph_events), 1)
+            self.assertEqual(graph_events[0]["event"], "candidate_selected")
+            self.assertEqual(graph_events[0]["status"], "selected")
+            self.assertEqual(graph_events[0]["graph_id"], "graph-0001")
+            self.assertTrue(
+                (repo / ".local_micro_agent" / "spec_graph_candidates" / "graph-0001.json").exists()
+            )
             self.assertIn("Run spec model fallback succeeded: coder", "\n".join(agent.state.notes))
 
     def test_spec_synth_falls_back_after_primary_parse_failure(self) -> None:
@@ -8747,11 +8784,33 @@ Background / non-constraints
                     (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
                 )
                 progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                graph_events = [
+                    json.loads(line)
+                    for line in (
+                        repo / ".local_micro_agent" / "spec_graph_candidates.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
                 second_prompt = manager.seen["spec_synth"][1][-1]["content"]
                 self.assertEqual(spec["task_graph"][0]["target_regions"], ["target.py::parse_item"])
+                self.assertEqual(spec["search"]["graph_id"], "graph-0002")
                 self.assertEqual(report["status"], "pass")
                 self.assertIn("quality_rejected", progress)
                 self.assertIn("idea_alignment_failed", second_prompt)
+                self.assertEqual(
+                    [(event["event"], event["status"], event["graph_id"]) for event in graph_events],
+                    [
+                        ("candidate_rejected", "rejected_quality", "graph-0001"),
+                        ("candidate_selected", "selected", "graph-0002"),
+                    ],
+                )
+                self.assertIn("idea_alignment_failed", graph_events[0]["issue_codes"])
+                self.assertTrue(
+                    (repo / ".local_micro_agent" / "spec_graph_candidates" / "graph-0001.json").exists()
+                )
+                self.assertTrue(
+                    (repo / ".local_micro_agent" / "spec_graph_candidates" / "graph-0002.json").exists()
+                )
 
         asyncio.run(run_case())
 
