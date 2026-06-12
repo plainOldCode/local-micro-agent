@@ -421,7 +421,10 @@ class TodoLifecycleMixin:
 
     def _existing_spec_graph_signature_set(self) -> set[tuple[str, ...]]:
         signatures: set[tuple[str, ...]] = set()
-        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+        for record in self._read_spec_jsonl(
+            self._spec_graph_candidates_path(),
+            limit=_SPEC_JSONL_READ_LIMIT,
+        ):
             signature = record.get("graph_signature")
             if isinstance(signature, list):
                 normalized = tuple(str(item) for item in signature)
@@ -1930,7 +1933,10 @@ class TodoLifecycleMixin:
         event: str,
         status: str,
     ) -> bool:
-        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+        for record in self._read_spec_jsonl(
+            self._spec_graph_candidates_path(),
+            limit=_SPEC_JSONL_READ_LIMIT,
+        ):
             if (
                 str(record.get("graph_id") or "") == graph_id
                 and str(record.get("event") or "") == event
@@ -2022,7 +2028,10 @@ class TodoLifecycleMixin:
         if not candidate_signature:
             return 0
         existing_items: set[str] = set()
-        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+        for record in self._read_spec_jsonl(
+            self._spec_graph_candidates_path(),
+            limit=_SPEC_JSONL_READ_LIMIT,
+        ):
             if exclude_graph_id and str(record.get("graph_id") or "") == exclude_graph_id:
                 continue
             signature = record.get("graph_signature")
@@ -2050,7 +2059,10 @@ class TodoLifecycleMixin:
 
     def _latest_spec_graph_candidate_events(self) -> dict[str, dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
-        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+        for record in self._read_spec_jsonl(
+            self._spec_graph_candidates_path(),
+            limit=_SPEC_JSONL_READ_LIMIT,
+        ):
             graph_id = str(record.get("graph_id") or "")
             if graph_id:
                 latest[graph_id] = record
@@ -2117,7 +2129,12 @@ class TodoLifecycleMixin:
 
     def _current_failure_cooldown_keys(self, limit: int = 8) -> list[str]:
         keys: list[str] = []
-        for record in reversed(self._read_spec_jsonl(self._failure_signature_path())):
+        for record in reversed(
+            self._read_spec_jsonl(
+                self._failure_signature_path(),
+                limit=_SPEC_JSONL_READ_LIMIT,
+            )
+        ):
             key = str(record.get("cooldown_key") or "").strip()
             if key and key not in keys:
                 keys.append(key)
@@ -2328,7 +2345,10 @@ class TodoLifecycleMixin:
         )
         if summary_limit > 0:
             task_summaries = task_summaries[-summary_limit:]
-        signatures = self._read_spec_jsonl(self._failure_signature_path())[-6:]
+        signatures = self._read_spec_jsonl(
+            self._failure_signature_path(),
+            limit=_SPEC_JSONL_READ_LIMIT,
+        )[-6:]
         compact_signatures = [
             {
                 key: record.get(key)
@@ -5951,7 +5971,7 @@ class TodoLifecycleMixin:
     def _read_spec_jsonl(
         path: Path,
         *,
-        limit: int | None = _SPEC_JSONL_READ_LIMIT,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         try:

@@ -2979,7 +2979,7 @@ Background / non-constraints
             self.assertIn("task-003", focus)
             self.assertIn("task-004", focus)
 
-    def test_spec_jsonl_reader_keeps_recent_records_by_default(self) -> None:
+    def test_spec_jsonl_reader_keeps_recent_records_when_limited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.jsonl"
             path.write_text(
@@ -2987,13 +2987,15 @@ Background / non-constraints
                 + "\n"
             )
 
-            capped = MicroAgent._read_spec_jsonl(path)
+            capped = MicroAgent._read_spec_jsonl(path, limit=1000)
             uncapped = MicroAgent._read_spec_jsonl(path, limit=None)
+            default = MicroAgent._read_spec_jsonl(path)
 
             self.assertEqual(len(capped), 1000)
             self.assertEqual(capped[0]["index"], 5)
             self.assertEqual(capped[-1]["index"], 1004)
             self.assertEqual(len(uncapped), 1005)
+            self.assertEqual(len(default), 1005)
 
     def test_spec_reseed_candidate_count_records_backtrackable_variants(self) -> None:
         async def run_case() -> None:
