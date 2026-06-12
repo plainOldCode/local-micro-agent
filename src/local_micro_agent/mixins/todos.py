@@ -3947,6 +3947,31 @@ class TodoLifecycleMixin:
                     f"- patch_path: `{survivor.get('patch_path', '')}`",
                 ]
             )
+        trajectory_quality = self._terminal_trajectory_quality(tasks)
+        if trajectory_quality:
+            lines.extend(
+                [
+                    "",
+                    "## Trajectory Quality",
+                    "",
+                    f"- label: `{trajectory_quality.get('label', '')}`",
+                    "- spec_aligned_success_count: "
+                    f"`{trajectory_quality.get('spec_aligned_success_count', 0)}`",
+                    f"- scope_drift_count: `{trajectory_quality.get('scope_drift_count', 0)}`",
+                    "- budget_free_contract_rejection_count: "
+                    f"`{trajectory_quality.get('budget_free_contract_rejection_count', 0)}`",
+                    "- improved_candidate_spec_task_id: "
+                    f"`{trajectory_quality.get('improved_candidate_spec_task_id', '')}`",
+                    "- improved_candidate_matches_probe_plan: "
+                    + str(
+                        bool(
+                            trajectory_quality.get(
+                                "improved_candidate_matches_probe_plan"
+                            )
+                        )
+                    ).lower(),
+                ]
+            )
         spec_model_profile = self._spec_synth_profile_summary()
         lines.extend(
             [
@@ -3987,6 +4012,7 @@ class TodoLifecycleMixin:
         )
         tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
         survivor = self._terminal_survivor_summary(candidate_events)
+        trajectory_quality = self._terminal_trajectory_quality(tasks, candidate_events)
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -4022,6 +4048,8 @@ class TodoLifecycleMixin:
         }
         if survivor:
             terminal["survivor"] = survivor
+        if trajectory_quality:
+            terminal["trajectory_quality"] = trajectory_quality
         quality_report = (
             spec.get("spec_quality_report")
             if isinstance(spec.get("spec_quality_report"), dict)
@@ -4033,6 +4061,123 @@ class TodoLifecycleMixin:
         ):
             terminal["spec_quality_report"] = quality_report
         path.write_text(json.dumps(terminal, ensure_ascii=False, indent=2) + "\n")
+
+    def _terminal_trajectory_quality(
+        self,
+        tasks: list[Any],
+        candidate_events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        records = candidate_events
+        if records is None:
+            records = self._read_spec_jsonl(
+                self._workflow_artifact_path(
+                    "candidate_history_path", ".local_micro_agent/candidates.jsonl"
+                )
+            )
+        records = [record for record in records if isinstance(record, dict)]
+        drift_statuses = {
+            "rejected_active_task_file_drift",
+            "rejected_active_task_region_drift",
+            "rejected_active_task_shape_drift",
+            "rejected_todo_axis_drift",
+            "rejected_todo_family_drift",
+            "rejected_todo_scope_drift",
+        }
+        drift_records = [
+            record
+            for record in records
+            if str(record.get("status")) in drift_statuses
+            or str(record.get("failure_class")) == "active_task_drift"
+        ]
+        improved_records = [
+            record
+            for record in records
+            if str(record.get("status")) in {"accepted", "improved"}
+        ]
+        spec_aligned_records = [
+            record
+            for record in improved_records
+            if self._candidate_record_matches_spec_task(record, tasks)
+        ]
+        latest_improved = improved_records[-1] if improved_records else {}
+        latest_matches = (
+            self._candidate_record_matches_spec_task(latest_improved, tasks)
+            if latest_improved
+            else False
+        )
+        if spec_aligned_records and drift_records:
+            label = "spec_aligned_success_with_drift"
+        elif spec_aligned_records:
+            label = "spec_aligned_success"
+        elif improved_records:
+            label = "lucky_pass_risk"
+        elif drift_records:
+            label = "chaotic_retry"
+        else:
+            label = "no_success"
+        return {
+            "label": label,
+            "spec_aligned_success_count": len(spec_aligned_records),
+            "improved_count": len(improved_records),
+            "scope_drift_count": len(drift_records),
+            "budget_free_contract_rejection_count": sum(
+                1 for record in drift_records if record.get("budget_counted") is False
+            ),
+            "improved_candidate_id": latest_improved.get("candidate_id"),
+            "improved_candidate_spec_task_id": latest_improved.get("spec_task_id"),
+            "improved_candidate_matches_probe_plan": latest_matches,
+        }
+
+    def _candidate_record_matches_spec_task(
+        self,
+        record: dict[str, Any],
+        tasks: list[Any],
+    ) -> bool:
+        spec_task_id = str(record.get("spec_task_id") or "")
+        if not spec_task_id:
+            return False
+        task = next(
+            (
+                item
+                for item in tasks
+                if isinstance(item, dict) and str(item.get("task_id")) == spec_task_id
+            ),
+            None,
+        )
+        if not isinstance(task, dict):
+            return False
+        changes = record.get("changes")
+        if not isinstance(changes, list) or not changes:
+            return False
+        contract = (
+            task.get("probe_diff_contract")
+            if isinstance(task.get("probe_diff_contract"), dict)
+            else {}
+        )
+        allowed_files = set(self._string_list_from_any(contract.get("allowed_files")))
+        allowed_files.update(self._string_list_from_any(task.get("deliverables")))
+        target_regions = self._string_list_from_any(task.get("target_regions"))
+        allowed_regions = set(self._string_list_from_any(contract.get("allowed_regions")))
+        allowed_regions.update(
+            self._string_list_from_any(contract.get("expected_changed_regions"))
+        )
+        allowed_regions.update(target_regions)
+        if not allowed_files:
+            allowed_files.update(
+                region.split("::", 1)[0]
+                for region in target_regions
+                if region.split("::", 1)[0]
+            )
+        for change in changes:
+            if not isinstance(change, dict):
+                return False
+            path = str(change.get("path") or "")
+            if allowed_files and path not in allowed_files:
+                return False
+            region = str(change.get("target_region") or "")
+            if region and allowed_regions and region not in allowed_regions:
+                return False
+        return True
 
     def _terminal_survivor_summary(
         self,

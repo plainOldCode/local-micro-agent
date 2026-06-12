@@ -4106,8 +4106,9 @@ Background / non-constraints
                 json.dumps(
                     {
                         "candidate_id": "loop-000-single",
-                        "status": "rejected",
-                        "failure_class": "correctness_failure",
+                        "status": "rejected_todo_scope_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
                     }
                 )
                 + "\n"
@@ -4119,6 +4120,12 @@ Background / non-constraints
                         "spec_task_id": "task-002",
                         "todo_id": "task-002",
                         "last_correct_patch_path": ".local_micro_agent/last_correct.patch",
+                        "changes": [
+                            {
+                                "path": "target.py",
+                                "target_region": "target.py::parse_item",
+                            }
+                        ],
                     }
                 )
                 + "\n"
@@ -4152,6 +4159,17 @@ Background / non-constraints
                         "title": "guard parser branch",
                         "status": "needs_design",
                         "budget": {"attempts_max": 3, "attempts_used": 1},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "validated parser branch",
+                        "status": "closed",
+                        "deliverables": ["target.py"],
+                        "target_regions": ["target.py::parse_item"],
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "expected_changed_regions": ["target.py::parse_item"],
+                        },
                     }
                 ],
             }
@@ -4162,10 +4180,13 @@ Background / non-constraints
             terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
             self.assertEqual(terminal["stop_reason"], "max_code_test_loops")
             self.assertEqual(terminal["spec_progress_counts"]["scheduled"], 1)
-            self.assertEqual(terminal["candidate_status_counts"]["rejected"], 1)
+            self.assertEqual(
+                terminal["candidate_status_counts"]["rejected_todo_scope_drift"],
+                1,
+            )
             self.assertEqual(terminal["candidate_status_counts"]["improved"], 1)
             self.assertEqual(
-                terminal["candidate_failure_class_counts"]["correctness_failure"],
+                terminal["candidate_failure_class_counts"]["active_task_drift"],
                 1,
             )
             self.assertEqual(terminal["tasks"][0]["status"], "needs_design")
@@ -4175,9 +4196,115 @@ Background / non-constraints
                 terminal["survivor"]["patch_path"],
                 ".local_micro_agent/last_correct.patch",
             )
+            self.assertEqual(
+                terminal["trajectory_quality"]["label"],
+                "spec_aligned_success_with_drift",
+            )
+            self.assertEqual(
+                terminal["trajectory_quality"]["spec_aligned_success_count"],
+                1,
+            )
+            self.assertEqual(terminal["trajectory_quality"]["scope_drift_count"], 1)
+            self.assertTrue(
+                terminal["trajectory_quality"]["improved_candidate_matches_probe_plan"]
+            )
             report = (artifact_dir / "spec_report.md").read_text()
             self.assertIn("## Survivor", report)
+            self.assertIn("## Trajectory Quality", report)
             self.assertIn("loop-001-single", report)
+            self.assertIn("spec_aligned_success_with_drift", report)
+
+    def test_trajectory_quality_labels_clean_spec_aligned_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            tasks = [
+                {
+                    "task_id": "task-001",
+                    "deliverables": ["target.py"],
+                    "target_regions": ["target.py::parse_item"],
+                    "probe_diff_contract": {
+                        "allowed_files": ["target.py"],
+                        "expected_changed_regions": ["target.py::parse_item"],
+                    },
+                }
+            ]
+            records = [
+                {
+                    "status": "improved",
+                    "candidate_id": "good",
+                    "spec_task_id": "task-001",
+                    "changes": [
+                        {
+                            "path": "target.py",
+                            "target_region": "target.py::parse_item",
+                        }
+                    ],
+                }
+            ]
+
+            quality = agent._terminal_trajectory_quality(tasks, records)
+
+            self.assertEqual(quality["label"], "spec_aligned_success")
+            self.assertEqual(quality["spec_aligned_success_count"], 1)
+            self.assertTrue(quality["improved_candidate_matches_probe_plan"])
+
+    def test_trajectory_quality_labels_no_success_and_chaotic_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            no_success = agent._terminal_trajectory_quality([], [])
+            chaotic = agent._terminal_trajectory_quality(
+                [],
+                [
+                    {
+                        "status": "rejected_active_task_region_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
+                    }
+                ],
+            )
+
+            self.assertEqual(no_success["label"], "no_success")
+            self.assertEqual(chaotic["label"], "chaotic_retry")
+            self.assertEqual(chaotic["budget_free_contract_rejection_count"], 1)
+
+    def test_trajectory_quality_labels_lucky_pass_risk_for_unmatched_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            tasks = [
+                {
+                    "task_id": "task-001",
+                    "deliverables": ["target.py"],
+                    "target_regions": ["target.py::parse_item"],
+                }
+            ]
+            records = [
+                {
+                    "status": "improved",
+                    "candidate_id": "lucky",
+                    "spec_task_id": "task-001",
+                    "changes": [
+                        {
+                            "path": "other.py",
+                            "target_region": "other.py::helper",
+                        }
+                    ],
+                }
+            ]
+
+            quality = agent._terminal_trajectory_quality(tasks, records)
+
+            self.assertEqual(quality["label"], "lucky_pass_risk")
+            self.assertFalse(quality["improved_candidate_matches_probe_plan"])
 
     def test_spec_terminal_state_records_quality_gate_failure_without_run_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
