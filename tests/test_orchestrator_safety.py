@@ -3514,6 +3514,122 @@ Background / non-constraints
             self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
             self.assertEqual(persisted["last_stop_reason"], "spec_design_contract_incomplete")
 
+    def test_spec_scheduler_marks_partial_success_when_remaining_design_is_deferred(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = {
+                "version": 2,
+                "spec_id": "partial",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "closed",
+                        "title": "validated local edit",
+                        "deliverables": ["target.py"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "status": "failed_design",
+                        "title": "broad structural rewrite",
+                        "deliverables": ["target.py"],
+                    },
+                ],
+            }
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.DONE)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "partial_success_design_deferred",
+            )
+            self.assertEqual(persisted["task_graph"][1]["status"], "deferred_design")
+            self.assertEqual(persisted["progress"]["closed"], 1)
+            self.assertEqual(persisted["progress"]["deferred"], 1)
+            self.assertEqual(persisted["progress"]["failed"], 0)
+            progress_event = json.loads(
+                (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+            )
+            self.assertEqual(
+                progress_event["stop_reason"],
+                "partial_success_design_deferred",
+            )
+
+    def test_spec_scheduler_keeps_design_incomplete_failed_without_closed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = {
+                "version": 2,
+                "spec_id": "no-success",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "failed_design",
+                        "title": "broad structural rewrite",
+                        "deliverables": ["target.py"],
+                    }
+                ],
+            }
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "spec_design_contract_incomplete",
+            )
+            self.assertEqual(persisted["task_graph"][0]["status"], "failed_design")
+
+    def test_spec_blocked_reason_does_not_mark_partial_when_open_task_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            tasks = [
+                {"task_id": "task-001", "status": "closed"},
+                {"task_id": "task-002", "status": "failed_design"},
+                {"task_id": "task-003", "status": "open"},
+            ]
+
+            extra = agent._spec_blocked_event_extra(tasks)
+
+            self.assertNotEqual(
+                extra["stop_reason"],
+                "partial_success_design_deferred",
+            )
+
     def test_loop_cap_defers_spec_rewrite_instead_of_resetting_run_spec(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -3995,6 +4111,17 @@ Background / non-constraints
                     }
                 )
                 + "\n"
+                + json.dumps(
+                    {
+                        "candidate_id": "loop-001-single",
+                        "status": "improved",
+                        "metric": 143638,
+                        "spec_task_id": "task-002",
+                        "todo_id": "task-002",
+                        "last_correct_patch_path": ".local_micro_agent/last_correct.patch",
+                    }
+                )
+                + "\n"
             )
             agent = MicroAgent(
                 {
@@ -4036,11 +4163,21 @@ Background / non-constraints
             self.assertEqual(terminal["stop_reason"], "max_code_test_loops")
             self.assertEqual(terminal["spec_progress_counts"]["scheduled"], 1)
             self.assertEqual(terminal["candidate_status_counts"]["rejected"], 1)
+            self.assertEqual(terminal["candidate_status_counts"]["improved"], 1)
             self.assertEqual(
                 terminal["candidate_failure_class_counts"]["correctness_failure"],
                 1,
             )
             self.assertEqual(terminal["tasks"][0]["status"], "needs_design")
+            self.assertEqual(terminal["survivor"]["candidate_id"], "loop-001-single")
+            self.assertEqual(terminal["survivor"]["metric"], 143638)
+            self.assertEqual(
+                terminal["survivor"]["patch_path"],
+                ".local_micro_agent/last_correct.patch",
+            )
+            report = (artifact_dir / "spec_report.md").read_text()
+            self.assertIn("## Survivor", report)
+            self.assertIn("loop-001-single", report)
 
     def test_spec_terminal_state_records_quality_gate_failure_without_run_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

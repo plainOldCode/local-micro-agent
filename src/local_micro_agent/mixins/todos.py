@@ -1844,7 +1844,7 @@ class TodoLifecycleMixin:
 
     @staticmethod
     def _spec_status_is_deferred(status: str) -> bool:
-        return status in {"deferred", "deferred_design_invalid"}
+        return status in {"deferred", "deferred_design", "deferred_design_invalid"}
 
     @staticmethod
     def _spec_status_is_failed(status: str) -> bool:
@@ -2525,6 +2525,11 @@ class TodoLifecycleMixin:
                 open_candidates = self._schedulable_spec_tasks(tasks)
         if not open_candidates:
             blocked_extra = self._spec_blocked_event_extra(tasks)
+            partial_success = (
+                blocked_extra.get("stop_reason") == "partial_success_design_deferred"
+            )
+            if partial_success:
+                self._defer_design_failed_spec_tasks(tasks)
             spec["last_stop_reason"] = blocked_extra["stop_reason"]
             spec["progress"] = self._run_spec_progress(spec)
             self._persist_run_spec(spec)
@@ -2533,7 +2538,7 @@ class TodoLifecycleMixin:
                 + self._spec_blocked_task_summary(tasks)
             )
             self._append_spec_progress_event("blocked", spec, extra=blocked_extra)
-            self.state.current = AgentStateName.FAILED
+            self.state.current = AgentStateName.DONE if partial_success else AgentStateName.FAILED
             return
         task = self._select_spec_task(tasks, open_candidates)
         design_issues = self._spec_task_design_contract_issues(spec, task)
@@ -2836,7 +2841,11 @@ class TodoLifecycleMixin:
         remaining = self._spec_remaining_loop_budget()
         stop_reason = "no_recovery_possible"
         if design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
-            stop_reason = "spec_design_contract_incomplete"
+            stop_reason = (
+                "partial_success_design_deferred"
+                if self._spec_has_closed_task(tasks)
+                else "spec_design_contract_incomplete"
+            )
         elif (
             failed_prerequisites
             and remaining
@@ -2864,6 +2873,26 @@ class TodoLifecycleMixin:
             and str(task.get("status")) in {"failed_design", "deferred_design_invalid"}
             and str(task.get("task_id") or "")
         ]
+
+    @staticmethod
+    def _spec_has_closed_task(tasks: list[Any]) -> bool:
+        return any(
+            isinstance(task, dict) and str(task.get("status")) == "closed"
+            for task in tasks
+        )
+
+    @staticmethod
+    def _defer_design_failed_spec_tasks(tasks: list[Any]) -> None:
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status")) not in {"failed_design", "deferred_design_invalid"}:
+                continue
+            task["status"] = "deferred_design"
+            task["decision_hint"] = (
+                "design_deferred_after_partial_success: preserve the closed task "
+                "result and retry this design in a future SPEC rewrite."
+            )
 
     def _all_remaining_spec_tasks_design_failed(self, tasks: list[Any]) -> bool:
         saw_remaining = False
@@ -3903,6 +3932,21 @@ class TodoLifecycleMixin:
                     + ": "
                     + str(issue.get("detail") or "")
                 )
+        survivor = self._terminal_survivor_summary()
+        if survivor:
+            lines.extend(
+                [
+                    "",
+                    "## Survivor",
+                    "",
+                    f"- status: `{survivor.get('status', '')}`",
+                    f"- loop: `{survivor.get('loop', '')}`",
+                    f"- candidate_id: `{survivor.get('candidate_id', '')}`",
+                    f"- spec_task_id: `{survivor.get('spec_task_id', '')}`",
+                    f"- metric: `{survivor.get('metric', '')}`",
+                    f"- patch_path: `{survivor.get('patch_path', '')}`",
+                ]
+            )
         spec_model_profile = self._spec_synth_profile_summary()
         lines.extend(
             [
@@ -3942,6 +3986,7 @@ class TodoLifecycleMixin:
             )
         )
         tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        survivor = self._terminal_survivor_summary(candidate_events)
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -3975,6 +4020,8 @@ class TodoLifecycleMixin:
             "last_spec_progress_event": spec_events[-1] if spec_events else None,
             "last_candidate_event": candidate_events[-1] if candidate_events else None,
         }
+        if survivor:
+            terminal["survivor"] = survivor
         quality_report = (
             spec.get("spec_quality_report")
             if isinstance(spec.get("spec_quality_report"), dict)
@@ -3986,6 +4033,51 @@ class TodoLifecycleMixin:
         ):
             terminal["spec_quality_report"] = quality_report
         path.write_text(json.dumps(terminal, ensure_ascii=False, indent=2) + "\n")
+
+    def _terminal_survivor_summary(
+        self,
+        candidate_events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        records = candidate_events
+        if records is None:
+            records = self._read_spec_jsonl(
+                self._workflow_artifact_path(
+                    "candidate_history_path", ".local_micro_agent/candidates.jsonl"
+                )
+            )
+        survivor_records = [
+            record
+            for record in records
+            if isinstance(record, dict)
+            and str(record.get("status")) in {"accepted", "improved"}
+        ]
+        if not survivor_records:
+            return {}
+        record = survivor_records[-1]
+        patch_path = (
+            record.get("last_correct_patch_path")
+            or record.get("best_patch_path")
+            or record.get("patch_path")
+        )
+        state_path = (
+            record.get("last_correct_state_path")
+            or record.get("best_state_path")
+            or record.get("state_path")
+        )
+        return {
+            key: value
+            for key, value in {
+                "status": record.get("status"),
+                "loop": record.get("loop"),
+                "candidate_id": record.get("candidate_id"),
+                "metric": record.get("metric"),
+                "spec_task_id": record.get("spec_task_id"),
+                "todo_id": record.get("todo_id"),
+                "patch_path": patch_path,
+                "state_path": state_path,
+            }.items()
+            if value not in (None, "", [], {})
+        }
 
     def _spec_synth_profile_summary(self) -> dict[str, Any]:
         records = self._read_spec_jsonl(
