@@ -68,11 +68,13 @@ class WorkflowPresetTests(unittest.TestCase):
             self.assertTrue(workflow[key], key)
         self.assertEqual(workflow["spec_quality_rewrite_attempts"], 2)
         self.assertEqual(workflow["spec_synth_call_budget"], 24)
+        self.assertEqual(workflow["spec_reseed_reserved_synth_calls"], 4)
         self.assertTrue(workflow["spec_gate_soft_fallback"])
         self.assertEqual(workflow["spec_active_task_drift_streak_limit"], 3)
         self.assertEqual(workflow["spec_active_task_drift_same_fingerprint_limit"], 2)
         self.assertEqual(workflow["spec_active_task_drift_rewrite_attempts"], 1)
         self.assertEqual(workflow["spec_drift_saturation_threshold"], 3)
+        self.assertEqual(workflow["spec_model_suggested_region_min_count"], 2)
         self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 2)
 
     def test_explicit_workflow_key_wins_over_preset(self) -> None:

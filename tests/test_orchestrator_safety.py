@@ -2979,6 +2979,201 @@ Background / non-constraints
             self.assertIn("task-003", focus)
             self.assertIn("task-004", focus)
 
+    def test_spec_graph_reseed_focus_includes_model_suggested_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n"
+                "    return value.strip()\n\n"
+                "def helper(value):\n"
+                "    return value\n"
+            )
+            records = [
+                {
+                    "failure_class": "active_task_drift",
+                    "drift_attempted_regions": ["target.py::helper"],
+                    "drift_region_pairs": [
+                        {
+                            "declared": "target.py::parse_item",
+                            "attempted": "target.py::helper",
+                        }
+                    ],
+                }
+                for _ in range(2)
+            ]
+            (artifact_dir / "candidates.jsonl").write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "writable_files": ["target.py"],
+                        "spec_model_suggested_region_min_count": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+
+            focus = agent._spec_graph_reseed_focus(
+                {"version": 2, "spec_id": "current", "task_graph": []},
+                [],
+                reseed_attempt=1,
+                reseed_attempts_max=2,
+                cooldown_keys=[],
+            )
+
+            self.assertIn("Model-suggested regions from repeated drift", focus)
+            self.assertIn("target.py::helper", focus)
+            self.assertIn("target.py::parse_item", focus)
+
+    def test_spec_graph_score_counts_drift_saturation_hits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "spec_drift_saturation_threshold": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            cooled_hash = agent._failure_signature_target_region_hash(
+                ["target.py::parse_item"]
+            )
+            records = [
+                {
+                    "failure_class": "active_task_drift",
+                    "drift_cooldown_key": f"{cooled_hash}:local_edit:same_drift",
+                }
+                for _ in range(2)
+            ]
+            (artifact_dir / "candidates.jsonl").write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "candidate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "target_regions": ["target.py::parse_item"],
+                        "tactic_stage": "local_edit",
+                    }
+                ],
+            }
+
+            score = agent._spec_graph_candidate_score(spec)
+
+            self.assertEqual(score["drift_saturation_hits"], 1)
+
+    def test_spec_rewrite_respects_reseed_reserved_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_synth_call_budget": 5,
+                        "spec_reseed_reserved_synth_calls": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.scratch["spec_synth_call_count"] = 3
+
+            rewrite_allowed = agent._consume_spec_synth_call_budget(
+                "spec_synth_rewrite"
+            )
+            reseed_allowed = agent._consume_spec_synth_call_budget(
+                "spec_synth_reseed"
+            )
+
+            self.assertFalse(rewrite_allowed)
+            self.assertTrue(reseed_allowed)
+            self.assertEqual(agent.state.scratch["spec_synth_call_count"], 4)
+            self.assertEqual(
+                agent.state.scratch["spec_synth_budget_reserved_at"][
+                    "reserved_for_reseed"
+                ],
+                2,
+            )
+
+    def test_reseed_reserved_budget_defers_targeted_drift_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "reserve",
+                "active_task_id": "task-001",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "target_regions": ["target.py::parse_item"],
+                        "tactic_stage": "local_edit",
+                    }
+                ],
+            }
+            agent.state.scratch["spec_synth_budget_reserved_at"] = {
+                "call_site": "spec_synth_rewrite",
+                "used": 20,
+                "budget": 24,
+                "reserved_for_reseed": 4,
+            }
+
+            agent._defer_targeted_rewrite_for_reseed_reserve(
+                previous_spec,
+                "task-001",
+            )
+
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = persisted["task_graph"][0]
+            self.assertEqual(task["status"], "deferred_contract_drift")
+            self.assertEqual(task["contract_rewrite"]["reason"], "reseed_budget_reserved")
+            progress = json.loads(
+                (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+            )
+            self.assertEqual(progress["action"], "rewrite_rejected_reseed_budget_reserved")
+            signature = json.loads(
+                (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()[-1]
+            )
+            self.assertEqual(signature["issue_code"], "reseed_budget_reserved")
+            self.assertEqual(signature["failure_class"], "active_task_drift")
+
     def test_spec_jsonl_reader_keeps_recent_records_when_limited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.jsonl"
@@ -5079,6 +5274,120 @@ Background / non-constraints
 
         asyncio.run(run_case())
 
+    def test_active_task_drift_saturation_defers_without_spending_rewrite(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                task = {
+                    "task_id": "task-001",
+                    "status": "in_progress",
+                    "title": "local parser task",
+                    "strategy_axis": "general_edit",
+                    "deliverables": ["target.py"],
+                    "target_regions": ["target.py::parse_item"],
+                    "target_symbols": ["parse_item"],
+                    "tactic_stage": "local_edit",
+                    "validator": {"kind": "command"},
+                    "budget": {"attempts_max": 5, "attempts_used": 0},
+                }
+                spec = {
+                    "version": 2,
+                    "spec_id": "drift-saturated",
+                    "active_task_id": "task-001",
+                    "task_graph": [task],
+                }
+                attempts = [
+                    {
+                        "loop": index,
+                        "todo_id": "task-001",
+                        "status": "rejected_todo_scope_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
+                        "fingerprint": "same-drift",
+                        "tactic_stage": "local_edit",
+                        "drift_cooldown_key": "ece45896:local_edit:same_drift",
+                        "drift_attempted_regions": ["target.py::helper"],
+                        "drift_region_pairs": [
+                            {
+                                "declared": "target.py::parse_item",
+                                "attempted": "target.py::helper",
+                            }
+                        ],
+                        "changes": [
+                            {
+                                "path": "target.py",
+                                "target_region": "target.py::helper",
+                            }
+                        ],
+                    }
+                    for index in range(3)
+                ]
+                (artifact_dir / "todo_attempts.jsonl").write_text(
+                    "\n".join(json.dumps(attempt) for attempt in attempts) + "\n"
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                            "spec_active_task_drift_streak_limit": 10,
+                            "spec_active_task_drift_same_fingerprint_limit": 2,
+                            "spec_active_task_drift_rewrite_attempts": 1,
+                            "spec_drift_saturation_threshold": 2,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", loop_count=2, max_loops=10),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.scratch["active_todo"] = {
+                    "todo_id": "task-001",
+                    "spec_task_id": "task-001",
+                    "status": "active",
+                    "source": "spec_scheduler",
+                }
+                agent.state.scratch["last_candidate_observation"] = attempts[-1]
+                agent.state.test_results = [
+                    TestResult(command="python -m pytest", exit_code=1, stderr="scope drift")
+                ]
+
+                await agent._handle_spec_task_test_result(True)
+
+                self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                persisted_task = persisted["task_graph"][0]
+                self.assertEqual(persisted_task["status"], "deferred_contract_drift")
+                self.assertEqual(
+                    persisted_task["contract_rewrite"]["reason"],
+                    "drift_saturation",
+                )
+                self.assertEqual(persisted_task["contract_rewrite"]["rewrite_attempts"], 0)
+                self.assertEqual(
+                    persisted_task["contract_rewrite"]["drift_saturation"]["count"],
+                    3,
+                )
+                progress_event = json.loads(
+                    (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(
+                    progress_event["action"],
+                    "rewrite_rejected_duplicate_drift",
+                )
+                self.assertEqual(progress_event["spec_budget_saved_by_drift_backoff"], 1)
+                signature = json.loads(
+                    (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(signature["reason"], "drift_saturation")
+                self.assertEqual(signature["spec_budget_saved_by_drift_backoff"], 1)
+
+        asyncio.run(run_case())
+
     def test_terminal_report_summarizes_active_task_drift_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -5166,6 +5475,8 @@ Background / non-constraints
                 terminal["same_region_drift_saturated_keys"],
                 {"ece45896:local_edit:scope_drift": 3},
             )
+            self.assertEqual(terminal["targeted_rewrite_rejected_duplicate_drift"], 0)
+            self.assertEqual(terminal["spec_budget_saved_by_drift_backoff"], 0)
 
     def test_terminal_report_summarizes_portfolio_recovery_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5254,6 +5565,136 @@ Background / non-constraints
             schedulable = agent._schedulable_spec_tasks(tasks)
 
             self.assertEqual([task["task_id"] for task in schedulable], ["task-001"])
+
+    def test_targeted_rewrite_rejects_repeated_drift_material_axes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "previous",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "target_regions": ["target.py::parse_item"],
+                        "target_symbols": ["parse_item"],
+                        "tactic_stage": "local_edit",
+                        "deliverables": ["target.py"],
+                        "validator": {"kind": "command"},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "status": "open",
+                        "target_regions": ["target.py::format_item"],
+                    },
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "rewrite",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "target_regions": ["target.py::parse_item"],
+                        "target_symbols": ["parse_item"],
+                        "tactic_stage": "local_edit",
+                        "deliverables": ["target.py"],
+                        "validator": {"kind": "command"},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "status": "open",
+                        "target_regions": ["target.py::format_item"],
+                    },
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC rewrite repeated active-task drift material axes "
+                "(target_regions, tactic_stage, validator.kind, deliverables) "
+                "without a structurally different contract",
+                issues,
+            )
+
+    def test_targeted_rewrite_allows_materially_different_drift_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "previous",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "target_regions": ["target.py::parse_item"],
+                        "tactic_stage": "local_edit",
+                        "deliverables": ["target.py"],
+                        "validator": {"kind": "command"},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "status": "open",
+                        "target_regions": ["target.py::format_item"],
+                    },
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "rewrite",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "target_regions": ["target.py::helper"],
+                        "tactic_stage": "local_edit",
+                        "deliverables": ["target.py"],
+                        "validator": {"kind": "command"},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "status": "open",
+                        "target_regions": ["target.py::format_item"],
+                    },
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertNotIn(
+                "targeted SPEC rewrite repeated active-task drift material axes "
+                "(target_regions, tactic_stage, validator.kind, deliverables) "
+                "without a structurally different contract",
+                issues,
+            )
 
     def test_terminal_drift_streak_resets_on_non_drift_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

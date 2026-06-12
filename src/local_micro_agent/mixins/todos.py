@@ -98,7 +98,15 @@ class TodoLifecycleMixin:
             )
             role_key = "spec_finalize_model_role" if two_call else "run_spec_model_role"
             role = str(workflow.get(role_key) or workflow.get("run_spec_model_role", role_default))
-            call_site = "spec_synth" if self._spec_mode_enabled() and force else "run_spec"
+            if self._spec_mode_enabled() and force:
+                if targeted_rewrite:
+                    call_site = "spec_synth_rewrite"
+                elif graph_origin.startswith("reseed"):
+                    call_site = "spec_synth_reseed"
+                else:
+                    call_site = "spec_synth"
+            else:
+                call_site = "run_spec"
             fallback_role = str(
                 workflow.get(
                     "spec_synth_fallback_model_role",
@@ -114,6 +122,17 @@ class TodoLifecycleMixin:
                 )
                 prompt = spec_prompt(self.state, focus=prompt_focus)
                 if not self._consume_spec_synth_call_budget(call_site):
+                    if targeted_rewrite and self.state.scratch.get(
+                        "spec_synth_budget_reserved_at"
+                    ):
+                        self._defer_targeted_rewrite_for_reseed_reserve(
+                            previous_spec,
+                            rewrite_target_task_id,
+                        )
+                        self.state.scratch.pop("spec_rewrite_focus", None)
+                        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        self.state.scratch.pop("spec_graph_generation_origin", None)
+                        self.state.scratch.pop("spec_graph_parent_graph_id", None)
                     return
                 spec = await self._request_run_spec_from_model(
                     role=role,
@@ -573,7 +592,15 @@ class TodoLifecycleMixin:
             return ""
         workflow = self.config.get("workflow", {})
         role = str(workflow.get("spec_idea_model_role") or "reasoner")
-        call_site = "spec_idea_rewrite" if targeted_rewrite else "spec_idea"
+        graph_generation_origin = str(
+            self.state.scratch.get("spec_graph_generation_origin") or ""
+        )
+        if targeted_rewrite:
+            call_site = "spec_idea_rewrite"
+        elif graph_generation_origin.startswith("reseed"):
+            call_site = "spec_idea_reseed"
+        else:
+            call_site = "spec_idea"
         remaining = self._spec_synth_call_budget_remaining()
         if remaining == 0:
             self.state.notes.append("Spec idea skipped: spec synthesis call budget exhausted")
@@ -890,8 +917,44 @@ class TodoLifecycleMixin:
                 f"{used}/{budget}"
             )
             return False
+        if (
+            budget is not None
+            and self._spec_reseed_reserved_budget_blocks(call_site, used, budget)
+        ):
+            reserved = self._spec_reseed_reserved_synth_calls()
+            self.state.scratch["spec_synth_budget_reserved_at"] = {
+                "call_site": call_site,
+                "used": used,
+                "budget": budget,
+                "reserved_for_reseed": reserved,
+            }
+            self.state.notes.append(
+                f"Spec synthesis call budget reserved before {call_site}: "
+                f"{used}/{budget}, reserved_for_reseed={reserved}"
+            )
+            return False
         self.state.scratch["spec_synth_call_count"] = used + 1
         return True
+
+    def _spec_reseed_reserved_synth_calls(self) -> int:
+        workflow = self.config.get("workflow", {})
+        return max(0, int(workflow.get("spec_reseed_reserved_synth_calls", 0) or 0))
+
+    def _spec_reseed_reserved_budget_blocks(
+        self,
+        call_site: str,
+        used: int,
+        budget: int,
+    ) -> bool:
+        reserved = self._spec_reseed_reserved_synth_calls()
+        if reserved <= 0:
+            return False
+        if "reseed" in call_site:
+            return False
+        if "rewrite" not in call_site:
+            return False
+        remaining = max(0, budget - used)
+        return remaining <= reserved
 
     def _spec_gate_soft_fallback_enabled(self) -> bool:
         return bool(self.config.get("workflow", {}).get("spec_gate_soft_fallback"))
@@ -1986,6 +2049,7 @@ class TodoLifecycleMixin:
             "design_issues": sum(
                 1 for code in issue_codes if str(code).startswith("design_contract_")
             ),
+            "drift_saturation_hits": self._spec_graph_drift_saturation_hits(spec),
             "cooldown_hits": self._spec_graph_cooldown_hits(spec),
             "duplicate_hits": self._spec_graph_duplicate_hits(
                 spec,
@@ -2039,17 +2103,82 @@ class TodoLifecycleMixin:
                 existing_items.update(str(item) for item in signature if str(item).strip())
         return len(candidate_signature & existing_items)
 
+    def _spec_graph_drift_saturation_hits(self, spec: dict[str, Any]) -> int:
+        saturated_prefixes = {
+            ":".join(key.split(":")[:2]) + ":"
+            for key in self._drift_saturated_cooldown_keys()
+            if len(key.split(":")) >= 2
+        }
+        if not saturated_prefixes:
+            return 0
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        hits = 0
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            region_hash = self._failure_signature_target_region_hash(
+                self._failure_signature_list(task.get("target_regions")),
+                target_symbols=self._failure_signature_list(task.get("target_symbols")),
+            )
+            tactic = str(task.get("tactic_stage") or "tactic-unknown")
+            if f"{region_hash}:{tactic}:" in saturated_prefixes:
+                hits += 1
+        return hits
+
+    def _drift_saturated_cooldown_keys(self, *, limit: int = 12) -> dict[str, int]:
+        threshold = int(
+            self.config.get("workflow", {}).get("spec_drift_saturation_threshold", 3)
+            or 0
+        )
+        if threshold <= 0:
+            return {}
+        candidate_path = self._workflow_artifact_path(
+            "candidate_history_path",
+            ".local_micro_agent/candidates.jsonl",
+        )
+        records = self._read_spec_jsonl(candidate_path, limit=_SPEC_JSONL_READ_LIMIT)
+        records.extend(
+            self._read_spec_jsonl(
+                self._failure_signature_path(),
+                limit=_SPEC_JSONL_READ_LIMIT,
+            )
+        )
+        counts: dict[str, int] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("failure_class") or "") != "active_task_drift":
+                continue
+            key = str(
+                record.get("drift_cooldown_key") or record.get("cooldown_key") or ""
+            ).strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+        saturated = {
+            key: count
+            for key, count in counts.items()
+            if count >= threshold
+        }
+        return dict(
+            sorted(
+                saturated.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:limit]
+        )
+
     @staticmethod
     def _spec_graph_candidate_sort_key(
         record: dict[str, Any],
         score: dict[str, Any] | None = None,
-    ) -> tuple[int, int, int, int, int, int, str]:
+    ) -> tuple[int, int, int, int, int, int, int, str]:
         score = score if isinstance(score, dict) else record.get("score", {})
         if not isinstance(score, dict):
             score = {}
         return (
             int(score.get("quality_issues", 0) or 0),
             int(score.get("design_issues", 0) or 0),
+            int(score.get("drift_saturation_hits", 0) or 0),
             int(score.get("cooldown_hits", 0) or 0),
             int(score.get("duplicate_hits", 0) or 0),
             -int(score.get("runnable_tasks", 0) or 0),
@@ -2151,7 +2280,7 @@ class TodoLifecycleMixin:
         latest = self._latest_spec_graph_candidate_events()
         valid_candidates: list[
             tuple[
-                tuple[int, int, int, int, int, int, str],
+                tuple[int, int, int, int, int, int, int, str],
                 dict[str, Any],
                 dict[str, Any],
                 dict[str, Any],
@@ -2366,24 +2495,96 @@ class TodoLifecycleMixin:
             }
             for record in signatures
         ]
-        return "\n\n".join(
-            [
-                "The selected spec graph has no runnable frontier. Generate a new "
-                "candidate graph instead of repairing the same task graph.",
-                f"Reseed attempt {reseed_attempt}/{reseed_attempts_max}.",
-                "Do not repeat any failed shape identified by cooldown_keys. The new "
-                "graph must include at least one runnable local_edit task or a "
-                "materially narrower structural_probe with a concrete diff contract.",
-                "Preserve closed/survivor evidence as facts only; do not copy closed "
-                "tasks as already-completed graph nodes.",
-                "Current exhausted graph tasks:",
-                json.dumps(task_summaries, ensure_ascii=False, indent=2),
-                "Recent failure signatures:",
-                json.dumps(compact_signatures, ensure_ascii=False, indent=2),
-                "Cooldown keys banned for this reseed:",
-                json.dumps(cooldown_keys, ensure_ascii=False, indent=2),
-            ]
+        parts = [
+            "The selected spec graph has no runnable frontier. Generate a new "
+            "candidate graph instead of repairing the same task graph.",
+            f"Reseed attempt {reseed_attempt}/{reseed_attempts_max}.",
+            "Do not repeat any failed shape identified by cooldown_keys. The new "
+            "graph must include at least one runnable local_edit task or a "
+            "materially narrower structural_probe with a concrete diff contract.",
+            "Preserve closed/survivor evidence as facts only; do not copy closed "
+            "tasks as already-completed graph nodes.",
+            "Current exhausted graph tasks:",
+            json.dumps(task_summaries, ensure_ascii=False, indent=2),
+            "Recent failure signatures:",
+            json.dumps(compact_signatures, ensure_ascii=False, indent=2),
+            "Cooldown keys banned for this reseed:",
+            json.dumps(cooldown_keys, ensure_ascii=False, indent=2),
+        ]
+        suggested_regions = self._model_suggested_drift_regions()
+        if suggested_regions:
+            parts.extend(
+                [
+                    "Model-suggested regions from repeated drift (advisory only; "
+                    "still obey writable/grounding gates):",
+                    json.dumps(suggested_regions, ensure_ascii=False, indent=2),
+                ]
+            )
+        return "\n\n".join(parts)
+
+    def _model_suggested_drift_regions(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        workflow = self.config.get("workflow", {})
+        min_count = int(workflow.get("spec_model_suggested_region_min_count", 2) or 0)
+        if min_count <= 0:
+            return []
+        allowed_regions = {
+            str(region)
+            for region in self._current_spec_grounding_facts().get(
+                "allowed_target_regions",
+                [],
+            )
+            if str(region).strip()
+        }
+        candidate_path = self._workflow_artifact_path(
+            "candidate_history_path",
+            ".local_micro_agent/candidates.jsonl",
         )
+        records = self._read_spec_jsonl(candidate_path, limit=_SPEC_JSONL_READ_LIMIT)
+        records.extend(
+            self._read_spec_jsonl(
+                self._failure_signature_path(),
+                limit=_SPEC_JSONL_READ_LIMIT,
+            )
+        )
+        region_counts: dict[str, int] = {}
+        declared_by_region: dict[str, set[str]] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("failure_class") or "") != "active_task_drift":
+                continue
+            for region in self._normalize_string_list(record.get("drift_attempted_regions")):
+                if allowed_regions and region not in allowed_regions:
+                    continue
+                region_counts[region] = region_counts.get(region, 0) + 1
+            pairs = record.get("drift_region_pairs")
+            if not isinstance(pairs, list):
+                continue
+            for pair in pairs:
+                if not isinstance(pair, dict):
+                    continue
+                attempted = str(pair.get("attempted") or "").strip()
+                declared = str(pair.get("declared") or "").strip()
+                if not attempted:
+                    continue
+                if allowed_regions and attempted not in allowed_regions:
+                    continue
+                declared_by_region.setdefault(attempted, set())
+                if declared:
+                    declared_by_region[attempted].add(declared)
+        suggestions = [
+            {
+                "region": region,
+                "count": count,
+                "declared_regions": sorted(declared_by_region.get(region, set()))[:4],
+            }
+            for region, count in sorted(
+                region_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+            if count >= min_count
+        ]
+        return suggestions[:limit]
 
     @staticmethod
     def _spec_graph_signature(spec: dict[str, Any]) -> list[str]:
@@ -2621,6 +2822,13 @@ class TodoLifecycleMixin:
                 "targeted SPEC rewrite dropped runnable sibling tasks: "
                 + ", ".join(missing_siblings[:6])
             )
+        issues.extend(
+            self._targeted_rewrite_material_diversity_issues(
+                previous_tasks,
+                rewritten_tasks,
+                target_task_id,
+            )
+        )
         runnable = self._schedulable_spec_tasks(rewritten_tasks)
         if not runnable:
             issues.append("targeted SPEC rewrite produced no schedulable task")
@@ -2646,6 +2854,70 @@ class TodoLifecycleMixin:
                     "targeted SPEC rewrite left only one broad structural task"
                 )
         return issues
+
+    def _targeted_rewrite_material_diversity_issues(
+        self,
+        previous_tasks: list[dict[str, Any]],
+        rewritten_tasks: list[dict[str, Any]],
+        target_task_id: str,
+    ) -> list[str]:
+        previous_target = self._spec_task_by_id(previous_tasks, target_task_id)
+        if not isinstance(previous_target, dict):
+            return []
+        if not self._task_requires_drift_material_diversity(previous_target):
+            return []
+        target_origin = self._spec_rewrite_origin_task_id(
+            previous_target,
+            target_task_id,
+        )
+        replacement_tasks = [
+            task
+            for task in rewritten_tasks
+            if isinstance(task, dict)
+            and (
+                str(task.get("task_id") or "") == target_task_id
+                or str(task.get("replaces_task_id") or "")
+                in {target_task_id, target_origin}
+            )
+        ]
+        if not replacement_tasks:
+            return []
+        previous_signature = self._spec_task_material_signature(previous_target)
+        if any(
+            self._spec_task_material_signature(task) != previous_signature
+            for task in replacement_tasks
+        ):
+            return []
+        return [
+            "targeted SPEC rewrite repeated active-task drift material axes "
+            "(target_regions, tactic_stage, validator.kind, deliverables) "
+            "without a structurally different contract"
+        ]
+
+    @staticmethod
+    def _task_requires_drift_material_diversity(task: dict[str, Any]) -> bool:
+        if str(task.get("status") or "") == "needs_contract_rewrite":
+            return True
+        contract = task.get("contract_rewrite")
+        if isinstance(contract, dict) and str(contract.get("reason") or "") in {
+            "repeated_active_task_drift",
+            "drift_saturation",
+        }:
+            return True
+        observation = task.get("last_observation")
+        return (
+            isinstance(observation, dict)
+            and str(observation.get("failure_class") or "") == "active_task_drift"
+        )
+
+    def _spec_task_material_signature(self, task: dict[str, Any]) -> tuple[Any, ...]:
+        validator = task.get("validator") if isinstance(task.get("validator"), dict) else {}
+        return (
+            tuple(sorted(self._normalize_string_list(task.get("target_regions")))),
+            str(task.get("tactic_stage") or ""),
+            str(validator.get("kind") or ""),
+            tuple(sorted(self._normalize_string_list(task.get("deliverables")))),
+        )
 
     def _reject_spec_graph_rewrite(
         self,
@@ -2701,6 +2973,72 @@ class TodoLifecycleMixin:
         self.state.notes.append(
             "Rejected SPEC graph rewrite: " + "; ".join(issues)
         )
+
+    def _defer_targeted_rewrite_for_reseed_reserve(
+        self,
+        previous_spec: dict[str, Any],
+        target_task_id: str,
+    ) -> None:
+        spec = copy.deepcopy(previous_spec)
+        tasks = spec.get("task_graph")
+        target_task = None
+        if isinstance(tasks, list):
+            for task in tasks:
+                if isinstance(task, dict) and str(task.get("task_id") or "") == target_task_id:
+                    target_task = task
+                    break
+        if not isinstance(target_task, dict):
+            return
+        reserved_at = self.state.scratch.get("spec_synth_budget_reserved_at")
+        reserved_at = reserved_at if isinstance(reserved_at, dict) else {}
+        drift_related = self._task_requires_drift_material_diversity(target_task)
+        target_task["status"] = (
+            "deferred_contract_drift" if drift_related else "deferred_design_invalid"
+        )
+        target_task["decision_hint"] = (
+            "targeted_rewrite_reseed_budget_reserved: targeted rewrite was not "
+            "run because reserved SPEC calls must remain available for graph reseed."
+        )
+        contract = target_task.get("contract_rewrite")
+        if not isinstance(contract, dict):
+            contract = {}
+        contract.update(
+            {
+                "status": "deferred",
+                "reason": "reseed_budget_reserved",
+                "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+        )
+        if reserved_at:
+            contract["reseed_budget_reserved_at"] = reserved_at
+        target_task["contract_rewrite"] = contract
+        spec["active_task_id"] = None
+        self._persist_run_spec(spec)
+        event_extra = {
+            "reason": "reseed_budget_reserved",
+            "action": "rewrite_rejected_reseed_budget_reserved",
+            "target_task_id": target_task_id,
+            "spec_budget_saved_by_drift_backoff": 1 if drift_related else 0,
+            "reseed_budget_reserved_at": reserved_at,
+        }
+        self._append_spec_progress_event(
+            "drift_recovery" if drift_related else "design_rejected",
+            spec,
+            target_task,
+            extra=event_extra,
+        )
+        self._append_failure_signature(
+            phase="active_task" if drift_related else "design_rewrite",
+            spec=spec,
+            task=target_task,
+            status=str(target_task.get("status") or ""),
+            failure_class="active_task_drift" if drift_related else "design_rewrite_invalid",
+            issue_code="reseed_budget_reserved",
+            issue_scope="candidate_delta" if drift_related else "spec_task",
+            summary=str(target_task.get("decision_hint") or ""),
+            extra=event_extra,
+        )
+        self.state.current = AgentStateName.SCHEDULE
 
     def _append_spec_progress_event(
         self,
@@ -5046,20 +5384,45 @@ class TodoLifecycleMixin:
                 if isinstance(drift_recovery.get("drift_telemetry"), dict)
                 else {}
             )
-            task["status"] = "deferred_contract_drift"
-            task["decision_hint"] = (
-                "contract_drift_streak_deferred: active-task drift repeated after "
-                "the contract rewrite budget was exhausted. Keep this task out of "
-                "CODE and schedule a different runnable task."
+            drift_saturation = (
+                drift_recovery.get("drift_saturation")
+                if isinstance(drift_recovery.get("drift_saturation"), dict)
+                else {}
             )
+            defer_reason = (
+                "drift_saturation"
+                if drift_saturation
+                else "repeated_active_task_drift"
+            )
+            progress_action = (
+                "rewrite_rejected_duplicate_drift"
+                if drift_saturation
+                else "defer"
+            )
+            task["status"] = "deferred_contract_drift"
+            if drift_saturation:
+                task["decision_hint"] = (
+                    "contract_drift_saturated: active-task drift repeatedly hit the "
+                    "same region/tactic cooldown key. Do not spend another targeted "
+                    "rewrite on this shape; schedule a sibling or reseed with a "
+                    "materially different contract."
+                )
+            else:
+                task["decision_hint"] = (
+                    "contract_drift_streak_deferred: active-task drift repeated after "
+                    "the contract rewrite budget was exhausted. Keep this task out of "
+                    "CODE and schedule a different runnable task."
+                )
             task["contract_rewrite"] = {
                 "status": "deferred",
-                "reason": "repeated_active_task_drift",
+                "reason": defer_reason,
                 "rewrite_attempt_key": drift_recovery.get("rewrite_attempt_key"),
                 "rewrite_attempts": drift_recovery.get("rewrite_attempts"),
                 "rewrite_attempts_max": drift_recovery.get("rewrite_attempts_max"),
                 "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }
+            if drift_saturation:
+                task["contract_rewrite"]["drift_saturation"] = drift_saturation
             spec["active_task_id"] = None
             self._persist_run_spec(spec)
             self._append_spec_progress_event(
@@ -5067,13 +5430,17 @@ class TodoLifecycleMixin:
                 spec,
                 task,
                 extra={
-                    "reason": "repeated_active_task_drift",
-                    "action": "defer",
+                    "reason": defer_reason,
+                    "action": progress_action,
                     "per_task_streak": drift_recovery.get("per_task_streak"),
                     "same_fingerprint_streak": drift_recovery.get(
                         "same_fingerprint_streak"
                     ),
                     "fingerprint": drift_recovery.get("fingerprint"),
+                    "drift_saturation": drift_saturation,
+                    "spec_budget_saved_by_drift_backoff": drift_recovery.get(
+                        "spec_budget_saved_by_drift_backoff"
+                    ),
                     **drift_telemetry,
                 },
             )
@@ -5087,12 +5454,17 @@ class TodoLifecycleMixin:
                 issue_scope="candidate_delta",
                 summary=str(drift_recovery.get("summary") or ""),
                 extra={
-                    "action": "defer",
+                    "action": progress_action,
+                    "reason": defer_reason,
                     "per_task_streak": drift_recovery.get("per_task_streak"),
                     "same_fingerprint_streak": drift_recovery.get(
                         "same_fingerprint_streak"
                     ),
                     "drift_fingerprint": drift_recovery.get("fingerprint"),
+                    "drift_saturation": drift_saturation,
+                    "spec_budget_saved_by_drift_backoff": drift_recovery.get(
+                        "spec_budget_saved_by_drift_backoff"
+                    ),
                     **drift_telemetry,
                 },
             )
@@ -5201,6 +5573,8 @@ class TodoLifecycleMixin:
         )
         if not hit_per_task and not hit_fingerprint:
             return None
+        drift_telemetry = self._active_task_drift_record_extra(latest, task=task)
+        saturation = self._active_task_drift_saturation(latest, drift_telemetry)
         attempt_key = self._spec_rewrite_origin_task_id(task, task_id)
         contract = task.get("contract_rewrite")
         prior_rewrites = (
@@ -5212,20 +5586,92 @@ class TodoLifecycleMixin:
             workflow.get("spec_active_task_drift_rewrite_attempts", 1) or 0
         )
         next_rewrite = prior_rewrites + 1
-        action = "rewrite" if max_rewrites > 0 and prior_rewrites < max_rewrites else "defer"
+        rewrite_available = max_rewrites > 0 and prior_rewrites < max_rewrites
+        action = "rewrite" if rewrite_available and not saturation else "defer"
+        effective_rewrites = (
+            prior_rewrites
+            if saturation
+            else min(next_rewrite, max(prior_rewrites, max_rewrites))
+        )
         summary = self._active_task_drift_rewrite_summary(task_id, latest)
-        drift_telemetry = self._active_task_drift_record_extra(latest, task=task)
         return {
             "action": action,
             "per_task_streak": per_task_streak,
             "same_fingerprint_streak": same_fingerprint_streak,
             "fingerprint": fingerprint,
             "rewrite_attempt_key": attempt_key,
-            "rewrite_attempts": min(next_rewrite, max(prior_rewrites, max_rewrites)),
+            "rewrite_attempts": effective_rewrites,
             "rewrite_attempts_max": max_rewrites,
             "summary": summary,
             "drift_telemetry": drift_telemetry,
+            "drift_saturation": saturation,
+            "spec_budget_saved_by_drift_backoff": (
+                1 if saturation and rewrite_available else 0
+            ),
         }
+
+    def _active_task_drift_saturation(
+        self,
+        latest: dict[str, Any],
+        drift_telemetry: dict[str, Any],
+    ) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        threshold = int(workflow.get("spec_drift_saturation_threshold", 0) or 0)
+        if threshold <= 0:
+            return {}
+        cooldown_key = str(drift_telemetry.get("drift_cooldown_key") or "").strip()
+        if not cooldown_key:
+            return {}
+        count = 0
+        seen: set[tuple[Any, Any, Any, Any]] = set()
+        for record in self._active_task_drift_records_for_saturation(latest):
+            if not isinstance(record, dict) or not self._attempt_is_active_task_drift(record):
+                continue
+            key = str(record.get("drift_cooldown_key") or "").strip()
+            if not key and record is latest:
+                key = cooldown_key
+            if key != cooldown_key:
+                continue
+            identity = (
+                record.get("loop"),
+                record.get("todo_id") or record.get("spec_task_id"),
+                record.get("candidate_id"),
+                record.get("status"),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            count += 1
+        if count < threshold:
+            return {}
+        return {
+            "cooldown_key": cooldown_key,
+            "count": count,
+            "threshold": threshold,
+            "reason": "same_region_tactic_drift_saturated",
+        }
+
+    def _active_task_drift_records_for_saturation(
+        self,
+        latest: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        candidate_path = self._workflow_artifact_path(
+            "candidate_history_path",
+            ".local_micro_agent/candidates.jsonl",
+        )
+        records.extend(
+            self._read_spec_jsonl(candidate_path, limit=_SPEC_JSONL_READ_LIMIT)
+        )
+        todo_attempts_path = self._workflow_artifact_path(
+            "todo_attempts_path",
+            ".local_micro_agent/todo_attempts.jsonl",
+        )
+        records.extend(
+            self._read_spec_jsonl(todo_attempts_path, limit=_SPEC_JSONL_READ_LIMIT)
+        )
+        records.append(latest)
+        return records
 
     def _active_task_drift_record_extra(
         self,

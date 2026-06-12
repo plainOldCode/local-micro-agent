@@ -165,6 +165,21 @@ This turns repeated drift into a search signal without making policy decisions
 from prose. Backoff and reseed policy should consume these structured fields,
 not natural-language edit-scope similarity.
 
+Drift backoff policy uses the same cooldown-key namespace. Once
+`spec_drift_saturation_threshold` active-task drift records repeat the same
+`drift_cooldown_key`, targeted rewrite is treated as saturated: the task is
+deferred, the saved rewrite call is recorded, and sibling/backtrack/reseed can
+advance the frontier. Targeted rewrites for drifted tasks must also change at
+least one structured material axis: `target_regions`, `tactic_stage`,
+`validator.kind`, or `deliverables`. Free-form `edit_scope` text may be
+advisory later, but it is not a hard-reject axis.
+
+Reseed prompts may receive model-suggested regions derived from repeated
+`declared -> attempted` drift pairs. These are advisory only and must still pass
+the deterministic writable/grounding gates. The controller can also reserve
+`spec_reseed_reserved_synth_calls` so targeted rewrites cannot consume the last
+SPEC calls needed for graph reseed.
+
 ## Controller Loop
 
 ### Phase A: Spec Search
