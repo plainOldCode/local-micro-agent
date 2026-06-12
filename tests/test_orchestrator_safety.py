@@ -5410,6 +5410,59 @@ Background / non-constraints
             self.assertEqual(updated["todos"][0]["attempts"], 1)
             self.assertEqual(updated["todos"][0]["non_budget_attempts"], 1)
 
+    def test_active_todo_drift_updates_last_candidate_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            todo = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "strategy_axis": "general_edit",
+                "target_symbols": ["parse_item"],
+                "source": "spec_scheduler",
+            }
+            (artifact_dir / "active_todo.json").write_text(json.dumps(todo) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": takehome_workflow(
+                        candidate_history_path=".local_micro_agent/candidates.jsonl",
+                        todo_soft_until_first_improvement=False,
+                    ),
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = todo
+            candidate = CodeCandidate(
+                "drift",
+                [CodeChange("target.py", "edit helper", target="old", replacement="new")],
+                "edit helper",
+                strategy_axis="general_edit",
+            )
+            extra = agent._candidate_rejection_extra(
+                candidate,
+                "rejected_todo_scope_drift",
+                "outside active task",
+            )
+
+            agent._append_candidate_history(
+                candidate,
+                status="rejected_todo_scope_drift",
+                metric=None,
+                applied=0,
+                failed=True,
+                extra=extra,
+            )
+
+            observation = agent.state.scratch["last_candidate_observation"]
+            self.assertEqual(observation["failure_class"], "active_task_drift")
+            self.assertEqual(observation["failure_origin"], "pre_apply_contract")
+            self.assertFalse(observation["budget_counted"])
+
     def test_active_task_probe_contract_allows_matching_region_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
