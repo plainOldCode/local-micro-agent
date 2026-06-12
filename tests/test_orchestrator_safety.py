@@ -2557,6 +2557,69 @@ Background / non-constraints
             self.assertIn('"design_failed_tasks": ["task-002"]', progress_events)
             self.assertIn('"drift_deferred_tasks": ["task-001"]', progress_events)
 
+    def test_spec_mode_marks_partial_success_for_mixed_drift_and_design_invalid(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "partial-mixed-design-invalid",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "validated task",
+                        "status": "closed",
+                        "deliverables": ["target.txt"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "drifted contract",
+                        "status": "deferred_contract_drift",
+                        "deliverables": ["target.txt"],
+                    },
+                    {
+                        "task_id": "task-003",
+                        "title": "invalid design",
+                        "status": "failed_design",
+                        "deliverables": ["target.txt"],
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "max_code_test_loops": 10,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.DONE)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "partial_success_search_frontier_exhausted",
+            )
+            self.assertEqual(persisted["task_graph"][2]["status"], "deferred_design")
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn(
+                '"stop_reason": "partial_success_search_frontier_exhausted"',
+                progress_events,
+            )
+
     def test_spec_mode_schedules_open_sibling_without_reopening_exhausted_portfolio_task(
         self,
     ) -> None:
@@ -4039,6 +4102,7 @@ Background / non-constraints
                 )
                 self.assertEqual(signature["failure_class"], "active_task_drift")
                 self.assertEqual(signature["status"], "needs_contract_rewrite")
+                self.assertEqual(signature["target_region_hash"], "ece45896")
                 self.assertIn("drift_2", signature["cooldown_key"])
                 self.assertNotIn("task-001", signature["cooldown_key"])
 
@@ -4219,6 +4283,7 @@ Background / non-constraints
                 )
                 self.assertEqual(signature["failure_class"], "active_task_drift")
                 self.assertEqual(signature["status"], "deferred_contract_drift")
+                self.assertEqual(signature["target_region_hash"], "b3652dd1")
                 self.assertIn("same_drift", signature["cooldown_key"])
                 self.assertNotIn("task-001", signature["cooldown_key"])
 

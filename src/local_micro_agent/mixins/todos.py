@@ -1893,7 +1893,7 @@ class TodoLifecycleMixin:
         tactic_stage = str(task.get("tactic_stage") or "")
         region_hash = self._failure_signature_target_region_hash(
             target_regions,
-            task_id=task_id,
+            target_symbols=target_symbols,
         )
         issue_code = self._normalize_failure_issue_code(issue_code)
         record = {
@@ -1954,9 +1954,14 @@ class TodoLifecycleMixin:
     def _failure_signature_target_region_hash(
         target_regions: list[str],
         *,
-        task_id: str = "",
+        target_symbols: list[str] | None = None,
     ) -> str:
-        source = "|".join(target_regions) if target_regions else task_id or "unknown"
+        if target_regions:
+            source = "|".join(target_regions)
+        elif target_symbols:
+            source = "symbols:" + "|".join(target_symbols)
+        else:
+            source = "unscoped"
         return hashlib.sha1(source.encode("utf-8")).hexdigest()[:8]
 
     @staticmethod
@@ -2728,7 +2733,11 @@ class TodoLifecycleMixin:
         if not open_candidates:
             blocked_extra = self._spec_blocked_event_extra(tasks)
             partial_success = (
-                blocked_extra.get("stop_reason") == "partial_success_design_deferred"
+                blocked_extra.get("stop_reason")
+                in {
+                    "partial_success_design_deferred",
+                    "partial_success_search_frontier_exhausted",
+                }
             )
             if partial_success:
                 self._defer_design_failed_spec_tasks(tasks)
@@ -3109,7 +3118,11 @@ class TodoLifecycleMixin:
             and drift_deferred
             and self._all_remaining_spec_tasks_design_or_drift_exhausted(tasks)
         ):
-            stop_reason = "search_frontier_exhausted_after_design_invalid"
+            stop_reason = (
+                "partial_success_search_frontier_exhausted"
+                if self._spec_has_closed_task(tasks)
+                else "search_frontier_exhausted_after_design_invalid"
+            )
         elif drift_deferred and self._all_remaining_spec_tasks_contract_drift_deferred(tasks):
             stop_reason = "no_runnable_tasks_after_drift_deferred"
         elif portfolio_exhausted and self._all_remaining_spec_tasks_exhausted(tasks):
