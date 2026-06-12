@@ -114,7 +114,9 @@ class TodoLifecycleMixin:
                 )
                 or ""
             ).strip()
-            quality_attempts = self._spec_quality_rewrite_attempts()
+            quality_attempts = self._spec_quality_rewrite_attempts(
+                targeted_rewrite=targeted_rewrite
+            )
             quality_feedback = ""
             for quality_attempt in range(quality_attempts + 1):
                 prompt_focus = "\n\n".join(
@@ -233,11 +235,7 @@ class TodoLifecycleMixin:
                         )
                     self.state.notes.append(f"Persisted run spec: {path}")
                     return
-                issue_codes = [
-                    str(issue.get("code") or "")
-                    for issue in quality_report.get("issues", [])
-                    if isinstance(issue, dict)
-                ]
+                issue_codes = self._spec_quality_issue_codes(quality_report)
                 self.state.notes.append(
                     "Run spec quality gate rejected finalizer output: "
                     + ", ".join(code for code in issue_codes if code)
@@ -263,6 +261,16 @@ class TodoLifecycleMixin:
                     ),
                 )
                 if quality_attempt >= quality_attempts:
+                    if targeted_rewrite and self._reject_targeted_rewrite_for_quality_failure(
+                        previous_spec,
+                        rewrite_target_task_id,
+                        quality_report,
+                    ):
+                        self.state.scratch.pop("spec_rewrite_focus", None)
+                        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        self.state.scratch.pop("spec_graph_generation_origin", None)
+                        self.state.scratch.pop("spec_graph_parent_graph_id", None)
+                        return
                     if self._maybe_persist_soft_fallback_spec(spec, quality_report):
                         self.state.scratch.pop("spec_rewrite_focus", None)
                         self.state.scratch.pop("spec_rewrite_target_task_id", None)
@@ -880,10 +888,14 @@ class TodoLifecycleMixin:
         workflow = self.config.get("workflow", {})
         return bool(workflow.get("spec_quality_gate"))
 
-    def _spec_quality_rewrite_attempts(self) -> int:
+    def _spec_quality_rewrite_attempts(self, *, targeted_rewrite: bool = False) -> int:
         if not self._spec_quality_gate_enabled():
             return 0
         workflow = self.config.get("workflow", {})
+        if targeted_rewrite:
+            targeted = workflow.get("spec_targeted_rewrite_quality_rewrite_attempts")
+            if targeted not in (None, ""):
+                return max(0, int(targeted or 0))
         return max(0, int(workflow.get("spec_quality_rewrite_attempts", 1) or 0))
 
     def _spec_synth_call_budget(self) -> int | None:
@@ -996,6 +1008,17 @@ class TodoLifecycleMixin:
     @staticmethod
     def _spec_quality_report_failed(report: dict[str, Any]) -> bool:
         return str(report.get("status") or "") == "fail"
+
+    @staticmethod
+    def _spec_quality_issue_codes(report: dict[str, Any]) -> list[str]:
+        codes: list[str] = []
+        raw_codes = report.get("issue_codes")
+        if isinstance(raw_codes, list):
+            codes.extend(str(code) for code in raw_codes if str(code).strip())
+        for issue in report.get("issues", []):
+            if isinstance(issue, dict) and str(issue.get("code") or "").strip():
+                codes.append(str(issue["code"]))
+        return list(dict.fromkeys(codes))
 
     def _spec_quality_report(
         self,
@@ -3059,6 +3082,84 @@ class TodoLifecycleMixin:
             extra=event_extra,
         )
         self.state.current = AgentStateName.SCHEDULE
+
+    def _reject_targeted_rewrite_for_quality_failure(
+        self,
+        previous_spec: dict[str, Any],
+        target_task_id: str,
+        quality_report: dict[str, Any],
+    ) -> bool:
+        spec = copy.deepcopy(previous_spec)
+        tasks = spec.get("task_graph")
+        if not isinstance(tasks, list):
+            return False
+        target_task = self._spec_task_by_id(tasks, target_task_id)
+        if not isinstance(target_task, dict):
+            return False
+        issue_codes = self._spec_quality_issue_codes(quality_report)
+        if not issue_codes:
+            issue_codes = ["quality_gate_failed"]
+        drift_related = self._task_requires_drift_material_diversity(target_task)
+        target_task["status"] = (
+            "deferred_contract_drift" if drift_related else "deferred_design_invalid"
+        )
+        target_task["decision_hint"] = (
+            "targeted_rewrite_quality_rejected: targeted SPEC rewrite kept failing "
+            "the quality gate; stop spending SPEC budget on the same rewrite shape "
+            "and continue with sibling, backtrack, or graph reseed."
+        )
+        record_key = "contract_rewrite" if drift_related else "design_contract"
+        record = target_task.get(record_key)
+        if not isinstance(record, dict):
+            record = {}
+        record.update(
+            {
+                "status": str(target_task.get("status") or ""),
+                "reason": "quality_gate_rejected",
+                "quality_issue_codes": issue_codes,
+                "quality_attempt": quality_report.get("attempt"),
+                "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+        )
+        target_task[record_key] = record
+        spec["active_task_id"] = None
+        spec["last_targeted_rewrite_quality_rejected"] = {
+            "target_task_id": target_task_id,
+            "quality_issue_codes": issue_codes,
+            "quality_attempt": quality_report.get("attempt"),
+        }
+        spec["progress"] = self._run_spec_progress(spec)
+        self._persist_run_spec(spec)
+        event_extra = {
+            "reason": "quality_gate_rejected",
+            "action": "targeted_rewrite_quality_rejected",
+            "target_task_id": target_task_id,
+            "quality_issue_codes": issue_codes,
+            "quality_attempt": quality_report.get("attempt"),
+        }
+        self._append_spec_progress_event(
+            "drift_recovery" if drift_related else "design_rejected",
+            spec,
+            target_task,
+            extra=event_extra,
+        )
+        self._append_failure_signature(
+            phase="active_task" if drift_related else "graph_rewrite",
+            spec=spec,
+            task=target_task,
+            status=str(target_task.get("status") or ""),
+            failure_class="active_task_drift" if drift_related else "design_rewrite_invalid",
+            issue_code=issue_codes[0],
+            issue_scope="candidate_delta" if drift_related else "spec_graph",
+            summary=str(target_task.get("decision_hint") or ""),
+            extra=event_extra,
+        )
+        self.state.notes.append(
+            "Rejected targeted SPEC rewrite after quality gate failures: "
+            + ", ".join(issue_codes)
+        )
+        self.state.current = AgentStateName.SCHEDULE
+        return True
 
     def _append_spec_progress_event(
         self,

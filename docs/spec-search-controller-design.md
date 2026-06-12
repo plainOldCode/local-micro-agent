@@ -263,6 +263,7 @@ The controller must choose from a closed set of actions:
 | --- | --- |
 | `active_task_drift` under rewrite budget | `contract_rewrite` |
 | `active_task_drift` after rewrite budget | `defer_contract_drift` |
+| targeted rewrite `quality_rejected` | `defer_target_then_backtrack_or_reseed` |
 | `graph_rewrite_rejected` | `reject_graph_or_task_then_backtrack` |
 | `correctness_failure` streak | `design_rewrite_or_tactic_cooldown` |
 | `valid_no_improvement` | `preserve_survivor_then_expand_sibling` |

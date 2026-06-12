@@ -282,10 +282,14 @@ the first runnable task, it must add an `idea_rejection_reason:` in
 `known_facts` or `decision_rules` that cites grounding facts or recent failure
 memory. Failed quality checks are written to
 `.local_micro_agent/spec_quality_report.json`, logged as `quality_rejected` in
-`spec_progress.jsonl`, and fed back into bounded finalizer rewrite attempts. If
-no valid v2 run spec can be persisted, spec mode still writes terminal artifacts
-with `stop_reason=spec_quality_gate_failed` and the final quality report so
-loop-0 spec generation failures are analyzable.
+`spec_progress.jsonl`, and fed back into bounded finalizer rewrite attempts. A
+targeted design/contract rewrite can use its own tighter retry cap
+(`spec_targeted_rewrite_quality_rewrite_attempts`); if its final candidate still
+fails the quality gate, the targeted task is deferred so sibling, backtrack, or
+reseed search can continue instead of spending more SPEC budget on the same
+rewrite shape. If no valid v2 run spec can be persisted, spec mode still writes
+terminal artifacts with `stop_reason=spec_quality_gate_failed` and the final
+quality report so loop-0 spec generation failures are analyzable.
 With `spec_gate_soft_fallback=true`, a quality/design gate that exhausts its
 SPEC-side rewrite budget before any CODE attempt may persist the last candidate
 graph as an advisory soft fallback for one CODE attempt. Downstream active-todo,

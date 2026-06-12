@@ -6185,6 +6185,471 @@ Background / non-constraints
 
         asyncio.run(run_case())
 
+    def test_targeted_spec_rewrite_quality_retry_merges_fixed_rewrite(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {"reasoner": "reasoner-model"},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 2,
+                            "spec_targeted_rewrite_quality_rewrite_attempts": 1,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "Rejected target",
+                                "status": "needs_design",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Change one guarded branch in target.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "Local branch edit.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Shrink to one guarded branch if tests fail.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "Sibling local edit",
+                                "status": "open",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "preserved_invariants": ["existing parse outputs"],
+                                "edit_scope": "Cache one local value in parse_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Cache one local value in parse_item.",
+                                    "explanation": "Local binding only.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Revert by removing the local binding.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            },
+                        ],
+                    }
+                )
+                invalid_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "invalid-quality",
+                        "task_graph": [
+                            {
+                                "task_id": "task-099",
+                                "title": "Missing target region",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": [],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Change one guarded branch in target.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "Local branch edit.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Shrink to one guarded branch if tests fail.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            }
+                        ],
+                    }
+                )
+                fixed_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "fixed-quality",
+                        "task_graph": [
+                            {
+                                "task_id": "task-099",
+                                "title": "Fixed replacement",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Change one guarded branch in target.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "Local branch edit.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Shrink to one guarded branch if tests fail.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            }
+                        ],
+                    }
+                )
+                models = _RoleSequenceModelManager(
+                    {"reasoner": [invalid_rewrite, fixed_rewrite]}
+                )
+                agent.models = models
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(persisted["spec_id"], "fixed-quality")
+                self.assertEqual(
+                    [task["task_id"] for task in persisted["task_graph"]],
+                    ["task-099", "task-002"],
+                )
+                self.assertEqual(persisted["task_graph"][0]["replaces_task_id"], "task-001")
+                self.assertTrue(persisted["task_graph"][1]["portfolio_preserved_after_rewrite"])
+                self.assertEqual(len(models.seen["reasoner"]), 2)
+                report = json.loads(
+                    (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
+                )
+                self.assertEqual(report["status"], "pass")
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertIn('"event": "quality_rejected"', progress)
+                self.assertIn('"event": "rewrite_merged"', progress)
+                graph_events = [
+                    json.loads(line)
+                    for line in (
+                        repo / ".local_micro_agent" / "spec_graph_candidates.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(
+                    [(event["event"], event["status"]) for event in graph_events],
+                    [
+                        ("candidate_rejected", "rejected_quality"),
+                        ("candidate_selected", "selected"),
+                    ],
+                )
+
+        asyncio.run(run_case())
+
+    def test_targeted_spec_rewrite_quality_failure_defers_target_and_preserves_sibling(
+        self,
+    ) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {"reasoner": "reasoner-model"},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 2,
+                            "spec_targeted_rewrite_quality_rewrite_attempts": 0,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "Rejected target",
+                                "status": "needs_design",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": ["target.py::target"],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Change one guarded branch in target.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "Local branch edit.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Shrink to one guarded branch if tests fail.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "Sibling local edit",
+                                "status": "open",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "preserved_invariants": ["existing parse outputs"],
+                                "edit_scope": "Cache one local value in parse_item.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "Cache one local value in parse_item.",
+                                    "explanation": "Local binding only.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Revert by removing the local binding.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            },
+                        ],
+                    }
+                )
+                invalid_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "invalid-quality",
+                        "task_graph": [
+                            {
+                                "task_id": "task-099",
+                                "title": "Missing target region",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["target"],
+                                "target_regions": [],
+                                "preserved_invariants": ["existing behavior"],
+                                "edit_scope": "Change one guarded branch in target.",
+                                "risk_level": "local",
+                                "tactic_stage": "local_edit",
+                                "risk_evidence": {
+                                    "field": "edit_scope",
+                                    "quote": "one guarded branch",
+                                    "explanation": "Local branch edit.",
+                                },
+                                "validator": {
+                                    "kind": "command",
+                                    "failure_condition": "pytest fails",
+                                },
+                                "correctness_rationale": "No behavior change.",
+                                "fallback_plan": "Shrink to one guarded branch if tests fail.",
+                                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                            }
+                        ],
+                    }
+                )
+                models = _RoleSequenceModelManager({"reasoner": [invalid_rewrite]})
+                agent.models = models
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                persisted = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(persisted["spec_id"], "previous")
+                self.assertEqual(
+                    persisted["task_graph"][0]["status"],
+                    "deferred_design_invalid",
+                )
+                self.assertEqual(persisted["task_graph"][1]["status"], "open")
+                self.assertEqual(
+                    persisted["last_targeted_rewrite_quality_rejected"]["quality_issue_codes"],
+                    ["target_region_count"],
+                )
+                self.assertEqual(len(models.seen["reasoner"]), 1)
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertIn('"action": "targeted_rewrite_quality_rejected"', progress)
+                self.assertIn('"quality_issue_codes": ["target_region_count"]', progress)
+                signatures = [
+                    json.loads(line)
+                    for line in (
+                        repo / ".local_micro_agent" / "failure_signatures.jsonl"
+                    ).read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(signatures[-1]["phase"], "graph_rewrite")
+                self.assertEqual(signatures[-1]["failure_class"], "design_rewrite_invalid")
+                self.assertEqual(signatures[-1]["issue_code"], "target_region_count")
+
+                agent._schedule_spec_task()
+
+                self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+                self.assertEqual(agent.state.scratch["active_todo"]["spec_task_id"], "task-002")
+
+        asyncio.run(run_case())
+
+    def test_targeted_drift_rewrite_quality_failure_defers_contract_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "previous",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Drift target",
+                            "status": "needs_contract_rewrite",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["target"],
+                            "target_regions": ["target.py::target"],
+                            "preserved_invariants": ["existing behavior"],
+                            "edit_scope": "Change one guarded branch in target.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "contract_rewrite": {
+                                "status": "requested",
+                                "reason": "repeated_active_task_drift",
+                            },
+                        }
+                    ],
+                }
+            )
+            quality_report = {
+                "status": "fail",
+                "attempt": 1,
+                "issue_codes": ["target_region_count"],
+                "issues": [{"code": "target_region_count", "task_id": "task-001"}],
+            }
+
+            rejected = agent._reject_targeted_rewrite_for_quality_failure(
+                previous_spec,
+                "task-001",
+                quality_report,
+            )
+
+            self.assertTrue(rejected)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = persisted["task_graph"][0]
+            self.assertEqual(task["status"], "deferred_contract_drift")
+            self.assertEqual(task["contract_rewrite"]["reason"], "quality_gate_rejected")
+            progress = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "drift_recovery"', progress)
+            signature = json.loads(
+                (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()[-1]
+            )
+            self.assertEqual(signature["phase"], "active_task")
+            self.assertEqual(signature["failure_class"], "active_task_drift")
+            self.assertEqual(signature["issue_code"], "target_region_count")
+
+    def test_targeted_rewrite_quality_failure_missing_target_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "previous",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Only task",
+                            "status": "open",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["target"],
+                            "target_regions": ["target.py::target"],
+                            "preserved_invariants": ["existing behavior"],
+                            "edit_scope": "Change one guarded branch in target.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                        }
+                    ],
+                }
+            )
+            quality_report = {
+                "status": "fail",
+                "attempt": 1,
+                "issue_codes": ["target_region_count"],
+                "issues": [{"code": "target_region_count", "task_id": "task-404"}],
+            }
+
+            rejected = agent._reject_targeted_rewrite_for_quality_failure(
+                previous_spec,
+                "task-404",
+                quality_report,
+            )
+
+            self.assertFalse(rejected)
+            self.assertFalse((artifact_dir / "run_spec.json").exists())
+            self.assertFalse((artifact_dir / "spec_progress.jsonl").exists())
+            self.assertFalse((artifact_dir / "failure_signatures.jsonl").exists())
+            self.assertNotEqual(agent.state.current, AgentStateName.SCHEDULE)
+
     def test_spec_design_failure_memory_context_summarizes_rejected_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
