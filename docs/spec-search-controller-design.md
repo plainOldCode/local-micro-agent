@@ -757,22 +757,26 @@ Remaining:
 
 ## Recommended Next Patch
 
-Implement MVP 7 next:
+Implement MVP 8 next:
 
-1. Add a runner-agnostic thinking/analysis response abstraction that can capture
-   Ollama `message.thinking`, OpenAI-compatible `reasoning_content`, or plain
-   `content` fallback.
-2. Introduce `SPEC_THINK_BRIEF` as an analysis-only call site. It must never be
-   parsed as run-spec JSON and must not use tool/JSON mode.
-3. Extract controller-owned `SpecSynthesisConstraints` from the thinking brief,
-   deterministic grounding facts, and recent failure signatures.
-4. Keep `SPEC_FINALIZE` no-think and strict JSON. It consumes the brief plus
-   constraints and must not rely on hidden reasoning.
+1. Turn `SPEC_THINK_BRIEF` from free-form advisory Markdown into a typed
+   hypothesis-option brief. This is prompt design plus a controller protocol,
+   not prompt wording alone.
+2. Add a deterministic parser/normalizer for hypothesis options:
+   `hypothesis`, `change_boundary`, `causal_evidence`, `expected_signal`,
+   `invariants`, `fallback`, and `why_not_smaller`.
+3. Gate those options with domain-neutral structural checks before the no-think
+   finalizer can use them. The controller must not invent domain-specific
+   subtasks or split an idea into a local probe on its own.
+4. Feed only accepted hypothesis options plus controller-owned constraints to
+   `SPEC_FINALIZE`; rejected options become feedback for the next brief/rewrite.
 5. Add normal, edge, and error tests before any M2 Max smoke.
 
 Do not increase graph reseed attempts or portfolio recovery rounds to hide SPEC
-artifact failures. The goal is to use reasoning where it is helpful, then force
-the final artifact through bounded controller-owned constraints.
+artifact failures. Do not encode benchmark-specific optimization tactics. The
+goal is to let the model analyze domain-specific code, while the controller
+checks whether the analysis contains enough causal evidence to become an
+independently testable task.
 
 ### MVP 6.1: Transition-Bound Plateau Evidence
 
@@ -1072,3 +1076,214 @@ not leak hidden reasoning into final JSON prompts.
 - Do not make external search mandatory for ordinary local coding tasks.
 - Do not allow external search to change writable files, metric commands, or task
   objectives.
+
+### MVP 8: Hypothesis-Option Brief Protocol
+
+The `db2381c` M2 Max smoke validated the runner plumbing: Ollama
+`message.thinking` was captured, reasoning-only output became an 8KB
+`spec_think_brief.md`, rewrite/reseed thinking briefs were invoked, controller
+constraints were written, and no-think finalizers produced a `run_spec.json`.
+The quality result did not improve. The selected graph still collapsed into a
+single broad structural task, then produced active-task drift and exhausted the
+graph reseed frontier.
+
+That does not mean the controller should hard-code smaller local probes. The
+thinking brief is allowed to use domain-specific symbols, performance terms,
+API names, failure modes, and code structure. The controller should not
+interpret those terms semantically or split them into arbitrary subtasks. Its
+job is narrower: require the model's own analysis to expose a causal,
+testable hypothesis before the finalizer can turn it into a task graph.
+
+MVP 8 makes the brief a typed protocol. This includes prompt design, but the
+important boundary is the controller verifier that consumes the protocol.
+
+#### Prompt vs Protocol
+
+Plain prompt design says:
+
+> Analyze carefully and produce a smaller, well-grounded task.
+
+That is not enough. The next finalizer can still ignore the request or turn a
+domain-specific insight into a broad task shape.
+
+Protocol design says the brief must emit hypothesis options with stable fields,
+and the controller checks those fields without understanding domain-specific
+terminology:
+
+```json
+{
+  "hypothesis_id": "h1",
+  "hypothesis": "Changing X should improve Y because Z.",
+  "change_boundary": {
+    "regions": ["relative.py::symbol"],
+    "kind": "function|class|callsite|dataflow|schema|test|unknown",
+    "minimality_claim": "Why this is the smallest meaningful boundary."
+  },
+  "causal_evidence": [
+    {
+      "source": "code|test|metric|failure|grounding|external",
+      "reference": "relative.py::symbol or artifact id",
+      "claim": "What this evidence supports."
+    }
+  ],
+  "expected_signal": {
+    "validator_kind": "command|metric|unit|manual|unknown",
+    "command_or_metric": "configured command or metric name",
+    "success_condition": "Observable outcome for this hypothesis."
+  },
+  "invariants": ["Behavior or contract that must stay true."],
+  "fallback": {
+    "on_failure": "What axis should be abandoned or revised.",
+    "preserve": ["Evidence or sibling options to keep."]
+  },
+  "why_not_smaller": "Why a narrower boundary would not test the hypothesis."
+}
+```
+
+The schema can be emitted as Markdown sections or JSON-like blocks, but the
+controller should normalize it into a typed `SpecHypothesisOption` before the
+finalizer sees it. Free-form prose that cannot be normalized remains advisory
+only and must not become a task by itself.
+
+#### Controller Contract
+
+The controller must verify each hypothesis option using domain-neutral checks:
+
+- `hypothesis` is non-empty and names a causal claim, not only a task label.
+- `change_boundary.regions` are writable/resolvable according to grounding
+  facts, or the option is marked unusable with a reason.
+- `change_boundary.minimality_claim` exists. The controller does not decide
+  whether the claim is semantically true, but it rejects options with no
+  boundary/minimality argument.
+- `causal_evidence` has at least one non-empty record tied to code, tests,
+  metrics, failures, grounding facts, or allowed external evidence.
+- `expected_signal` maps to configured validators or metric commands. A task
+  must say how success or failure will be observed.
+- `invariants` are present for implementation tasks.
+- `fallback.on_failure` states what axis to abandon or revise. Repeating the
+  same failed cooldown key without a new axis is rejected.
+- `why_not_smaller` exists for broad or structural boundaries. This prevents
+  the model from using a broad task without explaining why the boundary cannot
+  be reduced.
+
+The controller does not:
+
+- invent `change_boundary` fields from domain terms;
+- split a broad option into smaller tasks on its own;
+- infer domain semantics from names such as "slot packer", "parser", or
+  "schema migration";
+- accept a hypothesis only because the prose sounds plausible.
+
+Accepted options become `SpecSynthesisConstraints` input. Rejected options are
+recorded as brief-contract feedback and can be shown to the next
+`SPEC_THINK_BRIEF` rewrite.
+
+#### Finalizer Input
+
+`SPEC_FINALIZE` receives:
+
+- the compact original thinking brief as advisory text;
+- `accepted_hypothesis_options`;
+- `rejected_hypothesis_options` with issue codes;
+- existing deterministic `SpecSynthesisConstraints`;
+- grounding facts and recent failure signatures.
+
+The finalizer must build tasks from accepted options only. Each task should
+carry an explicit link back to the hypothesis option:
+
+```json
+{
+  "task_id": "task-001",
+  "hypothesis_id": "h1",
+  "hypothesis_claim": "...",
+  "expected_signal": {...},
+  "why_this_task_boundary": "..."
+}
+```
+
+If no hypothesis option passes, the controller should either:
+
+- ask for another thinking brief with the contract failures as focus, when
+  SPEC budget remains; or
+- stop/reseed with a diagnostic such as
+  `spec_think_brief_contract_incomplete`.
+
+It should not let the finalizer synthesize a task graph from rejected prose.
+
+#### External Evidence
+
+External search remains optional and controller-owned. If enabled, search
+results can appear as `causal_evidence` with `source=external`, but they must
+obey the same general rules from MVP 7:
+
+- official docs and general technical references are allowed;
+- benchmark-specific solution search, hidden-answer search, and copied answer
+  code are disallowed;
+- external evidence cannot widen writable files, objectives, validators, or
+  acceptance commands.
+
+#### Config
+
+Suggested workflow keys:
+
+```json
+{
+  "spec_hypothesis_brief_enabled": true,
+  "spec_hypothesis_option_min_evidence": 1,
+  "spec_hypothesis_require_expected_signal": true,
+  "spec_hypothesis_require_why_not_smaller_for_structural": true,
+  "spec_hypothesis_max_options": 5,
+  "spec_hypothesis_rewrite_on_contract_failure": true
+}
+```
+
+MVP 8 should keep the existing `spec_thinking_brief_enabled` flag. The new
+flags only control how the selected brief text is normalized and gated before
+finalization.
+
+#### Implementation Seam
+
+MVP 8 fits the current code path without changing normal `_model_chat()`
+behavior:
+
+1. `SPEC_THINK_BRIEF_SYSTEM` / `spec_think_brief_prompt()` should request
+   hypothesis-option sections instead of only "smallest guarded probe
+   candidates".
+2. `_maybe_build_spec_thinking_brief_context()` should still collect
+   `ModelTextParts`, persist `spec_think_brief.md`, and record provider meta.
+   After that, it should call a new normalizer such as
+   `_spec_hypothesis_options_from_brief(brief)`.
+3. The normalizer should persist:
+   - `.local_micro_agent/spec_hypothesis_options.json`
+   - `.local_micro_agent/spec_hypothesis_option_rejections.jsonl`
+4. `_spec_synthesis_constraints_context()` should include accepted options and
+   rejection feedback alongside the existing controller constraints.
+5. `spec_prompt()` / finalizer focus should tell the no-think JSON model to
+   create tasks only from accepted options and to include `hypothesis_id` links.
+6. Existing `_spec_quality_report()` and target-node transaction gates remain
+   authoritative after finalization. MVP 8 adds a pre-finalizer contract; it
+   does not replace post-finalizer quality gates.
+
+#### Tests
+
+| kind | case | expected |
+|---|---|---|
+| normal | thinking brief emits two valid hypothesis options with writable regions and expected signals | both options are normalized, accepted, persisted, and passed to finalizer |
+| normal | finalizer emits tasks linked to accepted `hypothesis_id` values | tasks pass the hypothesis-link gate and persist in `run_spec.json` |
+| edge | option uses domain-specific terminology but has evidence, boundary, expected signal, and fallback | accepted without the controller understanding the terms |
+| edge | option has a broad structural boundary plus a non-empty `why_not_smaller` | allowed to proceed to existing quality/probe gates; not rewritten by controller |
+| edge | brief is free-form Markdown with no parseable options | advisory text is kept, but no task graph is finalized from it |
+| error | option targets non-writable or unresolved regions | rejected with a structured issue; finalizer does not receive it as accepted |
+| error | option has a hypothesis but no expected signal | rejected before finalizer |
+| error | option repeats a banned cooldown key without a new boundary or fallback axis | rejected as repeated failed shape |
+| report | no hypothesis option passes and budget remains | next `SPEC_THINK_BRIEF` focus includes brief-contract failures |
+| report | terminal occurs from incomplete brief contract | terminal/spec report includes accepted/rejected option counts and issue codes |
+
+#### Non-Goals
+
+- Do not make the controller a domain-specific planner.
+- Do not force every hypothesis into a local-edit probe.
+- Do not require all valid tasks to be small; require them to be causally
+  justified, observable, and bounded.
+- Do not let unstructured thinking prose bypass the existing spec quality gate.
+- Do not increase model-call budgets to compensate for malformed brief options.
