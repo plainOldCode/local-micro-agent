@@ -14,6 +14,7 @@ import shlex
 import sys
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,33 @@ from ..validators import parse_json_object
 
 
 _SPEC_JSONL_READ_LIMIT = 1000
+
+
+@dataclass
+class TargetedRewriteTransaction:
+    merged_spec: dict[str, Any]
+    raw_rewrite_spec: dict[str, Any]
+    target_task_id: str
+    target_outcome: str
+    drift_related: bool
+    preserved_sibling_task_ids: list[str]
+    ignored_non_target_task_ids: list[str]
+    schedulable_sibling_count_before: int
+    schedulable_sibling_count_after: int
+    replacement_task_ids: list[str]
+    issues: list[str]
+
+    def telemetry(self) -> dict[str, Any]:
+        return {
+            "target_task_id": self.target_task_id,
+            "target_outcome": self.target_outcome,
+            "drift_related": self.drift_related,
+            "preserved_sibling_task_ids": self.preserved_sibling_task_ids,
+            "ignored_non_target_task_ids": self.ignored_non_target_task_ids,
+            "schedulable_sibling_count_before": self.schedulable_sibling_count_before,
+            "schedulable_sibling_count_after": self.schedulable_sibling_count_after,
+            "replacement_task_ids": self.replacement_task_ids,
+        }
 
 
 class TodoLifecycleMixin:
@@ -144,6 +172,7 @@ class TodoLifecycleMixin:
                 )
                 if not spec:
                     return
+                rewrite_transaction: TargetedRewriteTransaction | None = None
                 preserved_task_ids: list[str] = []
                 self._apply_spec_graph_generation_metadata(
                     spec,
@@ -152,30 +181,30 @@ class TodoLifecycleMixin:
                     parent_graph_id=graph_parent_id,
                 )
                 if targeted_rewrite:
-                    spec, preserved_task_ids = self._merge_targeted_spec_rewrite(
+                    rewrite_transaction = self._targeted_rewrite_transaction(
                         previous_spec,
                         spec,
                         rewrite_target_task_id,
                     )
-                    graph_issues = self._spec_rewrite_graph_contract_issues(
-                        previous_spec,
-                        spec,
-                        rewrite_target_task_id,
-                    )
+                    spec = rewrite_transaction.merged_spec
+                    preserved_task_ids = rewrite_transaction.preserved_sibling_task_ids
+                    graph_issues = rewrite_transaction.issues
                     if graph_issues:
-                        self._append_spec_graph_candidate_event(
-                            spec,
-                            event="candidate_rejected",
-                            status="rejected_graph_contract",
-                            origin=graph_origin,
-                            issues=graph_issues,
-                            parent_graph_id=self._spec_graph_id(previous_spec),
-                        )
-                        self._reject_spec_graph_rewrite(
+                        rejected = self._reject_spec_graph_rewrite(
                             previous_spec,
                             rewrite_target_task_id,
                             graph_issues,
+                            rewrite_transaction=rewrite_transaction,
                         )
+                        if rejected:
+                            self._append_spec_graph_candidate_event(
+                                spec,
+                                event="candidate_rejected",
+                                status="rejected_graph_contract",
+                                origin=graph_origin,
+                                issues=graph_issues,
+                                parent_graph_id=self._spec_graph_id(previous_spec),
+                            )
                         self.state.scratch.pop("spec_rewrite_focus", None)
                         self.state.scratch.pop("spec_rewrite_target_task_id", None)
                         self.state.scratch.pop("spec_graph_generation_origin", None)
@@ -185,6 +214,10 @@ class TodoLifecycleMixin:
                     spec["last_rewrite_target_task_id"] = rewrite_target_task_id
                     if preserved_task_ids:
                         spec["last_rewrite_preserved_task_ids"] = preserved_task_ids
+                    if rewrite_transaction and rewrite_transaction.ignored_non_target_task_ids:
+                        spec["last_rewrite_ignored_non_target_task_ids"] = (
+                            rewrite_transaction.ignored_non_target_task_ids
+                        )
                 quality_report = self._spec_quality_report(
                     spec,
                     attempt=quality_attempt,
@@ -226,6 +259,11 @@ class TodoLifecycleMixin:
                                 "rewrite_mode": "targeted_design_rewrite",
                                 "target_task_id": rewrite_target_task_id,
                                 "preserved_task_ids": preserved_task_ids,
+                                "ignored_non_target_task_ids": (
+                                    rewrite_transaction.ignored_non_target_task_ids
+                                    if rewrite_transaction
+                                    else []
+                                ),
                                 "runnable_tasks_after_merge": len(
                                     self._schedulable_spec_tasks(
                                         spec.get("task_graph", [])
@@ -2665,6 +2703,19 @@ class TodoLifecycleMixin:
         rewrite_spec: dict[str, Any],
         target_task_id: str,
     ) -> tuple[dict[str, Any], list[str]]:
+        transaction = self._targeted_rewrite_transaction(
+            previous_spec,
+            rewrite_spec,
+            target_task_id,
+        )
+        return transaction.merged_spec, transaction.preserved_sibling_task_ids
+
+    def _targeted_rewrite_transaction(
+        self,
+        previous_spec: dict[str, Any],
+        rewrite_spec: dict[str, Any],
+        target_task_id: str,
+    ) -> TargetedRewriteTransaction:
         previous_tasks = [
             task
             for task in previous_spec.get("task_graph", [])
@@ -2683,9 +2734,19 @@ class TodoLifecycleMixin:
             target_origin,
             {str(task.get("task_id") or "") for task in previous_tasks},
         )
-        if not replacement_tasks and additional_tasks:
-            replacement_tasks = additional_tasks
-            additional_tasks = []
+        ignored_non_target_task_ids: list[str] = []
+        for task in rewrite_tasks:
+            task_id = str(task.get("task_id") or "").strip()
+            replaces = str(task.get("replaces_task_id") or "").strip()
+            if not task_id:
+                continue
+            if task_id == target_task_id or replaces in {target_task_id, target_origin}:
+                continue
+            if task_id not in ignored_non_target_task_ids:
+                ignored_non_target_task_ids.append(task_id)
+        drift_related = isinstance(
+            previous_target, dict
+        ) and self._task_requires_drift_material_diversity(previous_target)
         inherited_attempts = 0
         if isinstance(previous_target, dict) and isinstance(
             previous_target.get("design_contract"), dict
@@ -2718,9 +2779,11 @@ class TodoLifecycleMixin:
         merged_tasks: list[dict[str, Any]] = []
         preserved_task_ids: list[str] = []
         inserted_replacements = False
+        target_seen = False
         for previous_task in previous_tasks:
             previous_id = str(previous_task.get("task_id") or "")
             if previous_id == target_task_id:
+                target_seen = True
                 if replacement_tasks:
                     merged_tasks.extend(copy.deepcopy(replacement_tasks))
                     inserted_replacements = True
@@ -2766,12 +2829,107 @@ class TodoLifecycleMixin:
             merged_tasks.append(preserved)
         if replacement_tasks and not inserted_replacements:
             merged_tasks = copy.deepcopy(replacement_tasks) + merged_tasks
-        if additional_tasks:
-            merged_tasks.extend(copy.deepcopy(additional_tasks))
         merged_spec = copy.deepcopy(rewrite_spec)
         merged_spec["task_graph"] = merged_tasks
         merged_spec["progress"] = self._run_spec_progress(merged_spec)
-        return merged_spec, [task_id for task_id in preserved_task_ids if task_id]
+        replacement_task_ids = [
+            str(task.get("task_id") or "")
+            for task in replacement_tasks
+            if str(task.get("task_id") or "").strip()
+        ]
+        schedulable_siblings_before = [
+            task
+            for task in self._schedulable_spec_tasks(previous_tasks)
+            if str(task.get("task_id") or "") != target_task_id
+        ]
+        schedulable_siblings_after = [
+            task
+            for task in self._schedulable_spec_tasks(merged_tasks)
+            if str(task.get("task_id") or "") != target_task_id
+            and str(task.get("replaces_task_id") or "") != target_origin
+        ]
+        issues = self._targeted_rewrite_transaction_issues(
+            previous_tasks=previous_tasks,
+            merged_tasks=merged_tasks,
+            replacement_tasks=replacement_tasks,
+            target_task_id=target_task_id,
+            target_seen=target_seen,
+            schedulable_sibling_count_before=len(schedulable_siblings_before),
+            schedulable_sibling_count_after=len(schedulable_siblings_after),
+        )
+        if not target_seen:
+            target_outcome = "missing_target"
+        elif replacement_tasks:
+            target_outcome = "replaced"
+        else:
+            target_outcome = "omitted"
+        return TargetedRewriteTransaction(
+            merged_spec=merged_spec,
+            raw_rewrite_spec=copy.deepcopy(rewrite_spec),
+            target_task_id=target_task_id,
+            target_outcome=target_outcome,
+            drift_related=drift_related,
+            preserved_sibling_task_ids=[
+                task_id for task_id in preserved_task_ids if task_id
+            ],
+            ignored_non_target_task_ids=ignored_non_target_task_ids,
+            schedulable_sibling_count_before=len(schedulable_siblings_before),
+            schedulable_sibling_count_after=len(schedulable_siblings_after),
+            replacement_task_ids=replacement_task_ids,
+            issues=issues,
+        )
+
+    def _targeted_rewrite_transaction_issues(
+        self,
+        *,
+        previous_tasks: list[dict[str, Any]],
+        merged_tasks: list[dict[str, Any]],
+        replacement_tasks: list[dict[str, Any]],
+        target_task_id: str,
+        target_seen: bool,
+        schedulable_sibling_count_before: int,
+        schedulable_sibling_count_after: int,
+    ) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        if workflow.get("spec_rewrite_graph_gate", True) is False:
+            return []
+        issues: list[str] = []
+        if not target_seen:
+            issues.append(
+                "targeted SPEC rewrite target task was not found in previous graph"
+            )
+            return issues
+        if not replacement_tasks:
+            issues.append("targeted SPEC rewrite omitted target replacement")
+        issues.extend(
+            self._targeted_rewrite_material_diversity_issues(
+                previous_tasks,
+                replacement_tasks,
+                target_task_id,
+            )
+        )
+        runnable = self._schedulable_spec_tasks(merged_tasks)
+        if not runnable:
+            issues.append("targeted SPEC rewrite produced no schedulable task")
+        if schedulable_sibling_count_after < schedulable_sibling_count_before:
+            issues.append("targeted SPEC rewrite reduced schedulable sibling count")
+        if self._spec_tactic_portfolio_enabled():
+            min_runnable = int(workflow.get("spec_rewrite_min_runnable_tasks", 2) or 2)
+            if schedulable_sibling_count_before and len(runnable) < min_runnable:
+                issues.append(
+                    "targeted SPEC rewrite collapsed portfolio below "
+                    f"{min_runnable} runnable tasks"
+                )
+        if len(runnable) == 1:
+            task = runnable[0]
+            if (
+                str(task.get("risk_level") or "") == "structural"
+                and self._structural_probe_scope_too_broad(str(task.get("edit_scope") or ""))
+            ):
+                issues.append(
+                    "targeted SPEC rewrite left only one broad structural task"
+                )
+        return issues
 
     @staticmethod
     def _spec_task_by_id(tasks: list[dict[str, Any]], task_id: str) -> dict[str, Any] | None:
@@ -2824,79 +2982,11 @@ class TodoLifecycleMixin:
         rewrite_spec: dict[str, Any],
         target_task_id: str,
     ) -> list[str]:
-        workflow = self.config.get("workflow", {})
-        if workflow.get("spec_rewrite_graph_gate", True) is False:
-            return []
-        previous_tasks = [
-            task
-            for task in previous_spec.get("task_graph", [])
-            if isinstance(task, dict)
-        ]
-        rewritten_tasks = [
-            task
-            for task in rewrite_spec.get("task_graph", [])
-            if isinstance(task, dict)
-        ]
-        issues: list[str] = []
-        rewritten_ids = {
-            str(task.get("task_id") or "")
-            for task in rewritten_tasks
-            if str(task.get("task_id") or "")
-        }
-        previous_sibling_ids = [
-            str(task.get("task_id") or "")
-            for task in previous_tasks
-            if str(task.get("task_id") or "")
-            and str(task.get("task_id") or "") != target_task_id
-            and str(task.get("status", "open"))
-            in {
-                "open",
-                "deferred",
-                "in_progress",
-                "needs_design",
-                "needs_contract_rewrite",
-            }
-        ]
-        missing_siblings = [
-            task_id for task_id in previous_sibling_ids if task_id not in rewritten_ids
-        ]
-        if missing_siblings:
-            issues.append(
-                "targeted SPEC rewrite dropped runnable sibling tasks: "
-                + ", ".join(missing_siblings[:6])
-            )
-        issues.extend(
-            self._targeted_rewrite_material_diversity_issues(
-                previous_tasks,
-                rewritten_tasks,
-                target_task_id,
-            )
-        )
-        runnable = self._schedulable_spec_tasks(rewritten_tasks)
-        if not runnable:
-            issues.append("targeted SPEC rewrite produced no schedulable task")
-        if self._spec_tactic_portfolio_enabled():
-            min_runnable = int(workflow.get("spec_rewrite_min_runnable_tasks", 2) or 2)
-            prior_runnable_siblings = [
-                task
-                for task in self._schedulable_spec_tasks(previous_tasks)
-                if str(task.get("task_id") or "") != target_task_id
-            ]
-            if prior_runnable_siblings and len(runnable) < min_runnable:
-                issues.append(
-                    "targeted SPEC rewrite collapsed portfolio below "
-                    f"{min_runnable} runnable tasks"
-                )
-        if len(runnable) == 1:
-            task = runnable[0]
-            if (
-                str(task.get("risk_level") or "") == "structural"
-                and self._structural_probe_scope_too_broad(str(task.get("edit_scope") or ""))
-            ):
-                issues.append(
-                    "targeted SPEC rewrite left only one broad structural task"
-                )
-        return issues
+        return self._targeted_rewrite_transaction(
+            previous_spec,
+            rewrite_spec,
+            target_task_id,
+        ).issues
 
     def _targeted_rewrite_material_diversity_issues(
         self,
@@ -2967,7 +3057,9 @@ class TodoLifecycleMixin:
         previous_spec: dict[str, Any],
         target_task_id: str,
         issues: list[str],
-    ) -> None:
+        *,
+        rewrite_transaction: TargetedRewriteTransaction | None = None,
+    ) -> bool:
         spec = copy.deepcopy(previous_spec)
         tasks = spec.get("task_graph")
         target_task = None
@@ -2976,46 +3068,86 @@ class TodoLifecycleMixin:
                 if isinstance(task, dict) and str(task.get("task_id") or "") == target_task_id:
                     target_task = task
                     break
-        if isinstance(target_task, dict):
-            target_task["status"] = "deferred_design_invalid"
-            target_task["design_contract"] = {
-                "status": "deferred_design_invalid",
+        if not isinstance(target_task, dict):
+            return False
+        drift_related = (
+            rewrite_transaction.drift_related
+            if rewrite_transaction is not None
+            else self._task_requires_drift_material_diversity(target_task)
+        )
+        target_status = (
+            "deferred_contract_drift" if drift_related else "deferred_design_invalid"
+        )
+        telemetry = (
+            rewrite_transaction.telemetry()
+            if rewrite_transaction is not None
+            else {
+                "target_task_id": target_task_id,
+                "preserved_sibling_task_ids": [],
+                "ignored_non_target_task_ids": [],
+                "schedulable_sibling_count_before": 0,
+                "schedulable_sibling_count_after": 0,
+                "replacement_task_ids": [],
+            }
+        )
+        target_task["status"] = target_status
+        target_task["decision_hint"] = (
+            "targeted_rewrite_rejected_preserve_siblings: targeted SPEC rewrite "
+            "failed target-local graph/material checks. Defer only this target and "
+            "continue with preserved sibling or backtrack frontier."
+        )
+        record_key = "contract_rewrite" if drift_related else "design_contract"
+        record = target_task.get(record_key)
+        if not isinstance(record, dict):
+            record = {}
+        record.update(
+            {
+                "status": target_status,
+                "reason": "targeted_rewrite_graph_rejected",
                 "issues": issues,
                 "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }
-            target_task["decision_hint"] = (
-                "graph_rewrite_rejected: SPEC rewrite would collapse or delete "
-                "the runnable portfolio. Defer this design-invalid task while the "
-                "controller tries a sibling graph or reseed with a materially "
-                "narrower replacement."
-            )
-            spec["active_task_id"] = None
-            spec["last_design_contract_issues"] = {
-                "task_id": target_task.get("task_id"),
-                "issues": issues,
-                "graph_rewrite_rejected": True,
-            }
+        )
+        target_task[record_key] = record
+        spec["active_task_id"] = None
+        spec["last_targeted_rewrite_rejected"] = {
+            "task_id": target_task.get("task_id"),
+            "issues": issues,
+            "reason": "targeted_rewrite_graph_rejected",
+            **telemetry,
+        }
         self._persist_run_spec(spec)
+        event_extra = {
+            "reason": "targeted_rewrite_graph_rejected",
+            "action": "defer_target_preserve_siblings",
+            "issues": issues,
+            **telemetry,
+        }
         self._append_spec_progress_event(
-            "graph_rewrite_rejected",
+            "drift_recovery" if drift_related else "design_rejected",
             spec,
             target_task,
-            extra={"issues": issues, "target_task_id": target_task_id},
+            extra=event_extra,
         )
         self._append_failure_signature(
-            phase="graph_rewrite",
+            phase="active_task" if drift_related else "graph_rewrite",
             spec=spec,
             task=target_task,
-            status="graph_rewrite_rejected",
-            failure_class="design_rewrite_invalid",
+            status=target_status,
+            failure_class=(
+                "active_task_drift" if drift_related else "design_rewrite_invalid"
+            ),
             issue_code=self._failure_issue_code(issues),
-            issue_scope="spec_graph",
+            issue_scope="target_task",
             summary="; ".join(issues),
-            extra={"issues": issues, "target_task_id": target_task_id},
+            extra=event_extra,
         )
         self.state.notes.append(
-            "Rejected SPEC graph rewrite: " + "; ".join(issues)
+            "Rejected targeted SPEC rewrite as target-local failure: "
+            + "; ".join(issues)
         )
+        self.state.current = AgentStateName.SCHEDULE
+        return True
 
     def _defer_targeted_rewrite_for_reseed_reserve(
         self,
@@ -3100,6 +3232,20 @@ class TodoLifecycleMixin:
         if not issue_codes:
             issue_codes = ["quality_gate_failed"]
         drift_related = self._task_requires_drift_material_diversity(target_task)
+        preserved_sibling_task_ids = [
+            str(task.get("task_id") or "")
+            for task in tasks
+            if isinstance(task, dict)
+            and str(task.get("task_id") or "")
+            and str(task.get("task_id") or "") != target_task_id
+        ]
+        schedulable_sibling_count = len(
+            [
+                task
+                for task in self._schedulable_spec_tasks(tasks)
+                if str(task.get("task_id") or "") != target_task_id
+            ]
+        )
         target_task["status"] = (
             "deferred_contract_drift" if drift_related else "deferred_design_invalid"
         )
@@ -3132,10 +3278,15 @@ class TodoLifecycleMixin:
         self._persist_run_spec(spec)
         event_extra = {
             "reason": "quality_gate_rejected",
-            "action": "targeted_rewrite_quality_rejected",
+            "action": "defer_target_preserve_siblings",
+            "targeted_rewrite_action": "targeted_rewrite_quality_rejected",
             "target_task_id": target_task_id,
             "quality_issue_codes": issue_codes,
             "quality_attempt": quality_report.get("attempt"),
+            "preserved_sibling_task_ids": preserved_sibling_task_ids,
+            "ignored_non_target_task_ids": [],
+            "schedulable_sibling_count_before": schedulable_sibling_count,
+            "schedulable_sibling_count_after": schedulable_sibling_count,
         }
         self._append_spec_progress_event(
             "drift_recovery" if drift_related else "design_rejected",
@@ -3150,7 +3301,7 @@ class TodoLifecycleMixin:
             status=str(target_task.get("status") or ""),
             failure_class="active_task_drift" if drift_related else "design_rewrite_invalid",
             issue_code=issue_codes[0],
-            issue_scope="candidate_delta" if drift_related else "spec_graph",
+            issue_scope="target_task",
             summary=str(target_task.get("decision_hint") or ""),
             extra=event_extra,
         )
@@ -3328,6 +3479,12 @@ class TodoLifecycleMixin:
             return "portfolio_collapsed_below_min_runnable"
         if "dropped runnable sibling" in joined:
             return "dropped_runnable_sibling_tasks"
+        if "omitted target replacement" in joined:
+            return "omitted_target_replacement"
+        if "target task was not found" in joined:
+            return "target_task_missing"
+        if "reduced schedulable sibling count" in joined:
+            return "schedulable_sibling_count_reduced"
         if "no schedulable task" in joined:
             return "no_schedulable_task"
         if not texts:
@@ -6255,6 +6412,35 @@ class TodoLifecycleMixin:
                     ).lower(),
                 ]
             )
+        targeted_rewrite_summary = self._terminal_targeted_rewrite_summary()
+        if targeted_rewrite_summary.get("targeted_rewrite_target_local_rejection_count"):
+            lines.extend(
+                [
+                    "",
+                    "## Targeted Rewrite Recovery",
+                    "",
+                    "- target_local_rejection_count: "
+                    + str(
+                        targeted_rewrite_summary.get(
+                            "targeted_rewrite_target_local_rejection_count", 0
+                        )
+                    ),
+                    "- preserved_sibling_task_ids: "
+                    + json.dumps(
+                        targeted_rewrite_summary.get(
+                            "targeted_rewrite_preserved_sibling_task_ids", []
+                        ),
+                        ensure_ascii=False,
+                    ),
+                    "- ignored_non_target_task_ids: "
+                    + json.dumps(
+                        targeted_rewrite_summary.get(
+                            "targeted_rewrite_ignored_non_target_task_ids", []
+                        ),
+                        ensure_ascii=False,
+                    ),
+                ]
+            )
         failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
         if failure_signatures:
             class_counts = self._count_jsonl_values(
@@ -6331,6 +6517,9 @@ class TodoLifecycleMixin:
             tasks,
             spec_events,
         )
+        targeted_rewrite_summary = self._terminal_targeted_rewrite_summary(
+            spec_events,
+        )
         failure_signatures = self._read_spec_jsonl(self._failure_signature_path())
         graph_candidates = self._read_spec_jsonl(self._spec_graph_candidates_path())
         search = spec.get("search") if isinstance(spec.get("search"), dict) else {}
@@ -6394,6 +6583,7 @@ class TodoLifecycleMixin:
         }
         terminal.update(drift_recovery_summary)
         terminal.update(portfolio_recovery_summary)
+        terminal.update(targeted_rewrite_summary)
         if survivor:
             terminal["survivor"] = survivor
         if trajectory_quality:
@@ -6565,6 +6755,45 @@ class TodoLifecycleMixin:
                 duplicate_rewrite_rejections
             ),
             "spec_budget_saved_by_drift_backoff": saved_budget,
+        }
+
+    def _terminal_targeted_rewrite_summary(
+        self,
+        spec_events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if spec_events is None:
+            spec_events = self._read_spec_jsonl(
+                self._workflow_artifact_path(
+                    "spec_progress_path", ".local_micro_agent/spec_progress.jsonl"
+                )
+            )
+        target_local_events = [
+            event
+            for event in spec_events
+            if isinstance(event, dict)
+            and str(event.get("action")) == "defer_target_preserve_siblings"
+        ]
+        preserved_ids: list[str] = []
+        ignored_ids: list[str] = []
+        for event in target_local_events:
+            preserved_ids.extend(
+                str(task_id)
+                for task_id in event.get("preserved_sibling_task_ids", [])
+                if str(task_id).strip()
+            )
+            ignored_ids.extend(
+                str(task_id)
+                for task_id in event.get("ignored_non_target_task_ids", [])
+                if str(task_id).strip()
+            )
+        return {
+            "targeted_rewrite_target_local_rejection_count": len(target_local_events),
+            "targeted_rewrite_preserved_sibling_task_ids": sorted(
+                dict.fromkeys(preserved_ids)
+            ),
+            "targeted_rewrite_ignored_non_target_task_ids": sorted(
+                dict.fromkeys(ignored_ids)
+            ),
         }
 
     def _count_drift_regions(

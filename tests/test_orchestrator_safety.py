@@ -5900,6 +5900,7 @@ Background / non-constraints
                         "task_graph": [
                             {
                                 "task_id": "task-099",
+                                "replaces_task_id": "task-001",
                                 "title": "Narrow replacement",
                                 "deliverables": ["target.py"],
                                 "target_symbols": ["target"],
@@ -6103,6 +6104,7 @@ Background / non-constraints
                         "task_graph": [
                             {
                                 "task_id": "task-999",
+                                "replaces_task_id": "task-001",
                                 "title": "Broad structural replacement",
                                 "deliverables": ["target.py"],
                                 "target_symbols": ["target"],
@@ -6144,7 +6146,8 @@ Background / non-constraints
                     "deferred_design_invalid",
                 )
                 progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
-                self.assertIn('"event": "graph_rewrite_rejected"', progress)
+                self.assertIn('"event": "design_rejected"', progress)
+                self.assertIn('"action": "defer_target_preserve_siblings"', progress)
                 self.assertIn("only one broad structural task", progress)
                 graph_events = [
                     json.loads(line)
@@ -6176,7 +6179,7 @@ Background / non-constraints
                     signature["issue_code"],
                     "single_broad_structural_task",
                 )
-                self.assertEqual(signature["issue_scope"], "spec_graph")
+                self.assertEqual(signature["issue_scope"], "target_task")
                 self.assertIn(
                     "structural_probe:single_broad_structural_task",
                     signature["cooldown_key"],
@@ -6269,6 +6272,7 @@ Background / non-constraints
                         "task_graph": [
                             {
                                 "task_id": "task-099",
+                                "replaces_task_id": "task-001",
                                 "title": "Missing target region",
                                 "deliverables": ["target.py"],
                                 "target_symbols": ["target"],
@@ -6300,6 +6304,7 @@ Background / non-constraints
                         "task_graph": [
                             {
                                 "task_id": "task-099",
+                                "replaces_task_id": "task-001",
                                 "title": "Fixed replacement",
                                 "deliverables": ["target.py"],
                                 "target_symbols": ["target"],
@@ -6453,6 +6458,7 @@ Background / non-constraints
                         "task_graph": [
                             {
                                 "task_id": "task-099",
+                                "replaces_task_id": "task-001",
                                 "title": "Missing target region",
                                 "deliverables": ["target.py"],
                                 "target_symbols": ["target"],
@@ -6498,7 +6504,11 @@ Background / non-constraints
                 )
                 self.assertEqual(len(models.seen["reasoner"]), 1)
                 progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
-                self.assertIn('"action": "targeted_rewrite_quality_rejected"', progress)
+                self.assertIn('"action": "defer_target_preserve_siblings"', progress)
+                self.assertIn(
+                    '"targeted_rewrite_action": "targeted_rewrite_quality_rejected"',
+                    progress,
+                )
                 self.assertIn('"quality_issue_codes": ["target_region_count"]', progress)
                 signatures = [
                     json.loads(line)
@@ -6510,6 +6520,7 @@ Background / non-constraints
                 self.assertEqual(signatures[-1]["phase"], "graph_rewrite")
                 self.assertEqual(signatures[-1]["failure_class"], "design_rewrite_invalid")
                 self.assertEqual(signatures[-1]["issue_code"], "target_region_count")
+                self.assertEqual(signatures[-1]["issue_scope"], "target_task")
 
                 agent._schedule_spec_task()
 
@@ -6589,6 +6600,7 @@ Background / non-constraints
             self.assertEqual(signature["phase"], "active_task")
             self.assertEqual(signature["failure_class"], "active_task_drift")
             self.assertEqual(signature["issue_code"], "target_region_count")
+            self.assertEqual(signature["issue_scope"], "target_task")
 
     def test_targeted_rewrite_quality_failure_missing_target_is_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6649,6 +6661,391 @@ Background / non-constraints
             self.assertFalse((artifact_dir / "spec_progress.jsonl").exists())
             self.assertFalse((artifact_dir / "failure_signatures.jsonl").exists())
             self.assertNotEqual(agent.state.current, AgentStateName.SCHEDULE)
+
+    def test_targeted_graph_rewrite_missing_target_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "previous",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "title": "Only task",
+                            "status": "open",
+                            "target_regions": ["target.py::target"],
+                        }
+                    ],
+                }
+            )
+
+            rejected = agent._reject_spec_graph_rewrite(
+                previous_spec,
+                "task-404",
+                ["targeted SPEC rewrite target task was not found in previous graph"],
+            )
+
+            self.assertFalse(rejected)
+            self.assertFalse((artifact_dir / "run_spec.json").exists())
+            self.assertFalse((artifact_dir / "spec_progress.jsonl").exists())
+            self.assertFalse((artifact_dir / "failure_signatures.jsonl").exists())
+            self.assertNotEqual(agent.state.current, AgentStateName.SCHEDULE)
+
+    def test_targeted_rewrite_transaction_preserves_sibling_and_ignores_non_target_tasks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "previous",
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "status": "needs_contract_rewrite",
+                            "target_regions": ["target.py::parse_item"],
+                            "tactic_stage": "local_edit",
+                            "deliverables": ["target.py"],
+                            "validator": {"kind": "command"},
+                        },
+                        {
+                            "task_id": "task-002",
+                            "status": "open",
+                            "target_regions": ["target.py::format_item"],
+                            "budget": {"attempts_used": 1, "attempts_max": 3},
+                            "last_observation": {"failure_class": "no_improvement"},
+                        },
+                    ],
+                }
+            )
+            rewrite_spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "rewrite",
+                    "task_graph": [
+                        {
+                            "task_id": "task-099",
+                            "replaces_task_id": "task-001",
+                            "status": "open",
+                            "target_regions": ["target.py::parse_helper"],
+                            "tactic_stage": "local_edit",
+                            "deliverables": ["target.py"],
+                            "validator": {"kind": "command"},
+                        },
+                        {
+                            "task_id": "task-new",
+                            "status": "open",
+                            "target_regions": ["target.py::unrelated"],
+                        },
+                    ],
+                }
+            )
+
+            transaction = agent._targeted_rewrite_transaction(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertEqual(transaction.replacement_task_ids, ["task-099"])
+            self.assertEqual(transaction.ignored_non_target_task_ids, ["task-new"])
+            self.assertEqual(transaction.preserved_sibling_task_ids, ["task-002"])
+            self.assertEqual(transaction.issues, [])
+            merged_tasks = transaction.merged_spec["task_graph"]
+            self.assertEqual([task["task_id"] for task in merged_tasks], ["task-099", "task-002"])
+            self.assertEqual(merged_tasks[1]["budget"]["attempts_used"], 1)
+            self.assertEqual(
+                merged_tasks[1]["last_observation"]["failure_class"],
+                "no_improvement",
+            )
+
+    def test_targeted_graph_reject_defers_target_and_reports_preserved_siblings(
+        self,
+    ) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                            "spec_report_path": ".local_micro_agent/spec_report.md",
+                            "spec_terminal_state_path": ".local_micro_agent/terminal_state.json",
+                            "spec_tactic_portfolio": True,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "Target",
+                                "status": "needs_design",
+                                "target_regions": ["target.py::target"],
+                            },
+                            {
+                                "task_id": "task-002",
+                                "title": "Sibling",
+                                "status": "open",
+                                "target_regions": ["target.py::sibling"],
+                            },
+                        ],
+                    }
+                )
+                collapsed_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "collapsed",
+                        "task_graph": [
+                            {
+                                "task_id": "task-099",
+                                "replaces_task_id": "task-001",
+                                "status": "closed",
+                                "target_regions": ["target.py::target"],
+                            }
+                        ],
+                    }
+                )
+                agent.models = _StaticModelManager(collapsed_rewrite)
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                artifact_dir = repo / ".local_micro_agent"
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                self.assertEqual(persisted["task_graph"][0]["status"], "deferred_design_invalid")
+                self.assertEqual(persisted["task_graph"][1]["status"], "open")
+                self.assertEqual(
+                    persisted["last_targeted_rewrite_rejected"]["preserved_sibling_task_ids"],
+                    ["task-002"],
+                )
+                progress = (artifact_dir / "spec_progress.jsonl").read_text()
+                self.assertIn('"event": "design_rejected"', progress)
+                self.assertIn('"action": "defer_target_preserve_siblings"', progress)
+                self.assertIn("portfolio below", progress)
+                self.assertNotIn('"event": "graph_reseed_requested"', progress)
+                graph_events = [
+                    json.loads(line)
+                    for line in (artifact_dir / "spec_graph_candidates.jsonl").read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(graph_events[-1]["issue_codes"], ["portfolio_collapsed_below_min_runnable"])
+
+                agent._schedule_spec_task()
+                self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+                self.assertEqual(agent.state.scratch["active_todo"]["spec_task_id"], "task-002")
+                agent._persist_spec_report()
+
+                terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+                self.assertEqual(terminal["targeted_rewrite_target_local_rejection_count"], 1)
+                self.assertEqual(
+                    terminal["targeted_rewrite_preserved_sibling_task_ids"],
+                    ["task-002"],
+                )
+                report = (artifact_dir / "spec_report.md").read_text()
+                self.assertIn("## Targeted Rewrite Recovery", report)
+                self.assertIn("target_local_rejection_count: 1", report)
+
+        asyncio.run(run_case())
+
+    def test_targeted_drift_material_reject_defers_only_target(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "status": "needs_contract_rewrite",
+                                "target_regions": ["target.py::target"],
+                                "tactic_stage": "local_edit",
+                                "deliverables": ["target.py"],
+                                "validator": {"kind": "command"},
+                            },
+                            {
+                                "task_id": "task-002",
+                                "status": "open",
+                                "target_regions": ["target.py::sibling"],
+                            },
+                        ],
+                    }
+                )
+                repeated_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "repeated",
+                        "task_graph": [
+                            {
+                                "task_id": "task-099",
+                                "replaces_task_id": "task-001",
+                                "status": "open",
+                                "target_regions": ["target.py::target"],
+                                "tactic_stage": "local_edit",
+                                "deliverables": ["target.py"],
+                                "validator": {"kind": "command"},
+                            }
+                        ],
+                    }
+                )
+                agent.models = _StaticModelManager(repeated_rewrite)
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                artifact_dir = repo / ".local_micro_agent"
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                self.assertEqual(persisted["task_graph"][0]["status"], "deferred_contract_drift")
+                self.assertEqual(persisted["task_graph"][1]["status"], "open")
+                progress = (artifact_dir / "spec_progress.jsonl").read_text()
+                self.assertIn('"event": "drift_recovery"', progress)
+                self.assertIn('"action": "defer_target_preserve_siblings"', progress)
+                self.assertNotIn('"event": "graph_reseed_requested"', progress)
+                signature = json.loads(
+                    (artifact_dir / "failure_signatures.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(signature["failure_class"], "active_task_drift")
+                self.assertEqual(signature["issue_scope"], "target_task")
+
+                agent._schedule_spec_task()
+                self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+                self.assertEqual(agent.state.scratch["active_todo"]["spec_task_id"], "task-002")
+
+        asyncio.run(run_case())
+
+    def test_targeted_rewrite_unrelated_additional_task_is_not_promoted(
+        self,
+    ) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                previous_spec = agent._normalize_run_spec(
+                    {
+                        "version": 2,
+                        "spec_id": "previous",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "status": "needs_design",
+                                "target_regions": ["target.py::target"],
+                            },
+                            {
+                                "task_id": "task-002",
+                                "status": "open",
+                                "target_regions": ["target.py::sibling"],
+                            },
+                        ],
+                    }
+                )
+                unrelated_rewrite = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "unrelated",
+                        "task_graph": [
+                            {
+                                "task_id": "task-new",
+                                "status": "open",
+                                "target_regions": ["target.py::unrelated"],
+                            }
+                        ],
+                    }
+                )
+                agent.models = _StaticModelManager(unrelated_rewrite)
+                agent.state.scratch["run_spec"] = previous_spec
+                agent.state.scratch["spec_rewrite_focus"] = "rewrite task-001"
+                agent.state.scratch["spec_rewrite_target_task_id"] = "task-001"
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                artifact_dir = repo / ".local_micro_agent"
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                self.assertEqual(
+                    [task["task_id"] for task in persisted["task_graph"]],
+                    ["task-001", "task-002"],
+                )
+                self.assertEqual(persisted["task_graph"][0]["status"], "deferred_design_invalid")
+                self.assertEqual(
+                    persisted["last_targeted_rewrite_rejected"]["ignored_non_target_task_ids"],
+                    ["task-new"],
+                )
+                progress = (artifact_dir / "spec_progress.jsonl").read_text()
+                self.assertIn('"ignored_non_target_task_ids": ["task-new"]', progress)
+                self.assertIn("omitted target replacement", progress)
+                self.assertNotIn("task-new\", \"task-002", json.dumps(persisted))
+
+        asyncio.run(run_case())
 
     def test_spec_design_failure_memory_context_summarizes_rejected_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
