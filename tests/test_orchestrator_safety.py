@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import shlex
@@ -2699,6 +2700,123 @@ Background / non-constraints
             progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
             self.assertIn('"event": "graph_backtracked"', progress_events)
 
+    def test_spec_mode_selects_lowest_scored_backtrackable_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            sidecar_dir = artifact_dir / "spec_graph_candidates"
+            sidecar_dir.mkdir(parents=True)
+            current_spec = {
+                "version": 2,
+                "spec_id": "current",
+                "search": {"graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "invalid design",
+                        "status": "deferred_design_invalid",
+                        "deliverables": ["target.py"],
+                    }
+                ],
+            }
+            cooled_region = "target.py::cooled_probe"
+            cooled_hash = hashlib.sha1(cooled_region.encode("utf-8")).hexdigest()[:8]
+            first_valid_but_cooled = {
+                "version": 2,
+                "spec_id": "cooled",
+                "search": {"graph_id": "graph-0002", "parent_graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-101",
+                        "title": "cooled sibling",
+                        "deliverables": ["target.py"],
+                        "target_regions": [cooled_region],
+                        "tactic_stage": "local_edit",
+                    }
+                ],
+            }
+            later_clean = {
+                "version": 2,
+                "spec_id": "clean",
+                "search": {"graph_id": "graph-0003", "parent_graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-201",
+                        "title": "clean sibling",
+                        "deliverables": ["target.py"],
+                        "target_regions": ["target.py::clean_probe"],
+                        "tactic_stage": "local_edit",
+                    }
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(current_spec) + "\n")
+            (sidecar_dir / "graph-0002.json").write_text(
+                json.dumps(first_valid_but_cooled) + "\n"
+            )
+            (sidecar_dir / "graph-0003.json").write_text(json.dumps(later_clean) + "\n")
+            (artifact_dir / "failure_signatures.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": "failure_signature.v1",
+                        "cooldown_key": f"{cooled_hash}:local_edit:active_task_drift",
+                    }
+                )
+                + "\n"
+            )
+            (artifact_dir / "spec_graph_candidates.jsonl").write_text(
+                "\n".join(
+                    json.dumps(record)
+                    for record in (
+                        {
+                            "schema": "spec_graph_candidate.v1",
+                            "event": "candidate_created",
+                            "status": "backtrackable",
+                            "origin": "test",
+                            "graph_id": "graph-0002",
+                            "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0002.json",
+                        },
+                        {
+                            "schema": "spec_graph_candidate.v1",
+                            "event": "candidate_created",
+                            "status": "backtrackable",
+                            "origin": "test",
+                            "graph_id": "graph-0003",
+                            "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0003.json",
+                        },
+                    )
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_graph_reseed_attempts": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["spec_id"], "clean")
+            progress_events = [
+                json.loads(line)
+                for line in (artifact_dir / "spec_progress.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            backtracked = progress_events[-1]
+            self.assertEqual(backtracked["event"], "graph_backtracked")
+            self.assertEqual(backtracked["selected_graph_id"], "graph-0003")
+            self.assertEqual(backtracked["selection_score"]["cooldown_hits"], 0)
+
     def test_spec_mode_rejects_stale_backtrackable_graph_and_requests_reseed(
         self,
     ) -> None:
@@ -2822,6 +2940,60 @@ Background / non-constraints
                 "reseed_after_graph_frontier_exhausted",
             )
             self.assertEqual(graph_events[-1]["parent_graph_id"], "graph-0001")
+
+    def test_spec_graph_reseed_focus_caps_exhausted_task_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_graph_reseed_task_summary_limit": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            tasks = [
+                {
+                    "task_id": f"task-{index:03d}",
+                    "title": f"Task {index}",
+                    "status": "deferred_design_invalid",
+                    "target_regions": [f"target.py::region_{index}"],
+                }
+                for index in range(5)
+            ]
+
+            focus = agent._spec_graph_reseed_focus(
+                {"version": 2, "spec_id": "current", "task_graph": tasks},
+                tasks,
+                reseed_attempt=1,
+                reseed_attempts_max=2,
+                cooldown_keys=[],
+            )
+
+            self.assertNotIn("task-000", focus)
+            self.assertNotIn("task-002", focus)
+            self.assertIn("task-003", focus)
+            self.assertIn("task-004", focus)
+
+    def test_spec_jsonl_reader_keeps_recent_records_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text(
+                "\n".join(json.dumps({"index": index}) for index in range(1005))
+                + "\n"
+            )
+
+            capped = MicroAgent._read_spec_jsonl(path)
+            uncapped = MicroAgent._read_spec_jsonl(path, limit=None)
+
+            self.assertEqual(len(capped), 1000)
+            self.assertEqual(capped[0]["index"], 5)
+            self.assertEqual(capped[-1]["index"], 1004)
+            self.assertEqual(len(uncapped), 1005)
 
     def test_spec_reseed_candidate_count_records_backtrackable_variants(self) -> None:
         async def run_case() -> None:

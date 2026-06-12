@@ -13,6 +13,7 @@ import re
 import shlex
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ from ..decisions import CodeCandidate
 from ..prompts import acceptance_synth_prompt, spec_idea_prompt, spec_prompt
 from ..state import AgentStateName, CodeChange, FileSnapshot, TestResult
 from ..validators import parse_json_object
+
+
+_SPEC_JSONL_READ_LIMIT = 1000
 
 
 class TodoLifecycleMixin:
@@ -1899,7 +1903,11 @@ class TodoLifecycleMixin:
             "spec_id": spec.get("spec_id"),
             "loop": self.state.loop_count,
             "fsm_step": self.state.fsm_step_count,
-            "score": self._spec_graph_candidate_score(spec, quality_report),
+            "score": self._spec_graph_candidate_score(
+                spec,
+                quality_report,
+                exclude_graph_id=graph_id,
+            ),
             "graph_signature": self._spec_graph_signature(spec),
             "issue_codes": issue_codes,
             "spec_sidecar_path": str(
@@ -1953,6 +1961,8 @@ class TodoLifecycleMixin:
         self,
         spec: dict[str, Any],
         quality_report: dict[str, Any] | None = None,
+        *,
+        exclude_graph_id: str = "",
     ) -> dict[str, int]:
         tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
         issues = (
@@ -1970,9 +1980,73 @@ class TodoLifecycleMixin:
             "design_issues": sum(
                 1 for code in issue_codes if str(code).startswith("design_contract_")
             ),
-            "cooldown_hits": 0,
-            "duplicate_hits": 0,
+            "cooldown_hits": self._spec_graph_cooldown_hits(spec),
+            "duplicate_hits": self._spec_graph_duplicate_hits(
+                spec,
+                exclude_graph_id=exclude_graph_id,
+            ),
         }
+
+    def _spec_graph_cooldown_hits(self, spec: dict[str, Any]) -> int:
+        cooldown_keys = self._current_failure_cooldown_keys()
+        if not cooldown_keys:
+            return 0
+        cooldown_prefixes = {
+            ":".join(key.split(":")[:2]) + ":"
+            for key in cooldown_keys
+            if len(key.split(":")) >= 2
+        }
+        if not cooldown_prefixes:
+            return 0
+        tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+        hits = 0
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            region_hash = self._failure_signature_target_region_hash(
+                self._failure_signature_list(task.get("target_regions")),
+                target_symbols=self._failure_signature_list(task.get("target_symbols")),
+            )
+            tactic = str(task.get("tactic_stage") or "tactic-unknown")
+            if f"{region_hash}:{tactic}:" in cooldown_prefixes:
+                hits += 1
+        return hits
+
+    def _spec_graph_duplicate_hits(
+        self,
+        spec: dict[str, Any],
+        *,
+        exclude_graph_id: str = "",
+    ) -> int:
+        candidate_signature = set(self._spec_graph_signature(spec))
+        if not candidate_signature:
+            return 0
+        existing_items: set[str] = set()
+        for record in self._read_spec_jsonl(self._spec_graph_candidates_path()):
+            if exclude_graph_id and str(record.get("graph_id") or "") == exclude_graph_id:
+                continue
+            signature = record.get("graph_signature")
+            if isinstance(signature, list):
+                existing_items.update(str(item) for item in signature if str(item).strip())
+        return len(candidate_signature & existing_items)
+
+    @staticmethod
+    def _spec_graph_candidate_sort_key(
+        record: dict[str, Any],
+        score: dict[str, Any] | None = None,
+    ) -> tuple[int, int, int, int, int, int, str]:
+        score = score if isinstance(score, dict) else record.get("score", {})
+        if not isinstance(score, dict):
+            score = {}
+        return (
+            int(score.get("quality_issues", 0) or 0),
+            int(score.get("design_issues", 0) or 0),
+            int(score.get("cooldown_hits", 0) or 0),
+            int(score.get("duplicate_hits", 0) or 0),
+            -int(score.get("runnable_tasks", 0) or 0),
+            int(record.get("loop", 0) or 0),
+            str(record.get("graph_id") or ""),
+        )
 
     def _latest_spec_graph_candidate_events(self) -> dict[str, dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
@@ -2058,6 +2132,15 @@ class TodoLifecycleMixin:
     ) -> bool:
         current_graph_id = self._spec_graph_id(current_spec)
         latest = self._latest_spec_graph_candidate_events()
+        valid_candidates: list[
+            tuple[
+                tuple[int, int, int, int, int, int, str],
+                dict[str, Any],
+                dict[str, Any],
+                dict[str, Any],
+                dict[str, int],
+            ]
+        ] = []
         for graph_id, record in latest.items():
             if graph_id == current_graph_id:
                 continue
@@ -2097,30 +2180,51 @@ class TodoLifecycleMixin:
                     parent_graph_id=current_graph_id,
                 )
                 continue
-            self._append_spec_graph_candidate_event(
+            score = self._spec_graph_candidate_score(
                 candidate,
-                event="candidate_selected",
-                status="selected_backtrack",
-                origin="graph_backtrack",
-                quality_report=quality_report,
-                parent_graph_id=current_graph_id,
+                quality_report,
+                exclude_graph_id=graph_id,
             )
-            self._persist_run_spec(candidate)
-            self._append_spec_progress_event(
-                "graph_backtracked",
-                candidate,
-                extra={
-                    "from_graph_id": current_graph_id,
-                    "selected_graph_id": self._spec_graph_id(candidate),
-                    "remaining_loops": self._spec_remaining_loop_budget(),
-                },
+            valid_candidates.append(
+                (
+                    self._spec_graph_candidate_sort_key(record, score),
+                    record,
+                    candidate,
+                    quality_report,
+                    score,
+                )
             )
-            self.state.notes.append(
-                "Selected backtrackable spec graph: " + self._spec_graph_id(candidate)
-            )
-            self.state.current = AgentStateName.SCHEDULE
-            return True
-        return False
+        if not valid_candidates:
+            return False
+        _, record, candidate, quality_report, score = sorted(
+            valid_candidates,
+            key=lambda item: item[0],
+        )[0]
+        self._append_spec_graph_candidate_event(
+            candidate,
+            event="candidate_selected",
+            status="selected_backtrack",
+            origin="graph_backtrack",
+            quality_report=quality_report,
+            parent_graph_id=current_graph_id,
+        )
+        self._persist_run_spec(candidate)
+        self._append_spec_progress_event(
+            "graph_backtracked",
+            candidate,
+            extra={
+                "from_graph_id": current_graph_id,
+                "selected_graph_id": self._spec_graph_id(candidate),
+                "selection_score": score,
+                "source_graph_candidate_event": record.get("event", ""),
+                "remaining_loops": self._spec_remaining_loop_budget(),
+            },
+        )
+        self.state.notes.append(
+            "Selected backtrackable spec graph: " + self._spec_graph_id(candidate)
+        )
+        self.state.current = AgentStateName.SCHEDULE
+        return True
 
     def _maybe_request_spec_graph_reseed(
         self,
@@ -2215,6 +2319,15 @@ class TodoLifecycleMixin:
                     if value not in (None, "", [], {})
                 }
             )
+        summary_limit = int(
+            self.config.get("workflow", {}).get(
+                "spec_graph_reseed_task_summary_limit",
+                8,
+            )
+            or 8
+        )
+        if summary_limit > 0:
+            task_summaries = task_summaries[-summary_limit:]
         signatures = self._read_spec_jsonl(self._failure_signature_path())[-6:]
         compact_signatures = [
             {
@@ -5835,10 +5948,18 @@ class TodoLifecycleMixin:
         }
 
     @staticmethod
-    def _read_spec_jsonl(path: Path) -> list[dict[str, Any]]:
+    def _read_spec_jsonl(
+        path: Path,
+        *,
+        limit: int | None = _SPEC_JSONL_READ_LIMIT,
+    ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         try:
-            lines = path.read_text(errors="replace").splitlines()
+            if limit is not None and limit > 0:
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    lines = list(deque(handle, maxlen=limit))
+            else:
+                lines = path.read_text(errors="replace").splitlines()
         except FileNotFoundError:
             return records
         for line in lines:
