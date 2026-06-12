@@ -2430,6 +2430,69 @@ Background / non-constraints
             self.assertIn('"event": "blocked"', progress_events)
             self.assertIn('"portfolio_exhausted_tasks": ["task-001"]', progress_events)
 
+    def test_spec_mode_reports_blocked_for_mixed_drift_and_portfolio_exhaustion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "mixed-exhaustion",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "drifted contract",
+                        "status": "deferred_contract_drift",
+                        "deliverables": ["target.txt"],
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "repeated failed tactic",
+                        "status": "failed",
+                        "deliverables": ["target.txt"],
+                        "recovery_rounds": 2,
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_reopen_failed_portfolio_tasks": True,
+                        "spec_portfolio_recovery_rounds": 2,
+                        "max_code_test_loops": 10,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["task_graph"][0]["status"], "deferred_contract_drift")
+            self.assertEqual(
+                persisted["task_graph"][1]["status"],
+                "deferred_portfolio_exhausted",
+            )
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "no_runnable_tasks_after_portfolio_exhausted",
+            )
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"drift_deferred_tasks": ["task-001"]', progress_events)
+            self.assertIn('"portfolio_exhausted_tasks": ["task-002"]', progress_events)
+
     def test_spec_mode_schedules_open_sibling_without_reopening_exhausted_portfolio_task(
         self,
     ) -> None:
