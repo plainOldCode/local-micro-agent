@@ -2184,6 +2184,14 @@ Background / non-constraints
                 "correct but no metric gain",
                 strategy_axis="general_edit",
             )
+            agent.state.scratch["metric_acceptance"] = {
+                "requires_improvement": True,
+                "metric": 147734,
+                "baseline": 147734,
+                "improved": False,
+                "failed": True,
+                "failure_class": "no_improvement",
+            }
 
             agent._append_candidate_history(
                 candidate,
@@ -2205,6 +2213,12 @@ Background / non-constraints
             self.assertEqual(record["spec_task_identity_source"], "active_todo_file")
             self.assertEqual(attempt["todo_id"], "task-002")
             self.assertEqual(attempt["spec_task_id"], "task-002")
+            metric_acceptance = agent.state.scratch["metric_acceptance"]
+            self.assertTrue(metric_acceptance["candidate_transition_bound"])
+            self.assertEqual(metric_acceptance["candidate_id"], "neutral")
+            self.assertEqual(metric_acceptance["loop"], 0)
+            self.assertEqual(metric_acceptance["candidate_failure_class"], "no_improvement")
+            self.assertEqual(metric_acceptance["spec_task_id"], "task-002")
 
     def test_metric_neutral_plateau_repeats_defer_task(self) -> None:
         async def run_case() -> None:
@@ -2254,6 +2268,8 @@ Background / non-constraints
                 ]
 
                 for _ in range(2):
+                    loop = agent.state.loop_count
+                    candidate_id = f"neutral-{loop}"
                     agent.state.scratch["metric_acceptance"] = {
                         "requires_improvement": True,
                         "metric": 147734,
@@ -2262,9 +2278,18 @@ Background / non-constraints
                         "failed": True,
                         "failure_class": "no_improvement",
                         "summary": "Metric candidate=147734 baseline=147734 improved=False.",
+                        "candidate_transition_bound": True,
+                        "candidate_id": candidate_id,
+                        "loop": loop,
+                        "todo_id": "task-001",
+                        "spec_task_id": "task-001",
+                        "candidate_status": "rejected",
+                        "candidate_failure_class": "no_improvement",
                     }
                     agent.state.scratch["last_candidate_observation"] = {
-                        "candidate_id": "neutral",
+                        "candidate_id": candidate_id,
+                        "loop": loop,
+                        "status": "rejected",
                         "fingerprint": "same-neutral-shape",
                         "failure_class": "no_improvement",
                         "summary": "correctness passed without metric gain",
@@ -2331,6 +2356,8 @@ Background / non-constraints
                 task={},
                 candidate_record={
                     "candidate_id": "neutral",
+                    "loop": 0,
+                    "status": "rejected",
                     "fingerprint": "same-neutral-shape",
                     "failure_class": "no_improvement",
                     "summary": "correct but no metric gain",
@@ -2342,6 +2369,11 @@ Background / non-constraints
                     "improved": False,
                     "failure_class": "no_improvement",
                     "summary": "Metric candidate=147734 baseline=147734 improved=False.",
+                    "candidate_transition_bound": True,
+                    "candidate_id": "neutral",
+                    "loop": 0,
+                    "candidate_status": "rejected",
+                    "candidate_failure_class": "no_improvement",
                 },
             )
 
@@ -2352,6 +2384,117 @@ Background / non-constraints
             self.assertNotIn("spec_task_id", record)
             self.assertEqual(record["plateau_task_local_count"], 0)
             self.assertEqual(record["status"], "rejected_no_improvement")
+
+    def test_metric_neutral_plateau_ignores_candidate_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+
+            record = agent._record_metric_neutral_plateau_signature(
+                spec={"version": 2, "spec_id": "metric-task", "task_graph": []},
+                task={
+                    "task_id": "task-001",
+                    "target_regions": ["target.py::build"],
+                    "tactic_stage": "local_edit",
+                },
+                candidate_record={
+                    "candidate_id": "current",
+                    "loop": 2,
+                    "status": "rejected",
+                    "fingerprint": "same-neutral-shape",
+                    "failure_class": "no_improvement",
+                },
+                metric_observation={
+                    "requires_improvement": True,
+                    "metric": 147734,
+                    "baseline": 147734,
+                    "improved": False,
+                    "failure_class": "no_improvement",
+                    "candidate_transition_bound": True,
+                    "candidate_id": "previous",
+                    "loop": 2,
+                    "candidate_status": "rejected",
+                    "candidate_failure_class": "no_improvement",
+                },
+            )
+
+            self.assertIsNone(record)
+            self.assertFalse((artifact_dir / "failure_signatures.jsonl").exists())
+            ignored = agent.state.scratch["stale_metric_observation_ignored"]
+            self.assertEqual(ignored[-1]["reason"], "candidate_id_mismatch")
+
+    def test_metric_neutral_plateau_ignores_stale_metric_on_active_task_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+
+            record = agent._record_metric_neutral_plateau_signature(
+                spec={"version": 2, "spec_id": "metric-task", "task_graph": []},
+                task={
+                    "task_id": "task-002",
+                    "target_regions": ["target.py::build"],
+                    "tactic_stage": "structural_probe",
+                },
+                candidate_record={
+                    "candidate_id": "loop-000-single",
+                    "loop": 0,
+                    "status": "rejected_active_task_shape_drift",
+                    "fingerprint": "drift-shape",
+                    "failure_class": "active_task_drift",
+                    "spec_task_id": "task-002",
+                    "todo_id": "task-002",
+                },
+                metric_observation={
+                    "requires_improvement": True,
+                    "metric": 147734,
+                    "baseline": 147734,
+                    "improved": False,
+                    "failure_class": "no_improvement",
+                    "candidate_transition_bound": True,
+                    "candidate_id": "loop-000-single",
+                    "loop": 0,
+                    "todo_id": "task-002",
+                    "spec_task_id": "task-002",
+                    "candidate_status": "rejected_active_task_shape_drift",
+                    "candidate_failure_class": "active_task_drift",
+                },
+            )
+
+            self.assertIsNone(record)
+            self.assertFalse((artifact_dir / "failure_signatures.jsonl").exists())
+            ignored = agent.state.scratch["stale_metric_observation_ignored"]
+            self.assertEqual(
+                ignored[-1]["reason"],
+                "candidate_failure_class:active_task_drift",
+            )
+            summary = agent._terminal_metric_neutral_plateau_summary([])
+            self.assertEqual(summary, {})
 
     def test_portfolio_reopen_blocks_plateau_cooled_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

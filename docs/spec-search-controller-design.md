@@ -757,16 +757,59 @@ Remaining:
 
 ## Recommended Next Patch
 
-Implement MVP 6 next:
+Implement MVP 6.1 next:
 
-1. Fix no-improvement task attribution in candidate records.
-2. Add `metric_neutral_plateau` signature writing and terminal/report summaries.
-3. Add task-local plateau defer status:
-   `deferred_no_improvement_plateau`.
-4. Block portfolio reopen for plateau-cooled tasks.
-5. Add graph scoring / reseed material-difference checks for plateau cooldowns.
-6. Add normal, edge, error, and report-path tests before any M2 Max smoke.
+1. Bind metric-neutral plateau evidence to the current candidate/test
+   transition.
+2. Ignore stale metric observations when the latest candidate is an active-task
+   drift, pre-apply reject, graph/design reject, or any non-metric-neutral
+   transition.
+3. Require plateau records to carry a current `candidate_id`, `loop`,
+   recovered task identity, metric, baseline, and `improved=false`.
+4. Record ignored stale observations as controller diagnostics, not as
+   `metric_neutral_plateau` signatures.
+5. Add normal, edge, and error tests before any M2 Max smoke.
 
 Do not increase graph reseed attempts or portfolio recovery rounds to hide this
 failure. The goal is to spend fewer loops on known metric-neutral shapes and make
 the next frontier materially different.
+
+### MVP 6.1: Transition-Bound Plateau Evidence
+
+The `d857fcb` 20-loop smoke showed a controller bookkeeping bug: the terminal
+report contained `metric_neutral_plateau_count=1` even though the only CODE
+candidate was `active_task_drift` and had no metric value. The root cause is a
+credit-assignment error: `_handle_spec_task_test_result()` reads
+`metric_acceptance` and `last_candidate_observation` from shared scratch and can
+combine a stale `no_improvement` metric observation with the current non-metric
+candidate transition.
+
+Metric-neutral plateau evidence must therefore be transition-bound:
+
+- `_record_single_candidate_observation()` should bind `metric_acceptance` to
+  the final candidate history record after `_append_candidate_history()` applies
+  any pre-apply drift/contract metadata. Binding fields:
+  `candidate_transition_bound=true`, `candidate_id`, `loop`, `todo_id`,
+  `spec_task_id`, `candidate_status`, and `candidate_failure_class`.
+- `_record_metric_neutral_plateau_signature()` may write a plateau signature only
+  when both sides of the transition agree:
+  - metric observation says `failure_class=no_improvement`,
+    `requires_improvement=true`, numeric `metric`, numeric `baseline`, and
+    `improved=false`;
+  - candidate observation is current-loop and current-candidate bound;
+  - candidate failure class is metric-neutral (`no_improvement`,
+    `probe_no_signal`, or `scaffold_validated`);
+  - candidate status is a rejected/no-signal metric result, not an active-task
+    drift, pre-apply contract reject, graph/design reject, patch miss, or
+    correctness failure.
+- If the transition does not bind, the controller should not write a failure
+  signature. It may append a note or compact diagnostic such as
+  `stale_metric_observation_ignored` for report/debugging.
+
+Required tests:
+
+| kind | case | expected |
+|---|---|---|
+| normal | current candidate and current metric observation are both no-improvement | one plateau signature is written |
+| edge | metric observation is no-improvement but candidate id or loop differs | no plateau signature; ignored diagnostic recorded |
+| error | active-task drift follows a stale no-improvement metric observation | no plateau signature and no plateau terminal count |

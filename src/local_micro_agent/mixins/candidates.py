@@ -1178,11 +1178,34 @@ class CandidateRecordsMixin:
                 "Retry the same active task using only its declared contract."
             )
             record.update(self._active_task_drift_record_extra(record))
+        self._bind_metric_acceptance_to_candidate_record(record)
         self.state.scratch["last_candidate_observation"] = dict(record)
         with path.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         self._append_todo_attempt(record)
         self._update_run_spec_from_candidate_record(record)
+
+    def _bind_metric_acceptance_to_candidate_record(self, record: dict[str, Any]) -> None:
+        metric_acceptance = self.state.scratch.get("metric_acceptance")
+        if not isinstance(metric_acceptance, dict):
+            return
+        candidate_id = str(record.get("candidate_id") or "").strip()
+        if not candidate_id:
+            return
+        loop = record.get("loop")
+        metric_acceptance.update(
+            {
+                "candidate_transition_bound": True,
+                "candidate_id": candidate_id,
+                "loop": loop,
+                "todo_id": record.get("todo_id"),
+                "spec_task_id": record.get("spec_task_id"),
+                "candidate_status": record.get("status"),
+                "candidate_failure_class": record.get("failure_class"),
+                "candidate_metric": record.get("metric"),
+                "metric_observation_id": f"loop-{loop}-{candidate_id}",
+            }
+        )
 
     @staticmethod
     def _summarize_changes(changes: list[CodeChange]) -> list[dict[str, Any]]:

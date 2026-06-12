@@ -3576,6 +3576,17 @@ class TodoLifecycleMixin:
             return None
         if not bool(metric_observation.get("requires_improvement")):
             return None
+        ignore_reason = self._metric_neutral_plateau_transition_ignore_reason(
+            candidate_record,
+            metric_observation,
+        )
+        if ignore_reason:
+            self._record_stale_metric_plateau_ignored(
+                ignore_reason,
+                candidate_record=candidate_record,
+                metric_observation=metric_observation,
+            )
+            return None
         task_id = str(task.get("task_id") or "")
         shape = self._metric_neutral_plateau_shape(task, candidate_record)
         local_count = self._metric_neutral_plateau_task_count(
@@ -3622,6 +3633,79 @@ class TodoLifecycleMixin:
             issue_scope="candidate_delta",
             summary=str(metric_observation.get("summary") or ""),
             extra=extra,
+        )
+
+    @staticmethod
+    def _metric_neutral_plateau_candidate_classes() -> set[str]:
+        return {"no_improvement", "probe_no_signal", "scaffold_validated"}
+
+    @staticmethod
+    def _metric_neutral_plateau_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    def _metric_neutral_plateau_transition_ignore_reason(
+        self,
+        candidate_record: dict[str, Any],
+        metric_observation: dict[str, Any],
+    ) -> str:
+        if not self._metric_neutral_plateau_int(metric_observation.get("metric")):
+            return "metric_missing"
+        if not self._metric_neutral_plateau_int(metric_observation.get("baseline")):
+            return "baseline_missing"
+        if metric_observation.get("improved") is not False:
+            return "metric_not_neutral"
+        if not isinstance(candidate_record, dict) or not candidate_record:
+            return "candidate_observation_missing"
+        candidate_id = str(candidate_record.get("candidate_id") or "").strip()
+        if not candidate_id:
+            return "candidate_id_missing"
+        candidate_failure_class = str(candidate_record.get("failure_class") or "")
+        if (
+            candidate_failure_class
+            not in self._metric_neutral_plateau_candidate_classes()
+        ):
+            return f"candidate_failure_class:{candidate_failure_class or 'missing'}"
+        if metric_observation.get("candidate_transition_bound") is not True:
+            return "metric_observation_unbound"
+        metric_candidate_id = str(metric_observation.get("candidate_id") or "").strip()
+        if metric_candidate_id != candidate_id:
+            return "candidate_id_mismatch"
+        if str(metric_observation.get("loop")) != str(candidate_record.get("loop")):
+            return "loop_mismatch"
+        for key in ("todo_id", "spec_task_id"):
+            metric_value = str(metric_observation.get(key) or "").strip()
+            candidate_value = str(candidate_record.get(key) or "").strip()
+            if metric_value and candidate_value and metric_value != candidate_value:
+                return f"{key}_mismatch"
+        return ""
+
+    def _record_stale_metric_plateau_ignored(
+        self,
+        reason: str,
+        *,
+        candidate_record: dict[str, Any],
+        metric_observation: dict[str, Any],
+    ) -> None:
+        entry = {
+            "reason": reason,
+            "candidate_id": candidate_record.get("candidate_id"),
+            "candidate_failure_class": candidate_record.get("failure_class"),
+            "candidate_status": candidate_record.get("status"),
+            "loop": candidate_record.get("loop"),
+            "metric_candidate_id": metric_observation.get("candidate_id"),
+            "metric_loop": metric_observation.get("loop"),
+            "metric": metric_observation.get("metric"),
+            "baseline": metric_observation.get("baseline"),
+        }
+        ignored = self.state.scratch.setdefault(
+            "stale_metric_observation_ignored",
+            [],
+        )
+        if isinstance(ignored, list):
+            ignored.append(entry)
+            del ignored[:-20]
+        self.state.notes.append(
+            "Ignored stale metric-neutral plateau evidence: " + reason
         )
 
     def _metric_neutral_plateau_reopen_block(self, task: dict[str, Any]) -> dict[str, Any]:
