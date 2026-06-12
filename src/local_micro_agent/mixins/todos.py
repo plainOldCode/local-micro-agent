@@ -1998,6 +1998,45 @@ class TodoLifecycleMixin:
             return None
         return spec if isinstance(spec, dict) else None
 
+    def _append_stale_spec_graph_candidate_record(
+        self,
+        record: dict[str, Any],
+        *,
+        parent_graph_id: str,
+        issue_code: str,
+    ) -> None:
+        graph_id = str(record.get("graph_id") or "")
+        if not graph_id:
+            return
+        if self._spec_graph_candidate_event_seen(
+            graph_id,
+            "candidate_rejected",
+            "rejected_stale",
+        ):
+            return
+        stale_record = {
+            "schema": "spec_graph_candidate.v1",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": "candidate_rejected",
+            "status": "rejected_stale",
+            "origin": "graph_backtrack",
+            "graph_id": graph_id,
+            "parent_graph_id": parent_graph_id,
+            "spec_id": record.get("spec_id"),
+            "loop": self.state.loop_count,
+            "fsm_step": self.state.fsm_step_count,
+            "score": record.get("score", {}),
+            "graph_signature": record.get("graph_signature", []),
+            "issue_codes": [issue_code],
+            "spec_sidecar_path": record.get("spec_sidecar_path", ""),
+            "spec_synth_calls_used": self._spec_synth_call_count(),
+            "spec_synth_call_budget": self._spec_synth_call_budget(),
+        }
+        path = self._spec_graph_candidates_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(stale_record, ensure_ascii=False, sort_keys=True) + "\n")
+
     def _spec_graph_reseed_attempts_max(self) -> int:
         workflow = self.config.get("workflow", {})
         return int(workflow.get("spec_graph_reseed_attempts", 0) or 0)
@@ -2026,6 +2065,11 @@ class TodoLifecycleMixin:
                 continue
             candidate = self._load_spec_graph_candidate_sidecar(record)
             if not isinstance(candidate, dict):
+                self._append_stale_spec_graph_candidate_record(
+                    record,
+                    parent_graph_id=current_graph_id,
+                    issue_code="missing_or_invalid_sidecar",
+                )
                 continue
             quality_report = self._spec_quality_report(candidate, attempt=0)
             if self._spec_quality_report_failed(quality_report):

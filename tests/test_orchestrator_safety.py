@@ -2935,6 +2935,69 @@ Background / non-constraints
 
         asyncio.run(run_case())
 
+    def test_spec_mode_marks_backtrackable_graph_with_missing_sidecar_stale(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            current_spec = {
+                "version": 2,
+                "spec_id": "current",
+                "search": {"graph_id": "graph-0001"},
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "deferred_design_invalid",
+                        "deliverables": ["target.py"],
+                    }
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(current_spec) + "\n")
+            (artifact_dir / "spec_graph_candidates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": "spec_graph_candidate.v1",
+                        "event": "candidate_created",
+                        "status": "backtrackable",
+                        "origin": "test",
+                        "graph_id": "graph-0002",
+                        "graph_signature": ["target.py::missing:local_edit"],
+                        "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0002.json",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_graph_reseed_attempts": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            events = [
+                json.loads(line)
+                for line in (
+                    artifact_dir / "spec_graph_candidates.jsonl"
+                ).read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["status"], "rejected_stale")
+            self.assertEqual(events[-1]["issue_codes"], ["missing_or_invalid_sidecar"])
+            self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+
     def test_spec_reseed_candidate_count_respects_spec_synth_budget(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
