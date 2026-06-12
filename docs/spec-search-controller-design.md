@@ -373,6 +373,93 @@ later, the report/terminal summarizers must be updated in the same patch.
 Graph reseed should run only after the transaction returns to `SCHEDULE` and no
 runnable sibling or backtrackable graph remains.
 
+### Phase D.2: Metric-Neutral Plateau Control
+
+Correctness-preserving candidates with no metric gain are useful search evidence,
+but they should not be treated as a reason to keep sampling the same task,
+region, and tactic indefinitely.
+
+The `424bc36` 20-loop clean smoke showed the new target-node transaction policy
+working: the run reached 11 CODE loops instead of stopping after 2, preserved
+sibling frontier, and recorded target-local rewrite recovery. The next dominant
+failure was a metric-neutral plateau:
+
+- 11 candidates total;
+- 9 `no_improvement` candidates;
+- direct validation stayed `CYCLES 147734`;
+- `task-002` was reopened until portfolio recovery was exhausted;
+- graph reseed still converged near the same `build_kernel` / `build_hash`
+  `local_edit` shapes.
+
+This is not primarily a code-generation failure. It is a controller failure to
+turn valid negative performance evidence into a stronger transition decision.
+The controller should record metric-neutral attempts as plateau signatures and
+use them in scheduling, portfolio reopen, graph scoring, and reseed prompts.
+
+Plateau signature:
+
+```text
+target_region_hash + tactic_stage + edit_shape_fingerprint + metric_delta_bucket
+```
+
+Where:
+
+- `target_region_hash` is the same task-id-free hash used by failure signatures;
+- `tactic_stage` comes from the active task / candidate record;
+- `edit_shape_fingerprint` should prefer an existing candidate fingerprint when
+  present, falling back to a compact structured edit shape;
+- `metric_delta_bucket` is one of `improved`, `neutral`, or `regressed`.
+
+For this MVP, only `neutral` plateau signatures need policy effects. Improved
+and regressed candidates already have existing paths.
+
+Policy:
+
+1. A correctness-passing, metric-neutral candidate writes a
+   `metric_neutral_plateau` failure signature when the active acceptance requires
+   metric improvement.
+2. The signature is scoped as `candidate_delta`, but the controller also records
+   the best available `spec_task_id` / `todo_id` so the plateau can be charged to
+   the active task.
+3. Repeating the same plateau signature on the same task closes that task as
+   `deferred_no_improvement_plateau`.
+4. Repeating the same region/tactic plateau across reopened variants blocks
+   portfolio reopen for that task.
+5. Graph scoring penalizes candidate graphs whose runnable tasks overlap recent
+   plateau cooldown keys.
+6. Graph reseed prompt receives plateau cooldown keys and must produce at least
+   one materially different runnable task: different `target_regions`,
+   different `tactic_stage`, or different `validator.kind` / deliverable shape.
+
+Suggested thresholds:
+
+| Counter | Default | Effect |
+| --- | ---: | --- |
+| same plateau fingerprint per task | 1 repeat | defer task as plateau |
+| same region/tactic neutral attempts | 2 attempts | block portfolio reopen |
+| graph plateau cooldown overlap | any | graph score penalty |
+| reseed all tasks overlap plateau cooldowns | any | quality/graph reject |
+
+The low thresholds are intentional. A metric-neutral candidate is already
+correctness-preserving evidence. Retrying the same plateau shape is unlikely to
+be informative unless the new task is materially different.
+
+Important implementation warning:
+
+The `424bc36` run produced later `no_improvement` candidate records where
+`spec_task_id` and `todo_id` were empty even though logs showed `task-002` was
+active. MVP 6 must fix attribution before relying on plateau counters. The
+candidate recorder should recover task identity from, in order:
+
+1. candidate record `spec_task_id` / `todo_id`;
+2. current `active_todo`;
+3. persisted `active_todo.json`;
+4. `run_spec.active_task_id`;
+5. the latest `scheduled` / `retry` spec progress event for the current loop.
+
+If no task id can be recovered, record the plateau signature as graph-level
+evidence but do not charge a task-local threshold.
+
 ### Phase E: Backtrack / Reseed
 
 When the selected graph has no runnable frontier:
@@ -386,6 +473,8 @@ When the selected graph has no runnable frontier:
    `spec_graph_reseed_attempts` remains.
 5. Reseed prompt receives current failure signatures as cooldowns:
    - same `target_region + tactic_stage + issue_code` is banned;
+   - recent metric-neutral plateau cooldown keys are banned unless the new graph
+     is materially different in structured fields;
    - the new graph must include at least one runnable local probe or a
      materially narrower structural probe;
    - the reseed must preserve useful closed/survivor evidence as facts, not as
@@ -434,6 +523,10 @@ source of truth.
 Patch miss, correctness failure, no-improvement, and active-drift handling
 should not be reimplemented twice. The signature should describe the existing
 decision and make it reusable by later graph search policy.
+
+For no-improvement, the existing candidate record remains the raw observation.
+MVP 6 adds only a typed plateau index and transition policy. It must not add
+benchmark-specific tactic knowledge or hidden optimization hints.
 
 ## MVP Implementation Plan
 
@@ -570,6 +663,62 @@ Additional assertions:
 - `graph_reseed_requested` is not emitted from a target-local rejection while
   at least one sibling remains schedulable.
 
+### MVP 6: Metric-Neutral Plateau Control
+
+Scope:
+
+- Add `metric_neutral_plateau` signatures for correctness-passing candidates that
+  fail only because the metric did not improve.
+- Fix task attribution for single-candidate `no_improvement` records so
+  `spec_task_id` / `todo_id` survive through restore, retarget, and metric-gate
+  paths.
+- Add plateau counters by:
+  - exact candidate/edit fingerprint;
+  - task id;
+  - target-region hash;
+  - tactic stage.
+- Defer a task as `deferred_no_improvement_plateau` when it repeats the same
+  plateau signature.
+- Block portfolio reopen when the only available reopen path repeats recent
+  plateau cooldown keys.
+- Add graph score plateau penalties and reseed material-difference gates.
+- Report plateau counts, plateau task ids, and plateau cooldown keys in
+  terminal/report artifacts.
+
+Why next:
+
+The `424bc36` run proved MVP 5 works and shifted the bottleneck. The run reached
+11 CODE loops and preserved sibling frontier, but spent most of those loops on
+correctness-preserving, metric-neutral edits:
+
+- `no_improvement=9`;
+- `task-002` reopened until `portfolio_recovery_budget_exhausted`;
+- final reseed still sampled graph shapes near recent plateau cooldowns.
+
+The next controller improvement is to convert metric-neutral attempts into
+search evidence that closes redundant branches earlier and forces novelty in
+the next frontier.
+
+Test matrix:
+
+| Case | Scenario | Expected |
+| --- | --- | --- |
+| normal | first correctness-passing metric-neutral candidate | survivor preserved; plateau signature written; task remains retryable |
+| normal | same plateau fingerprint repeats on same task | task becomes `deferred_no_improvement_plateau`; sibling schedules next |
+| edge | no-improvement candidate record lacks `spec_task_id` but active todo exists | plateau is attributed to active task |
+| edge | portfolio reopen would select only a plateau-cooled task | reopen blocked; task stays deferred; backtrack/reseed considered |
+| edge | reseed graph repeats plateau-cooled region/tactic | graph rejected or strongly penalized unless materially different |
+| error | no task identity can be recovered | graph-level plateau signature written; no task-local defer threshold fires |
+| report | plateau defer occurs | terminal/report include plateau counts, task ids, and cooldown keys |
+
+Additional assertions:
+
+- `deferred_no_improvement_plateau` is counted as deferred progress.
+- Plateau cooldown keys exclude graph-local task ids.
+- Improved candidates never write plateau signatures.
+- Correctness failures do not write plateau signatures; they keep existing
+  correctness/design paths.
+
 ## Non-Goals
 
 - Do not encode benchmark-specific optimization tactics.
@@ -578,6 +727,10 @@ Additional assertions:
 - Do not parallelize local model calls on the M2 Max host; candidate graph
   generation should respect the existing local-model serial policy.
 - Do not widen CODE's writable surface to fix search failures.
+- Do not solve metric-neutral loops by increasing portfolio recovery rounds or
+  graph reseed attempts.
+- Do not punish all no-improvement candidates equally; only repeated or
+  region/tactic-overlapping neutral plateaus should change control flow.
 
 ## Open Design Questions
 
@@ -587,9 +740,9 @@ Resolved from review:
 - Split design-invalid states:
   - `deferred_design_invalid`: recoverable via backtrack/reseed.
   - `failed_design`: current graph cannot use this task anymore.
-- `valid_no_improvement` should not immediately select a sibling. Use the
-  existing task-level portfolio budget first, preserve the survivor, then
-  expand sibling/reseed after exhaustion.
+- A single `valid_no_improvement` should not immediately select a sibling. Use
+  the existing task-level budget first, preserve the survivor, then apply plateau
+  control only when the same fingerprint or region/tactic repeats.
 - Closed partial-success tasks should be preserved as survivor/grounding facts
   and re-gated against the current repo, not copied as stale closed nodes.
 
@@ -598,19 +751,21 @@ Remaining:
 - Exact similarity threshold for `duplicate_variant`.
 - Whether eager multi-graph cold start should ever be enabled by preset, or
   only by explicit workflow config.
+- Exact plateau fingerprint fallback when the candidate record lacks a stable
+  fingerprint but has multiple edits.
 
 ## Recommended Next Patch
 
-Implement MVP 5 first:
+Implement MVP 6 next:
 
-1. Add a target-node transaction helper for targeted rewrites.
-2. Make graph/quality/material-diversity rejection defer only the target task.
-3. Preserve runnable siblings from the previous spec regardless of model
-   omissions.
-4. Record ignored non-target tasks and preserved sibling ids in progress,
-   failure signatures, and terminal/report counters.
-5. Add normal, edge, and error-path tests before any M2 Max smoke.
+1. Fix no-improvement task attribution in candidate records.
+2. Add `metric_neutral_plateau` signature writing and terminal/report summaries.
+3. Add task-local plateau defer status:
+   `deferred_no_improvement_plateau`.
+4. Block portfolio reopen for plateau-cooled tasks.
+5. Add graph scoring / reseed material-difference checks for plateau cooldowns.
+6. Add normal, edge, error, and report-path tests before any M2 Max smoke.
 
-Do not increase graph reseed attempts to hide this failure. Reseed is still the
-right final escape hatch, but it should not be consumed by target-local recovery
-failures while sibling tasks remain runnable.
+Do not increase graph reseed attempts or portfolio recovery rounds to hide this
+failure. The goal is to spend fewer loops on known metric-neutral shapes and make
+the next frontier materially different.
