@@ -3700,6 +3700,355 @@ Background / non-constraints
 
         asyncio.run(run_case())
 
+    def test_repeated_active_task_drift_routes_to_contract_rewrite(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                task = {
+                    "task_id": "task-001",
+                    "title": "guard parser branch",
+                    "strategy_axis": "general_edit",
+                    "status": "in_progress",
+                    "deliverables": ["target.py"],
+                    "target_symbols": ["parse_item"],
+                    "target_regions": ["target.py::parse_item"],
+                    "preserved_invariants": ["existing parse outputs stay unchanged"],
+                    "edit_scope": "Change one guarded branch in parse_item.",
+                    "validator": {"kind": "command", "failure_condition": "pytest fails"},
+                    "budget": {"attempts_max": 4, "attempts_used": 0},
+                }
+                spec = {
+                    "version": 2,
+                    "spec_id": "drift-spec",
+                    "active_task_id": "task-001",
+                    "task_graph": [task],
+                }
+                active_todo = {
+                    "todo_id": "task-001",
+                    "spec_task_id": "task-001",
+                    "status": "active",
+                    "strategy_axis": "general_edit",
+                    "source": "spec_scheduler",
+                }
+                attempts = [
+                    {
+                        "loop": index,
+                        "todo_id": "task-001",
+                        "status": "rejected_todo_scope_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
+                        "fingerprint": f"drift-{index}",
+                        "summary": "outside active task",
+                    }
+                    for index in range(3)
+                ]
+                (artifact_dir / "todo_attempts.jsonl").write_text(
+                    "\n".join(json.dumps(attempt) for attempt in attempts) + "\n"
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                            "spec_active_task_drift_streak_limit": 3,
+                            "spec_active_task_drift_same_fingerprint_limit": 99,
+                            "spec_active_task_drift_rewrite_attempts": 1,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", loop_count=2, max_loops=10),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.scratch["active_todo"] = active_todo
+                agent.state.scratch["last_candidate_observation"] = attempts[-1]
+                agent.state.test_results = [
+                    TestResult(command="python -m pytest", exit_code=1, stderr="scope drift")
+                ]
+
+                await agent._handle_spec_task_test_result(True)
+
+                self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+                self.assertEqual(agent.state.loop_count, 3)
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                persisted_task = persisted["task_graph"][0]
+                self.assertEqual(persisted_task["status"], "needs_contract_rewrite")
+                self.assertEqual(
+                    persisted_task["decision_hint"],
+                    "repeated_active_task_drift_requires_contract_rewrite: CODE "
+                    "kept violating or over-broadening this active task contract. "
+                    "Rewrite the task as a smaller executable probe, or retire it "
+                    "in favor of a different runnable task.",
+                )
+                self.assertEqual(
+                    persisted_task["contract_rewrite"]["reason"],
+                    "repeated_active_task_drift",
+                )
+                self.assertEqual(persisted_task["contract_rewrite"]["rewrite_attempts"], 1)
+                progress_event = json.loads(
+                    (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(progress_event["event"], "drift_recovery")
+                self.assertEqual(progress_event["action"], "rewrite")
+
+        asyncio.run(run_case())
+
+    def test_active_task_drift_streak_resets_on_other_failure(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                task = {
+                    "task_id": "task-001",
+                    "status": "in_progress",
+                    "title": "local task",
+                    "strategy_axis": "general_edit",
+                    "deliverables": ["target.py"],
+                    "budget": {"attempts_max": 5, "attempts_used": 0},
+                }
+                spec = {
+                    "version": 2,
+                    "spec_id": "drift-reset",
+                    "active_task_id": "task-001",
+                    "task_graph": [task],
+                }
+                attempts = [
+                    {
+                        "loop": 0,
+                        "todo_id": "task-001",
+                        "status": "rejected_todo_scope_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
+                        "fingerprint": "drift-a",
+                    },
+                    {
+                        "loop": 1,
+                        "todo_id": "task-001",
+                        "status": "rejected_correctness",
+                        "failure_class": "correctness_failure",
+                        "budget_counted": True,
+                    },
+                    {
+                        "loop": 2,
+                        "todo_id": "task-001",
+                        "status": "rejected_todo_scope_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
+                        "fingerprint": "drift-a",
+                    },
+                ]
+                (artifact_dir / "todo_attempts.jsonl").write_text(
+                    "\n".join(json.dumps(attempt) for attempt in attempts) + "\n"
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                            "spec_active_task_drift_streak_limit": 2,
+                            "spec_active_task_drift_same_fingerprint_limit": 2,
+                            "reflect_before_retry": False,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", loop_count=2, max_loops=10),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.scratch["active_todo"] = {
+                    "todo_id": "task-001",
+                    "spec_task_id": "task-001",
+                    "status": "active",
+                    "source": "spec_scheduler",
+                }
+                agent.state.scratch["last_candidate_observation"] = attempts[-1]
+                agent.state.test_results = [
+                    TestResult(command="python -m pytest", exit_code=1, stderr="scope drift")
+                ]
+
+                await agent._handle_spec_task_test_result(True)
+
+                self.assertEqual(agent.state.current, AgentStateName.CODE)
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                self.assertEqual(persisted["task_graph"][0]["status"], "in_progress")
+                progress_event = json.loads(
+                    (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(progress_event["event"], "retry")
+
+        asyncio.run(run_case())
+
+    def test_repeated_active_task_drift_defers_after_rewrite_budget(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                artifact_dir = repo / ".local_micro_agent"
+                artifact_dir.mkdir()
+                task = {
+                    "task_id": "task-001",
+                    "status": "in_progress",
+                    "title": "local task",
+                    "strategy_axis": "general_edit",
+                    "deliverables": ["target.py"],
+                    "contract_rewrite": {
+                        "rewrite_attempt_key": "task-001",
+                        "rewrite_attempts": 1,
+                        "rewrite_attempts_max": 1,
+                    },
+                    "budget": {"attempts_max": 5, "attempts_used": 0},
+                }
+                spec = {
+                    "version": 2,
+                    "spec_id": "drift-defer",
+                    "active_task_id": "task-001",
+                    "task_graph": [task],
+                }
+                attempts = [
+                    {
+                        "loop": index,
+                        "todo_id": "task-001",
+                        "status": "rejected_todo_scope_drift",
+                        "failure_class": "active_task_drift",
+                        "budget_counted": False,
+                        "fingerprint": "same-drift",
+                    }
+                    for index in range(2)
+                ]
+                (artifact_dir / "todo_attempts.jsonl").write_text(
+                    "\n".join(json.dumps(attempt) for attempt in attempts) + "\n"
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                            "spec_active_task_drift_streak_limit": 10,
+                            "spec_active_task_drift_same_fingerprint_limit": 2,
+                            "spec_active_task_drift_rewrite_attempts": 1,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test", loop_count=1, max_loops=10),
+                )
+                agent.state.scratch["run_spec"] = spec
+                agent.state.scratch["current_spec_task"] = task
+                agent.state.scratch["active_todo"] = {
+                    "todo_id": "task-001",
+                    "spec_task_id": "task-001",
+                    "status": "active",
+                    "source": "spec_scheduler",
+                }
+                agent.state.scratch["last_candidate_observation"] = attempts[-1]
+                agent.state.test_results = [
+                    TestResult(command="python -m pytest", exit_code=1, stderr="scope drift")
+                ]
+
+                await agent._handle_spec_task_test_result(True)
+
+                self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+                persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+                self.assertEqual(
+                    persisted["task_graph"][0]["status"],
+                    "deferred_contract_drift",
+                )
+                progress_event = json.loads(
+                    (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(progress_event["event"], "drift_recovery")
+                self.assertEqual(progress_event["action"], "defer")
+
+                agent._schedule_spec_task()
+
+                blocked = json.loads(
+                    (artifact_dir / "spec_progress.jsonl").read_text().splitlines()[-1]
+                )
+                self.assertEqual(agent.state.current, AgentStateName.FAILED)
+                self.assertEqual(
+                    blocked["stop_reason"],
+                    "no_runnable_tasks_after_drift_deferred",
+                )
+
+        asyncio.run(run_case())
+
+    def test_terminal_report_summarizes_active_task_drift_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "spec_terminal_state_path": ".local_micro_agent/terminal_state.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=3),
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "drift-report",
+                "last_stop_reason": "no_runnable_tasks_after_drift_deferred",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "deferred_contract_drift",
+                        "title": "local task",
+                    }
+                ],
+            }
+            agent.state.scratch["run_spec"] = spec
+            (artifact_dir / "candidates.jsonl").write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "loop": index,
+                            "todo_id": "task-001",
+                            "status": "rejected_todo_scope_drift",
+                            "failure_class": "active_task_drift",
+                            "budget_counted": False,
+                        }
+                    )
+                    for index in range(3)
+                )
+                + "\n"
+            )
+            (artifact_dir / "spec_progress.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event": "drift_recovery",
+                        "task_id": "task-001",
+                        "action": "defer",
+                    }
+                )
+                + "\n"
+            )
+
+            agent._persist_spec_report()
+
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            self.assertEqual(terminal["active_task_drift_count"], 3)
+            self.assertEqual(terminal["max_active_task_drift_streak"], 3)
+            self.assertEqual(terminal["drift_recovery_count"], 1)
+            self.assertEqual(terminal["drift_deferred_task_ids"], ["task-001"])
+
     def test_targeted_spec_rewrite_preserves_omitted_sibling_tasks(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:

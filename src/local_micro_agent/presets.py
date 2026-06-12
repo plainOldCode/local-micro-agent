@@ -107,6 +107,9 @@ _SPEC: dict[str, Any] = {
     "spec_two_call_synthesis": True,
     "spec_probe_diff_contract_required": True,
     "probe_diff_contract_gate": True,
+    "spec_active_task_drift_streak_limit": 3,
+    "spec_active_task_drift_same_fingerprint_limit": 2,
+    "spec_active_task_drift_rewrite_attempts": 1,
     "continue_after_improvement": False,
     "deterministic_test_decision": True,
 }

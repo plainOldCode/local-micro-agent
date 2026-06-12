@@ -1567,6 +1567,13 @@ class TodoLifecycleMixin:
             inherited_attempts = int(
                 previous_target["design_contract"].get("rewrite_attempts", 0) or 0
             )
+        inherited_contract_drift_attempts = 0
+        if isinstance(previous_target, dict) and isinstance(
+            previous_target.get("contract_rewrite"), dict
+        ):
+            inherited_contract_drift_attempts = int(
+                previous_target["contract_rewrite"].get("rewrite_attempts", 0) or 0
+            )
         for task in replacement_tasks:
             if str(task.get("task_id") or "") != target_task_id:
                 task["replaces_task_id"] = target_origin
@@ -1575,6 +1582,12 @@ class TodoLifecycleMixin:
                     "status": "inherited",
                     "rewrite_attempt_key": target_origin,
                     "rewrite_attempts": inherited_attempts,
+                }
+            if inherited_contract_drift_attempts:
+                task["contract_rewrite"] = {
+                    "status": "inherited",
+                    "rewrite_attempt_key": target_origin,
+                    "rewrite_attempts": inherited_contract_drift_attempts,
                 }
         merged_tasks: list[dict[str, Any]] = []
         preserved_task_ids: list[str] = []
@@ -1611,6 +1624,7 @@ class TodoLifecycleMixin:
                 "deferred",
                 "in_progress",
                 "needs_design",
+                "needs_contract_rewrite",
             }:
                 preserved["portfolio_preserved_after_rewrite"] = True
                 preserve_hint = (
@@ -1709,7 +1723,13 @@ class TodoLifecycleMixin:
             if str(task.get("task_id") or "")
             and str(task.get("task_id") or "") != target_task_id
             and str(task.get("status", "open"))
-            in {"open", "deferred", "in_progress", "needs_design"}
+            in {
+                "open",
+                "deferred",
+                "in_progress",
+                "needs_design",
+                "needs_contract_rewrite",
+            }
         ]
         missing_siblings = [
             task_id for task_id in previous_sibling_ids if task_id not in rewritten_ids
@@ -1815,7 +1835,12 @@ class TodoLifecycleMixin:
             record["task_id"] = task.get("task_id")
             record["task_status"] = task.get("status")
             record["task_attempts"] = task.get("attempts")
-            if event in {"design_rejected", "failed_design", "needs_design"}:
+            if event in {
+                "design_rejected",
+                "drift_recovery",
+                "failed_design",
+                "needs_design",
+            }:
                 record["task_title"] = task.get("title")
                 record["task_edit_scope"] = task.get("edit_scope")
                 record["task_risk_level"] = task.get("risk_level")
@@ -1844,7 +1869,12 @@ class TodoLifecycleMixin:
 
     @staticmethod
     def _spec_status_is_deferred(status: str) -> bool:
-        return status in {"deferred", "deferred_design", "deferred_design_invalid"}
+        return status in {
+            "deferred",
+            "deferred_contract_drift",
+            "deferred_design",
+            "deferred_design_invalid",
+        }
 
     @staticmethod
     def _spec_status_is_failed(status: str) -> bool:
@@ -2611,7 +2641,13 @@ class TodoLifecycleMixin:
             if status in {"failed_design", "deferred_design_invalid"}:
                 blocked.append(f"{task_id} status={status}")
                 continue
-            if status not in {"open", "deferred", "in_progress", "needs_design"}:
+            if status not in {
+                "open",
+                "deferred",
+                "in_progress",
+                "needs_design",
+                "needs_contract_rewrite",
+            }:
                 continue
             deps = task.get("depends_on")
             missing = [
@@ -2644,6 +2680,7 @@ class TodoLifecycleMixin:
         open_statuses = {"open"}
         if self._spec_design_contract_gate_enabled():
             open_statuses.add("needs_design")
+            open_statuses.add("needs_contract_rewrite")
         candidates = []
         for task in tasks:
             if not isinstance(task, dict):
@@ -2823,7 +2860,13 @@ class TodoLifecycleMixin:
             if not isinstance(task, dict):
                 continue
             status = str(task.get("status", "open"))
-            if status not in {"open", "deferred", "in_progress", "needs_design"}:
+            if status not in {
+                "open",
+                "deferred",
+                "in_progress",
+                "needs_design",
+                "needs_contract_rewrite",
+            }:
                 continue
             deps = task.get("depends_on")
             if not isinstance(deps, list):
@@ -2838,6 +2881,7 @@ class TodoLifecycleMixin:
         failed_prerequisites = sorted(self._failed_spec_prerequisite_ids(tasks))
         blocked_tasks = self._spec_blocked_task_ids(tasks)
         design_failed = self._design_failed_spec_task_ids(tasks)
+        drift_deferred = self._contract_drift_deferred_spec_task_ids(tasks)
         remaining = self._spec_remaining_loop_budget()
         stop_reason = "no_recovery_possible"
         if design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
@@ -2846,6 +2890,8 @@ class TodoLifecycleMixin:
                 if self._spec_has_closed_task(tasks)
                 else "spec_design_contract_incomplete"
             )
+        elif drift_deferred and self._all_remaining_spec_tasks_contract_drift_deferred(tasks):
+            stop_reason = "no_runnable_tasks_after_drift_deferred"
         elif (
             failed_prerequisites
             and remaining
@@ -2862,6 +2908,7 @@ class TodoLifecycleMixin:
             "blocked_tasks": blocked_tasks,
             "failed_prerequisites": failed_prerequisites,
             "design_failed_tasks": design_failed,
+            "drift_deferred_tasks": drift_deferred,
         }
 
     @staticmethod
@@ -2871,6 +2918,16 @@ class TodoLifecycleMixin:
             for task in tasks
             if isinstance(task, dict)
             and str(task.get("status")) in {"failed_design", "deferred_design_invalid"}
+            and str(task.get("task_id") or "")
+        ]
+
+    @staticmethod
+    def _contract_drift_deferred_spec_task_ids(tasks: list[Any]) -> list[str]:
+        return [
+            str(task.get("task_id") or "")
+            for task in tasks
+            if isinstance(task, dict)
+            and str(task.get("status")) == "deferred_contract_drift"
             and str(task.get("task_id") or "")
         ]
 
@@ -2904,6 +2961,19 @@ class TodoLifecycleMixin:
                 continue
             saw_remaining = True
             if status not in {"failed_design", "deferred_design_invalid"}:
+                return False
+        return saw_remaining
+
+    def _all_remaining_spec_tasks_contract_drift_deferred(self, tasks: list[Any]) -> bool:
+        saw_remaining = False
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status == "closed":
+                continue
+            saw_remaining = True
+            if status != "deferred_contract_drift":
                 return False
         return saw_remaining
 
@@ -2959,7 +3029,13 @@ class TodoLifecycleMixin:
             if not isinstance(task, dict):
                 continue
             status = str(task.get("status", "open"))
-            if status not in {"open", "deferred", "in_progress", "needs_design"}:
+            if status not in {
+                "open",
+                "deferred",
+                "in_progress",
+                "needs_design",
+                "needs_contract_rewrite",
+            }:
                 continue
             deps = task.get("depends_on")
             missing = [
@@ -3700,6 +3776,92 @@ class TodoLifecycleMixin:
                 return
             self.state.current = AgentStateName.SPEC_SYNTH
             return
+        drift_recovery = self._active_task_drift_recovery_decision(task, failed)
+        if drift_recovery:
+            await self._restore_spec_task_boundary_snapshot()
+            self.state.scratch.pop("spec_task_boundary_snapshot", None)
+            self.state.loop_count += 1
+            task["last_observation"]["active_task_drift_streak"] = drift_recovery.get(
+                "per_task_streak"
+            )
+            task["last_observation"]["active_task_drift_same_fingerprint_streak"] = (
+                drift_recovery.get("same_fingerprint_streak")
+            )
+            if drift_recovery.get("action") == "rewrite" and not self._spec_global_loop_cap_reached():
+                task["status"] = "needs_contract_rewrite"
+                task["decision_hint"] = (
+                    "repeated_active_task_drift_requires_contract_rewrite: CODE "
+                    "kept violating or over-broadening this active task contract. "
+                    "Rewrite the task as a smaller executable probe, or retire it "
+                    "in favor of a different runnable task."
+                )
+                task["contract_rewrite"] = {
+                    "status": "requested",
+                    "reason": "repeated_active_task_drift",
+                    "rewrite_attempt_key": drift_recovery.get("rewrite_attempt_key"),
+                    "rewrite_attempts": drift_recovery.get("rewrite_attempts"),
+                    "rewrite_attempts_max": drift_recovery.get("rewrite_attempts_max"),
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                spec["active_task_id"] = None
+                self._persist_run_spec(spec)
+                self._append_spec_progress_event(
+                    "drift_recovery",
+                    spec,
+                    task,
+                    extra={
+                        "reason": "repeated_active_task_drift",
+                        "action": "rewrite",
+                        "per_task_streak": drift_recovery.get("per_task_streak"),
+                        "same_fingerprint_streak": drift_recovery.get(
+                            "same_fingerprint_streak"
+                        ),
+                        "fingerprint": drift_recovery.get("fingerprint"),
+                    },
+                )
+                rewrite_focus = self._spec_design_rewrite_focus(
+                    task,
+                    ["repeated active_task_drift"],
+                    failure_summary=str(drift_recovery.get("summary") or ""),
+                )
+                self.state.scratch["spec_rewrite_focus"] = rewrite_focus
+                self.state.scratch["spec_rewrite_target_task_id"] = str(
+                    task.get("task_id") or ""
+                )
+                self.state.current = AgentStateName.SPEC_SYNTH
+                return
+            task["status"] = "deferred_contract_drift"
+            task["decision_hint"] = (
+                "contract_drift_streak_deferred: active-task drift repeated after "
+                "the contract rewrite budget was exhausted. Keep this task out of "
+                "CODE and schedule a different runnable task."
+            )
+            task["contract_rewrite"] = {
+                "status": "deferred",
+                "reason": "repeated_active_task_drift",
+                "rewrite_attempt_key": drift_recovery.get("rewrite_attempt_key"),
+                "rewrite_attempts": drift_recovery.get("rewrite_attempts"),
+                "rewrite_attempts_max": drift_recovery.get("rewrite_attempts_max"),
+                "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+            spec["active_task_id"] = None
+            self._persist_run_spec(spec)
+            self._append_spec_progress_event(
+                "drift_recovery",
+                spec,
+                task,
+                extra={
+                    "reason": "repeated_active_task_drift",
+                    "action": "defer",
+                    "per_task_streak": drift_recovery.get("per_task_streak"),
+                    "same_fingerprint_streak": drift_recovery.get(
+                        "same_fingerprint_streak"
+                    ),
+                    "fingerprint": drift_recovery.get("fingerprint"),
+                },
+            )
+            self.state.current = AgentStateName.SCHEDULE
+            return
         if not failed:
             task["status"] = "closed"
             task["closed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -3772,6 +3934,182 @@ class TodoLifecycleMixin:
             or 0
         )
         return threshold > 0 and streak >= threshold
+
+    def _active_task_drift_recovery_decision(
+        self, task: dict[str, Any], failed: bool
+    ) -> dict[str, Any] | None:
+        if not failed or not self._spec_mode_enabled():
+            return None
+        workflow = self.config.get("workflow", {})
+        per_task_limit = int(
+            workflow.get("spec_active_task_drift_streak_limit", 0) or 0
+        )
+        same_fingerprint_limit = int(
+            workflow.get("spec_active_task_drift_same_fingerprint_limit", 0) or 0
+        )
+        if per_task_limit <= 0 and same_fingerprint_limit <= 0:
+            return None
+        task_id = str(task.get("task_id") or "")
+        if not task_id:
+            return None
+        latest = self._latest_active_task_drift_attempt(task_id)
+        if latest is None:
+            return None
+        per_task_streak, same_fingerprint_streak, fingerprint = (
+            self._active_task_drift_streaks(task_id, latest)
+        )
+        hit_per_task = per_task_limit > 0 and per_task_streak >= per_task_limit
+        hit_fingerprint = (
+            same_fingerprint_limit > 0
+            and same_fingerprint_streak >= same_fingerprint_limit
+        )
+        if not hit_per_task and not hit_fingerprint:
+            return None
+        attempt_key = self._spec_rewrite_origin_task_id(task, task_id)
+        contract = task.get("contract_rewrite")
+        prior_rewrites = (
+            int(contract.get("rewrite_attempts", 0) or 0)
+            if isinstance(contract, dict)
+            else 0
+        )
+        max_rewrites = int(
+            workflow.get("spec_active_task_drift_rewrite_attempts", 1) or 0
+        )
+        next_rewrite = prior_rewrites + 1
+        action = "rewrite" if max_rewrites > 0 and prior_rewrites < max_rewrites else "defer"
+        summary = self._active_task_drift_rewrite_summary(task_id, latest)
+        return {
+            "action": action,
+            "per_task_streak": per_task_streak,
+            "same_fingerprint_streak": same_fingerprint_streak,
+            "fingerprint": fingerprint,
+            "rewrite_attempt_key": attempt_key,
+            "rewrite_attempts": min(next_rewrite, max(prior_rewrites, max_rewrites)),
+            "rewrite_attempts_max": max_rewrites,
+            "summary": summary,
+        }
+
+    def _latest_active_task_drift_attempt(self, task_id: str) -> dict[str, Any] | None:
+        for attempt in reversed(self._recent_todo_attempts(task_id)):
+            if (
+                int(attempt.get("loop", -1)) == self.state.loop_count
+                and self._attempt_is_active_task_drift(attempt)
+            ):
+                return attempt
+        observation = self.state.scratch.get("last_candidate_observation")
+        if isinstance(observation, dict) and self._attempt_is_active_task_drift(observation):
+            record = dict(observation)
+            record.setdefault("todo_id", task_id)
+            record.setdefault("loop", self.state.loop_count)
+            return record
+        return None
+
+    def _active_task_drift_streaks(
+        self, task_id: str, latest: dict[str, Any]
+    ) -> tuple[int, int, str]:
+        latest_fingerprint = self._active_task_drift_fingerprint(latest)
+        per_task_streak = 0
+        same_fingerprint_streak = 0
+        same_fingerprint_contiguous = True
+        attempts = [
+            attempt
+            for attempt in self._recent_todo_attempts(task_id)
+            if str(attempt.get("todo_id") or task_id) == task_id
+        ]
+        if latest not in attempts:
+            attempts.append(latest)
+        attempts.sort(key=lambda attempt: int(attempt.get("loop", -1)))
+        for attempt in reversed(attempts):
+            if not self._attempt_is_active_task_drift(attempt):
+                break
+            per_task_streak += 1
+            if (
+                same_fingerprint_contiguous
+                and self._active_task_drift_fingerprint(attempt) == latest_fingerprint
+            ):
+                same_fingerprint_streak += 1
+            else:
+                same_fingerprint_contiguous = False
+        return per_task_streak, same_fingerprint_streak, latest_fingerprint
+
+    @staticmethod
+    def _attempt_is_active_task_drift(attempt: dict[str, Any]) -> bool:
+        if attempt.get("budget_counted") is not False:
+            return False
+        return (
+            str(attempt.get("failure_class") or "") == "active_task_drift"
+            or str(attempt.get("status") or "")
+            in {
+                "rejected_active_task_file_drift",
+                "rejected_active_task_region_drift",
+                "rejected_active_task_shape_drift",
+                "rejected_todo_axis_drift",
+                "rejected_todo_family_drift",
+                "rejected_todo_scope_drift",
+            }
+        )
+
+    def _active_task_drift_fingerprint(self, attempt: dict[str, Any]) -> str:
+        explicit = str(attempt.get("fingerprint") or "").strip()
+        if explicit:
+            return explicit
+        detail = " ".join(
+            str(attempt.get(key, ""))
+            for key in (
+                "status",
+                "failure_class",
+                "stage_result",
+                "tactic_stage",
+                "failure_detail",
+                "no_change_reason",
+                "summary",
+            )
+        )
+        return self._normalize_fingerprint_text(detail)[:240]
+
+    def _active_task_drift_rewrite_summary(
+        self, task_id: str, latest: dict[str, Any]
+    ) -> str:
+        attempts = [
+            attempt
+            for attempt in self._recent_todo_attempts(task_id)
+            if self._attempt_is_active_task_drift(attempt)
+        ][-5:]
+        lines = [
+            "Repeated active-task drift blocked CODE execution. Rewrite only the "
+            "targeted task contract as a smaller executable probe, or defer it "
+            "and keep sibling tasks runnable.",
+            "Latest drift: "
+            + self._truncate_text(
+                str(
+                    latest.get("no_change_reason")
+                    or latest.get("failure_detail")
+                    or latest.get("summary")
+                    or ""
+                ),
+                600,
+            ),
+        ]
+        if attempts:
+            lines.append("Recent drift attempts:")
+            for attempt in attempts:
+                lines.append(
+                    "- loop={loop} status={status} stage={stage} detail={detail}".format(
+                        loop=attempt.get("loop"),
+                        status=attempt.get("status"),
+                        stage=attempt.get("tactic_stage") or attempt.get("stage_result"),
+                        detail=self._truncate_text(
+                            str(
+                                attempt.get("no_change_reason")
+                                or attempt.get("failure_detail")
+                                or attempt.get("summary")
+                                or ""
+                            ),
+                            220,
+                        ),
+                    )
+                )
+        return "\n".join(lines)
 
     def _spec_current_attempt_counts_toward_budget(self, failed: bool) -> bool:
         if not failed:
@@ -4013,6 +4351,11 @@ class TodoLifecycleMixin:
         tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
         survivor = self._terminal_survivor_summary(candidate_events)
         trajectory_quality = self._terminal_trajectory_quality(tasks, candidate_events)
+        drift_recovery_summary = self._terminal_drift_recovery_summary(
+            tasks,
+            candidate_events,
+            spec_events,
+        )
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -4046,6 +4389,7 @@ class TodoLifecycleMixin:
             "last_spec_progress_event": spec_events[-1] if spec_events else None,
             "last_candidate_event": candidate_events[-1] if candidate_events else None,
         }
+        terminal.update(drift_recovery_summary)
         if survivor:
             terminal["survivor"] = survivor
         if trajectory_quality:
@@ -4126,6 +4470,50 @@ class TodoLifecycleMixin:
             "improved_candidate_id": latest_improved.get("candidate_id"),
             "improved_candidate_spec_task_id": latest_improved.get("spec_task_id"),
             "improved_candidate_matches_probe_plan": latest_matches,
+        }
+
+    def _terminal_drift_recovery_summary(
+        self,
+        tasks: list[Any],
+        candidate_events: list[dict[str, Any]],
+        spec_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        drift_records = [
+            record
+            for record in candidate_events
+            if isinstance(record, dict)
+            and (
+                str(record.get("failure_class")) == "active_task_drift"
+                or self._is_active_todo_drift_record(record)
+            )
+        ]
+        max_streak = 0
+        current_streak = 0
+        previous_task_id = ""
+        for record in drift_records:
+            task_id = str(record.get("todo_id") or record.get("spec_task_id") or "")
+            if task_id and task_id == previous_task_id:
+                current_streak += 1
+            else:
+                current_streak = 1
+                previous_task_id = task_id
+            max_streak = max(max_streak, current_streak)
+        recovery_events = [
+            event
+            for event in spec_events
+            if isinstance(event, dict) and str(event.get("event")) == "drift_recovery"
+        ]
+        return {
+            "active_task_drift_count": len(drift_records),
+            "max_active_task_drift_streak": max_streak,
+            "drift_recovery_count": len(recovery_events),
+            "drift_deferred_task_ids": [
+                str(task.get("task_id") or "")
+                for task in tasks
+                if isinstance(task, dict)
+                and str(task.get("status")) == "deferred_contract_drift"
+                and str(task.get("task_id") or "")
+            ],
         }
 
     def _candidate_record_matches_spec_task(
@@ -5123,6 +5511,7 @@ class TodoLifecycleMixin:
             "diagnostic_summary",
             "diagnostics",
             "failure_origin",
+            "fingerprint",
             "issue_scope",
             "repo_valid_after_restore",
             "repair_task_eligible",
