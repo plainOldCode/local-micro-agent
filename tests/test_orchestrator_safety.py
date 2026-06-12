@@ -2376,6 +2376,118 @@ Background / non-constraints
             progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
             self.assertIn('"event": "portfolio_reopened"', progress_events)
 
+    def test_spec_mode_defers_portfolio_task_when_recovery_rounds_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "portfolio-exhausted",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "repeated failed tactic",
+                        "status": "failed",
+                        "deliverables": ["target.txt"],
+                        "recovery_rounds": 2,
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_reopen_failed_portfolio_tasks": True,
+                        "spec_portfolio_recovery_rounds": 2,
+                        "max_code_test_loops": 10,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.FAILED)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            task = persisted["task_graph"][0]
+            self.assertEqual(task["status"], "deferred_portfolio_exhausted")
+            self.assertIn("portfolio_recovery_exhausted", task["decision_hint"])
+            self.assertEqual(
+                persisted["last_stop_reason"],
+                "no_runnable_tasks_after_portfolio_exhausted",
+            )
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "portfolio_exhausted"', progress_events)
+            self.assertIn('"event": "blocked"', progress_events)
+            self.assertIn('"portfolio_exhausted_tasks": ["task-001"]', progress_events)
+
+    def test_spec_mode_schedules_open_sibling_without_reopening_exhausted_portfolio_task(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            spec = {
+                "version": 2,
+                "spec_id": "portfolio-sibling",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "title": "exhausted failed tactic",
+                        "status": "failed",
+                        "deliverables": ["target.txt"],
+                        "recovery_rounds": 2,
+                        "budget": {"attempts_max": 3, "attempts_used": 3},
+                    },
+                    {
+                        "task_id": "task-002",
+                        "title": "fresh sibling tactic",
+                        "status": "open",
+                        "deliverables": ["target.txt"],
+                        "budget": {"attempts_max": 3, "attempts_used": 0},
+                    },
+                ],
+            }
+            (artifact_dir / "run_spec.json").write_text(json.dumps(spec) + "\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_enabled": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_reopen_failed_portfolio_tasks": True,
+                        "spec_portfolio_recovery_rounds": 2,
+                        "max_code_test_loops": 10,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.loop_count = 4
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            persisted = json.loads((artifact_dir / "run_spec.json").read_text())
+            self.assertEqual(persisted["active_task_id"], "task-002")
+            self.assertEqual(persisted["task_graph"][0]["status"], "failed")
+            self.assertEqual(persisted["task_graph"][1]["status"], "in_progress")
+            progress_events = (artifact_dir / "spec_progress.jsonl").read_text()
+            self.assertIn('"event": "scheduled"', progress_events)
+            self.assertNotIn('"event": "portfolio_reopened"', progress_events)
+
     def test_spec_mode_cold_start_synthesizes_v2_run_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -4048,6 +4160,75 @@ Background / non-constraints
             self.assertEqual(terminal["max_active_task_drift_streak"], 3)
             self.assertEqual(terminal["drift_recovery_count"], 1)
             self.assertEqual(terminal["drift_deferred_task_ids"], ["task-001"])
+
+    def test_terminal_report_summarizes_portfolio_recovery_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "spec_terminal_state_path": ".local_micro_agent/terminal_state.json",
+                        "spec_portfolio_recovery_rounds": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=6),
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "portfolio-report",
+                "last_stop_reason": "no_runnable_tasks_after_portfolio_exhausted",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "deferred_portfolio_exhausted",
+                        "title": "repeated local tactic",
+                        "recovery_rounds": 2,
+                    }
+                ],
+            }
+            agent.state.scratch["run_spec"] = spec
+            (artifact_dir / "spec_progress.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "event": "portfolio_reopened",
+                                "reopened_tasks": ["task-001"],
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "event": "portfolio_reopened",
+                                "reopened_tasks": ["task-001"],
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "event": "portfolio_exhausted",
+                                "exhausted_tasks": ["task-001"],
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+
+            agent._persist_spec_report()
+
+            terminal = json.loads((artifact_dir / "terminal_state.json").read_text())
+            self.assertEqual(terminal["portfolio_reopened_count"], 2)
+            self.assertEqual(terminal["portfolio_exhausted_count"], 1)
+            self.assertEqual(terminal["portfolio_exhausted_task_ids"], ["task-001"])
+            self.assertEqual(terminal["max_portfolio_recovery_rounds"], 2)
 
     def test_needs_contract_rewrite_is_schedulable_without_design_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

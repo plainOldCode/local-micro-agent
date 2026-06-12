@@ -1874,6 +1874,7 @@ class TodoLifecycleMixin:
             "deferred_contract_drift",
             "deferred_design",
             "deferred_design_invalid",
+            "deferred_portfolio_exhausted",
         }
 
     @staticmethod
@@ -2553,6 +2554,18 @@ class TodoLifecycleMixin:
                     },
                 )
                 open_candidates = self._schedulable_spec_tasks(tasks)
+            else:
+                exhausted = self._defer_exhausted_spec_portfolio_tasks(tasks)
+                if exhausted:
+                    self._persist_run_spec(spec)
+                    self._append_spec_progress_event(
+                        "portfolio_exhausted",
+                        spec,
+                        extra={
+                            "exhausted_tasks": exhausted,
+                            "remaining_loops": self._spec_remaining_loop_budget(),
+                        },
+                    )
         if not open_candidates:
             blocked_extra = self._spec_blocked_event_extra(tasks)
             partial_success = (
@@ -2847,6 +2860,47 @@ class TodoLifecycleMixin:
                 break
         return reopened
 
+    def _defer_exhausted_spec_portfolio_tasks(self, tasks: list[Any]) -> list[str]:
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("spec_reopen_failed_portfolio_tasks"):
+            return []
+        max_rounds = int(
+            workflow.get(
+                "spec_portfolio_recovery_rounds",
+                workflow.get("spec_task_recovery_rounds", 0),
+            )
+            or 0
+        )
+        if max_rounds <= 0:
+            return []
+        exhausted: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict) or str(task.get("status")) != "failed":
+                continue
+            deliverables = task.get("deliverables")
+            if not isinstance(deliverables, list) or not any(
+                str(item).strip() for item in deliverables
+            ):
+                continue
+            rounds = int(task.get("recovery_rounds", 0) or 0)
+            if rounds < max_rounds:
+                continue
+            task["status"] = "deferred_portfolio_exhausted"
+            task["portfolio_exhausted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            task["decision_hint"] = (
+                "portfolio_recovery_exhausted: repeated failed or non-improving "
+                "attempts exhausted the portfolio revisit budget. Move to another "
+                "runnable task or stop cleanly instead of reopening this tactic."
+            )
+            task_id = str(task.get("task_id") or "")
+            self.state.notes.append(
+                f"Deferred exhausted portfolio spec task: {task_id} "
+                f"(recovery {rounds}/{max_rounds})"
+            )
+            if task_id:
+                exhausted.append(task_id)
+        return exhausted
+
     @staticmethod
     def _failed_spec_prerequisite_ids(tasks: list[Any]) -> set[str]:
         failed = {
@@ -2882,6 +2936,7 @@ class TodoLifecycleMixin:
         blocked_tasks = self._spec_blocked_task_ids(tasks)
         design_failed = self._design_failed_spec_task_ids(tasks)
         drift_deferred = self._contract_drift_deferred_spec_task_ids(tasks)
+        portfolio_exhausted = self._portfolio_exhausted_spec_task_ids(tasks)
         remaining = self._spec_remaining_loop_budget()
         stop_reason = "no_recovery_possible"
         if design_failed and self._all_remaining_spec_tasks_design_failed(tasks):
@@ -2892,6 +2947,8 @@ class TodoLifecycleMixin:
             )
         elif drift_deferred and self._all_remaining_spec_tasks_contract_drift_deferred(tasks):
             stop_reason = "no_runnable_tasks_after_drift_deferred"
+        elif portfolio_exhausted and self._all_remaining_spec_tasks_exhausted(tasks):
+            stop_reason = "no_runnable_tasks_after_portfolio_exhausted"
         elif (
             failed_prerequisites
             and remaining
@@ -2909,6 +2966,7 @@ class TodoLifecycleMixin:
             "failed_prerequisites": failed_prerequisites,
             "design_failed_tasks": design_failed,
             "drift_deferred_tasks": drift_deferred,
+            "portfolio_exhausted_tasks": portfolio_exhausted,
         }
 
     @staticmethod
@@ -2928,6 +2986,16 @@ class TodoLifecycleMixin:
             for task in tasks
             if isinstance(task, dict)
             and str(task.get("status")) == "deferred_contract_drift"
+            and str(task.get("task_id") or "")
+        ]
+
+    @staticmethod
+    def _portfolio_exhausted_spec_task_ids(tasks: list[Any]) -> list[str]:
+        return [
+            str(task.get("task_id") or "")
+            for task in tasks
+            if isinstance(task, dict)
+            and str(task.get("status")) == "deferred_portfolio_exhausted"
             and str(task.get("task_id") or "")
         ]
 
@@ -2974,6 +3042,23 @@ class TodoLifecycleMixin:
                 continue
             saw_remaining = True
             if status != "deferred_contract_drift":
+                return False
+        return saw_remaining
+
+    def _all_remaining_spec_tasks_exhausted(self, tasks: list[Any]) -> bool:
+        exhausted_statuses = {
+            "deferred_contract_drift",
+            "deferred_portfolio_exhausted",
+        }
+        saw_remaining = False
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "open"))
+            if status == "closed":
+                continue
+            saw_remaining = True
+            if status not in exhausted_statuses:
                 return False
         return saw_remaining
 
@@ -4356,6 +4441,10 @@ class TodoLifecycleMixin:
             candidate_events,
             spec_events,
         )
+        portfolio_recovery_summary = self._terminal_portfolio_recovery_summary(
+            tasks,
+            spec_events,
+        )
         terminal = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "state": str(self.state.current),
@@ -4390,6 +4479,7 @@ class TodoLifecycleMixin:
             "last_candidate_event": candidate_events[-1] if candidate_events else None,
         }
         terminal.update(drift_recovery_summary)
+        terminal.update(portfolio_recovery_summary)
         if survivor:
             terminal["survivor"] = survivor
         if trajectory_quality:
@@ -4521,6 +4611,42 @@ class TodoLifecycleMixin:
                 and str(task.get("status")) == "deferred_contract_drift"
                 and str(task.get("task_id") or "")
             ],
+        }
+
+    def _terminal_portfolio_recovery_summary(
+        self,
+        tasks: list[Any],
+        spec_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        reopen_events = [
+            event
+            for event in spec_events
+            if isinstance(event, dict) and str(event.get("event")) == "portfolio_reopened"
+        ]
+        exhausted_events = [
+            event
+            for event in spec_events
+            if isinstance(event, dict) and str(event.get("event")) == "portfolio_exhausted"
+        ]
+        exhausted_task_ids = [
+            str(task.get("task_id") or "")
+            for task in tasks
+            if isinstance(task, dict)
+            and str(task.get("status")) == "deferred_portfolio_exhausted"
+            and str(task.get("task_id") or "")
+        ]
+        return {
+            "portfolio_reopened_count": len(reopen_events),
+            "portfolio_exhausted_count": len(exhausted_events),
+            "portfolio_exhausted_task_ids": exhausted_task_ids,
+            "max_portfolio_recovery_rounds": int(
+                workflow.get(
+                    "spec_portfolio_recovery_rounds",
+                    workflow.get("spec_task_recovery_rounds", 0),
+                )
+                or 0
+            ),
         }
 
     def _candidate_record_matches_spec_task(
@@ -4696,6 +4822,7 @@ class TodoLifecycleMixin:
             "last_observation": task.get("last_observation"),
             "design_contract": task.get("design_contract"),
             "decision_hint": task.get("decision_hint"),
+            "portfolio_exhausted_at": task.get("portfolio_exhausted_at"),
         }
         return {
             key: value

@@ -192,7 +192,7 @@
     "spec_include_correct_survivor_context": true,
     "spec_relax_failed_dependencies_with_budget": true,
     "spec_reopen_failed_portfolio_tasks": true,
-    "spec_portfolio_recovery_rounds": 50,
+    "spec_portfolio_recovery_rounds": 2,
     "spec_idea_model_role": "reasoner",
     "spec_finalize_model_role": "spec_synth",
     "spec_portfolio_reopen_batch_size": 0,

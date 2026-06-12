@@ -95,7 +95,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertTrue(workflow["spec_tactic_portfolio"])
         self.assertTrue(workflow["spec_relax_failed_dependencies_with_budget"])
         self.assertTrue(workflow["spec_reopen_failed_portfolio_tasks"])
-        self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 50)
+        self.assertEqual(workflow["spec_portfolio_recovery_rounds"], 2)
         self.assertTrue(workflow["spec_grounding_gate"])
         self.assertTrue(workflow["spec_quality_gate"])
         self.assertEqual(workflow["spec_quality_rewrite_attempts"], 2)
