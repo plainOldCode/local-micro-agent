@@ -103,6 +103,10 @@ class ConfigFileTests(unittest.TestCase):
         self.assertTrue(workflow["spec_gate_soft_fallback"])
         self.assertTrue(workflow["spec_two_call_synthesis"])
         self.assertEqual(workflow["spec_idea_model_role"], "reasoner")
+        self.assertTrue(workflow["spec_thinking_brief_enabled"])
+        self.assertEqual(workflow["spec_thinking_brief_model_role"], "reasoner")
+        self.assertTrue(workflow["spec_thinking_brief_accept_reasoning_only"])
+        self.assertEqual(workflow["spec_thinking_brief_char_limit"], 8000)
         self.assertEqual(workflow["spec_finalize_model_role"], "spec_synth")
         self.assertEqual(
             workflow["candidate_history_path"],

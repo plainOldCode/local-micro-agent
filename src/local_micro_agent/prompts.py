@@ -204,6 +204,22 @@ recent failures. Output concise Markdown only:
 This is advisory input for a no-think JSON finalizer. Always emit final
 Markdown content. Do not end after hidden reasoning."""
 
+
+SPEC_THINK_BRIEF_SYSTEM = """You are the SPEC_THINK_BRIEF node in a local coding-agent FSM.
+Do not write code and do not emit run_spec JSON.
+Analyze the request, plan, source, semantic facts, grounding facts, and recent
+failures so a separate no-think JSON finalizer can produce a bounded run spec.
+Output compact Markdown only with these sections:
+- Objective interpretation
+- Writable target regions
+- Rejected or recently failed shapes
+- Required material-difference axes
+- Smallest guarded probe candidates
+- Finalizer constraints to enforce
+
+This is an analysis-only brief. It may use thinking internally, but the visible
+brief must be concise and must not contain JSON run-spec artifacts."""
+
 ACCEPTANCE_SYNTH_SYSTEM = """You are the ACCEPT_SYNTH node in a local coding-agent FSM.
 Write task-local acceptance tests before implementation.
 Output strict JSON:
@@ -388,6 +404,32 @@ def spec_idea_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]
     focus_block = f"\n\nSpec focus and grounding facts:\n{focus}" if focus.strip() else ""
     return [
         {"role": "system", "content": SPEC_IDEA_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}"
+                f"{semantic_block}"
+                f"{focus_block}"
+            ),
+        },
+    ]
+
+
+def spec_think_brief_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    semantic_analysis = state.scratch.get("semantic_analysis")
+    semantic_block = (
+        f"\n\nSemantic analysis:\n{semantic_analysis}"
+        if isinstance(semantic_analysis, str) and semantic_analysis.strip()
+        else ""
+    )
+    focus_block = f"\n\nSpec focus and deterministic constraints:\n{focus}" if focus.strip() else ""
+    return [
+        {"role": "system", "content": SPEC_THINK_BRIEF_SYSTEM},
         {
             "role": "user",
             "content": (

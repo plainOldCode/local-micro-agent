@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from ..decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
-from ..models import ModelResponse
+from ..models import ModelResponse, ModelTextParts
 from ..state import CodeChange
 from ..validators import (
     JsonValidationError,
@@ -108,6 +108,107 @@ class ModelRuntimeMixin:
                 "Model returned reasoning-only response with empty final content"
             )
         return output
+
+    async def _model_thinking_brief(
+        self,
+        role: str,
+        messages: list[dict[str, str]],
+        call_site: str = "spec_think_brief",
+    ) -> ModelTextParts:
+        start = self._profile_span_start()
+        requested_role = role
+        role = self._model_role_for_call_site(role, call_site)
+        prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
+        model_name = self.config.get("models", {}).get(role) or self.config.get(
+            "models", {}
+        ).get("default")
+        provider = self.config.get("providers", {}).get(str(model_name), {})
+        model = self.models.get(role)
+        stream_callback, stream_stats = self._profile_model_stream_callback(
+            model=model,
+            role=role,
+            call_site=call_site,
+            model_name=str(model_name or ""),
+            provider=provider,
+        )
+        try:
+            if stream_callback is not None:
+                response = await model.chat(messages, stream_callback=stream_callback)
+            else:
+                response = await model.chat(messages)
+        except Exception as exc:
+            self._record_profile_span(
+                "model_call",
+                start,
+                {
+                    "role": role,
+                    **({"requested_role": requested_role} if requested_role != role else {}),
+                    "call_site": call_site,
+                    "model_name": model_name,
+                    "provider_kind": provider.get("kind"),
+                    "provider_model": provider.get("model"),
+                    "message_count": len(messages),
+                    "prompt_chars": prompt_chars,
+                    "success": False,
+                    "thinking_brief": True,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    **stream_stats,
+                },
+            )
+            raise
+        parts = self._normalize_model_text_parts(response)
+        selected = self._model_text_selected_source(parts)
+        elapsed_seconds = max(time.perf_counter() - start["perf"], 0.0)
+        usage_fields = self._profile_model_usage_fields(parts.usage, elapsed_seconds)
+        budget_fields = self._model_token_budget_fields(
+            provider,
+            parts.usage,
+            prompt_chars=prompt_chars,
+            role=role,
+            call_site=call_site,
+        )
+        selected_text = parts.content if selected == "content" else parts.reasoning
+        self._record_profile_span(
+            "model_call",
+            start,
+            {
+                "role": role,
+                **({"requested_role": requested_role} if requested_role != role else {}),
+                "call_site": call_site,
+                "model_name": model_name,
+                "provider_kind": provider.get("kind"),
+                "provider_model": provider.get("model"),
+                "message_count": len(messages),
+                "prompt_chars": prompt_chars,
+                "output_chars": len(parts.content),
+                "thinking_brief": True,
+                "thinking_brief_selected_source": selected,
+                "thinking_brief_chars": len(selected_text),
+                "reasoning_only_accepted": selected == "reasoning",
+                "success": True,
+                **stream_stats,
+                **usage_fields,
+                **budget_fields,
+            },
+        )
+        usage = dict(parts.usage)
+        usage.update(
+            {
+                "thinking_brief_selected_source": selected,
+                "thinking_brief_chars": len(selected_text),
+                "provider_kind": provider.get("kind"),
+                "provider_model": provider.get("model"),
+                "model_name": model_name,
+                "role": role,
+                "call_site": call_site,
+            }
+        )
+        return ModelTextParts(
+            content=parts.content,
+            reasoning=parts.reasoning,
+            usage=usage,
+            source=selected,
+        )
 
     def _reject_reasoning_only_response(
         self,
@@ -384,6 +485,43 @@ class ModelRuntimeMixin:
         if isinstance(response, ModelResponse):
             return response.content, dict(response.usage)
         return str(response), {}
+
+    @staticmethod
+    def _normalize_model_text_parts(response: Any) -> ModelTextParts:
+        if isinstance(response, ModelTextParts):
+            return response
+        if isinstance(response, ModelResponse):
+            content = response.content
+            reasoning = response.reasoning
+            if content.strip() and reasoning.strip():
+                source = "mixed"
+            elif content.strip():
+                source = "content"
+            elif reasoning.strip():
+                source = "reasoning"
+            else:
+                source = "empty"
+            return ModelTextParts(
+                content=content,
+                reasoning=reasoning,
+                usage=dict(response.usage),
+                source=source,
+            )
+        text = str(response)
+        return ModelTextParts(
+            content=text,
+            reasoning="",
+            usage={},
+            source="content" if text.strip() else "empty",
+        )
+
+    @staticmethod
+    def _model_text_selected_source(parts: ModelTextParts) -> str:
+        if parts.content.strip():
+            return "content"
+        if parts.reasoning.strip():
+            return "reasoning"
+        return "empty"
 
     async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type):
         try:

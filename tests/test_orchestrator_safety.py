@@ -524,10 +524,11 @@ class OrchestratorSafetyTests(unittest.TestCase):
             [
                 {"kind": "reasoning", "content": "think-a"},
                 {"kind": "reasoning", "content": "think-b"},
-                "ok",
+                {"kind": "content", "content": "ok"},
             ],
         )
         self.assertEqual(response.usage["reasoning_content_chars"], len("think-athink-b"))
+        self.assertEqual(response.reasoning, "think-athink-b")
         self.assertFalse(response.usage["reasoning_only_response"])
         self.assertEqual(response.usage["completion_tokens"], 3)
 
@@ -562,8 +563,15 @@ class OrchestratorSafetyTests(unittest.TestCase):
             model_module.urllib.request.urlopen = original
 
         self.assertEqual(response.content, "")
-        self.assertEqual(chunks, ["think-a", "think-b"])
+        self.assertEqual(
+            chunks,
+            [
+                {"kind": "reasoning", "content": "think-a"},
+                {"kind": "reasoning", "content": "think-b"},
+            ],
+        )
         self.assertEqual(response.usage["reasoning_content_chars"], len("think-athink-b"))
+        self.assertEqual(response.reasoning, "think-athink-b")
         self.assertTrue(response.usage["reasoning_only_response"])
         self.assertEqual(response.usage["completion_tokens"], 3)
 
@@ -627,6 +635,7 @@ class OrchestratorSafetyTests(unittest.TestCase):
             model_module._post_json = original
 
         self.assertEqual(response.content, " \n")
+        self.assertEqual(response.reasoning, "think")
         self.assertTrue(response.usage["reasoning_only_response"])
 
     def test_model_token_budget_fields_warn_near_input_limit(self) -> None:
@@ -10468,6 +10477,201 @@ Background / non-constraints
                 self.assertEqual(spec["spec_id"], "facts-only")
                 self.assertFalse((repo / ".local_micro_agent" / "spec_idea.md").exists())
                 self.assertIn("Spec idea model call failed", "\n".join(agent.state.notes))
+
+        asyncio.run(run_case())
+
+    def test_spec_thinking_brief_accepts_reasoning_only_output(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                brief = "Use target.py::parse_item and avoid broad structural probes."
+                final_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "think-brief",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "guard parser branch",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "acceptance": {"kind": "metric"},
+                            }
+                        ],
+                    }
+                )
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": ModelResponse(
+                            "",
+                            usage={
+                                "reasoning_only_response": True,
+                                "reasoning_content_chars": len(brief),
+                            },
+                            reasoning=brief,
+                        ),
+                        "spec_synth": final_spec,
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {
+                            "reasoner-model": {"kind": "ollama_native", "think": True},
+                            "spec-model": {"kind": "ollama_native", "think": False},
+                        },
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_thinking_brief_model_role": "reasoner",
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(spec["spec_id"], "think-brief")
+                self.assertFalse((repo / ".local_micro_agent" / "spec_idea.md").exists())
+                self.assertEqual(
+                    (repo / ".local_micro_agent" / "spec_think_brief.md").read_text().strip(),
+                    brief,
+                )
+                meta = json.loads(
+                    (repo / ".local_micro_agent" / "spec_think_brief_meta.json").read_text()
+                )
+                self.assertEqual(meta["selected_source"], "reasoning")
+                self.assertTrue(meta["reasoning_only_accepted"])
+                self.assertTrue(meta["thinking_enabled"])
+                constraints = json.loads(
+                    (repo / ".local_micro_agent" / "spec_synthesis_constraints.json").read_text()
+                )
+                self.assertIn("target.py::parse_item", constraints["allowed_target_regions"])
+                finalizer_prompt = manager.seen["spec_synth"][0][-1]["content"]
+                self.assertIn("Spec thinking brief", finalizer_prompt)
+                self.assertIn("Controller-owned SPEC synthesis constraints", finalizer_prompt)
+                self.assertIn("target.py::parse_item", finalizer_prompt)
+
+        asyncio.run(run_case())
+
+    def test_model_thinking_brief_falls_back_to_content_only_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {},
+                },
+                state,
+            )
+            agent.models = _StaticModelManager("Content-only brief")
+
+            parts = asyncio.run(
+                agent._model_thinking_brief(
+                    "reasoner",
+                    [{"role": "user", "content": "brief"}],
+                    call_site="spec_think_brief",
+                )
+            )
+
+            self.assertEqual(parts.content, "Content-only brief")
+            self.assertEqual(parts.reasoning, "")
+            self.assertEqual(parts.source, "content")
+
+    def test_spec_thinking_brief_empty_output_continues_with_constraints(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                final_spec = json.dumps(
+                    {
+                        "version": 2,
+                        "spec_id": "empty-brief",
+                        "task_graph": [
+                            {
+                                "task_id": "task-001",
+                                "title": "guard parser branch",
+                                "deliverables": ["target.py"],
+                                "target_symbols": ["parse_item"],
+                                "target_regions": ["target.py::parse_item"],
+                                "acceptance": {"kind": "metric"},
+                            }
+                        ],
+                    }
+                )
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": ModelResponse("", usage={}, reasoning=""),
+                        "spec_synth": final_spec,
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_thinking_brief_model_role": "reasoner",
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(spec["spec_id"], "empty-brief")
+                self.assertFalse((repo / ".local_micro_agent" / "spec_think_brief.md").exists())
+                meta = json.loads(
+                    (repo / ".local_micro_agent" / "spec_think_brief_meta.json").read_text()
+                )
+                self.assertEqual(meta["selected_source"], "empty")
+                self.assertIn(
+                    "Spec think brief returned empty output",
+                    "\n".join(agent.state.notes),
+                )
+                finalizer_prompt = manager.seen["spec_synth"][0][-1]["content"]
+                self.assertIn("Controller-owned SPEC synthesis constraints", finalizer_prompt)
 
         asyncio.run(run_case())
 

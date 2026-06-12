@@ -6,10 +6,10 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Protocol
+from typing import Any, Callable, ClassVar, Literal, Protocol
 
 
-StreamChunk = str | dict[str, str]
+StreamChunk = str | dict[str, Any]
 StreamCallback = Callable[[StreamChunk], None]
 
 
@@ -17,6 +17,15 @@ StreamCallback = Callable[[StreamChunk], None]
 class ModelResponse:
     content: str
     usage: dict[str, Any] = field(default_factory=dict)
+    reasoning: str = ""
+
+
+@dataclass(frozen=True)
+class ModelTextParts:
+    content: str
+    reasoning: str
+    usage: dict[str, Any] = field(default_factory=dict)
+    source: Literal["content", "reasoning", "mixed", "empty"] = "empty"
 
 
 class ChatModel(Protocol):
@@ -151,12 +160,12 @@ def _post_openai_stream(
                 if reasoning_chunk:
                     reasoning_chunks.append(reasoning_chunk)
                     if stream_callback is not None:
-                        stream_callback(reasoning_chunk)
+                        stream_callback({"kind": "reasoning", "content": reasoning_chunk})
                 chunk = delta.get("content") or ""
                 if chunk:
                     chunks.append(chunk)
                     if stream_callback is not None:
-                        stream_callback(chunk)
+                        stream_callback({"kind": "content", "content": chunk})
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
@@ -164,9 +173,12 @@ def _post_openai_stream(
     usage = _openai_usage(done_data)
     content = "".join(chunks)
     if reasoning_chunks:
-        usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
+        reasoning = "".join(reasoning_chunks)
+        usage["reasoning_content_chars"] = len(reasoning)
         usage["reasoning_only_response"] = not bool(content.strip())
-    return ModelResponse(content, usage=usage)
+    else:
+        reasoning = ""
+    return ModelResponse(content, usage=usage, reasoning=reasoning)
 
 
 def _post_ollama_stream(
@@ -206,7 +218,7 @@ def _post_ollama_stream(
                     if chunk:
                         chunks.append(chunk)
                         if stream_callback is not None:
-                            stream_callback(chunk)
+                            stream_callback({"kind": "content", "content": chunk})
                 if data.get("done"):
                     done_data = data
                     break
@@ -216,9 +228,12 @@ def _post_ollama_stream(
     usage = _ollama_usage(done_data)
     content = "".join(chunks)
     if reasoning_chunks:
-        usage["reasoning_content_chars"] = len("".join(reasoning_chunks))
+        reasoning = "".join(reasoning_chunks)
+        usage["reasoning_content_chars"] = len(reasoning)
         usage["reasoning_only_response"] = not bool(content.strip())
-    return ModelResponse(content, usage=usage)
+    else:
+        reasoning = ""
+    return ModelResponse(content, usage=usage, reasoning=reasoning)
 
 
 @dataclass(frozen=True)
@@ -301,7 +316,7 @@ class OpenAICompatibleModel:
         if reasoning:
             usage["reasoning_content_chars"] = len(reasoning)
             usage["reasoning_only_response"] = not bool(content.strip())
-        return ModelResponse(content, usage=usage)
+        return ModelResponse(content, usage=usage, reasoning=reasoning)
 
 
 @dataclass(frozen=True)
@@ -357,7 +372,7 @@ class OllamaNativeModel:
         if reasoning:
             usage["reasoning_content_chars"] = len(reasoning)
             usage["reasoning_only_response"] = not bool(content.strip())
-        return ModelResponse(content, usage=usage)
+        return ModelResponse(content, usage=usage, reasoning=reasoning)
 
 
 class ModelManager:

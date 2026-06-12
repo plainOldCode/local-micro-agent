@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from ..decisions import CodeCandidate
-from ..prompts import acceptance_synth_prompt, spec_idea_prompt, spec_prompt
+from ..prompts import (
+    acceptance_synth_prompt,
+    spec_idea_prompt,
+    spec_prompt,
+    spec_think_brief_prompt,
+)
 from ..state import AgentStateName, CodeChange, FileSnapshot, TestResult
 from ..validators import parse_json_object
 
@@ -627,6 +632,24 @@ class TodoLifecycleMixin:
             ".local_micro_agent/spec_idea.md",
         )
 
+    def _spec_think_brief_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_think_brief_path",
+            ".local_micro_agent/spec_think_brief.md",
+        )
+
+    def _spec_think_brief_meta_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_think_brief_meta_path",
+            ".local_micro_agent/spec_think_brief_meta.json",
+        )
+
+    def _spec_synthesis_constraints_path(self) -> Path:
+        return self._workflow_artifact_path(
+            "spec_synthesis_constraints_path",
+            ".local_micro_agent/spec_synthesis_constraints.json",
+        )
+
     async def _maybe_build_spec_idea_context(
         self,
         focus: str,
@@ -637,6 +660,11 @@ class TodoLifecycleMixin:
         if not self._spec_two_call_synthesis_enabled(force):
             return ""
         workflow = self.config.get("workflow", {})
+        if workflow.get("spec_thinking_brief_enabled"):
+            return await self._maybe_build_spec_thinking_brief_context(
+                focus,
+                targeted_rewrite=targeted_rewrite,
+            )
         role = str(workflow.get("spec_idea_model_role") or "reasoner")
         graph_generation_origin = str(
             self.state.scratch.get("spec_graph_generation_origin") or ""
@@ -687,6 +715,197 @@ class TodoLifecycleMixin:
             "must still obey deterministic grounding facts and workflow constraints.\n"
             + brief
         )
+
+    async def _maybe_build_spec_thinking_brief_context(
+        self,
+        focus: str,
+        *,
+        targeted_rewrite: bool,
+    ) -> str:
+        workflow = self.config.get("workflow", {})
+        role = str(
+            workflow.get("spec_thinking_brief_model_role")
+            or workflow.get("spec_idea_model_role")
+            or "reasoner"
+        )
+        graph_generation_origin = str(
+            self.state.scratch.get("spec_graph_generation_origin") or ""
+        )
+        if targeted_rewrite:
+            call_site = "spec_think_brief_rewrite"
+        elif graph_generation_origin.startswith("reseed"):
+            call_site = "spec_think_brief_reseed"
+        else:
+            call_site = "spec_think_brief"
+        remaining = self._spec_synth_call_budget_remaining()
+        if remaining == 0:
+            self.state.notes.append("Spec think brief skipped: spec synthesis call budget exhausted")
+            return self._spec_synthesis_constraints_context()
+        if remaining == 1:
+            self.state.notes.append(
+                "Spec think brief skipped: preserving final spec synthesis call budget"
+            )
+            return self._spec_synthesis_constraints_context()
+        if not self._consume_spec_synth_call_budget(call_site):
+            return self._spec_synthesis_constraints_context()
+        try:
+            parts = await self._model_thinking_brief(
+                role,
+                spec_think_brief_prompt(self.state, focus=focus),
+                call_site=call_site,
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                f"Spec think brief model call failed; continuing with finalizer only: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self.state.scratch.pop("spec_think_brief", None)
+            return self._spec_synthesis_constraints_context()
+        selected_source = parts.source
+        if selected_source == "reasoning" and not workflow.get(
+            "spec_thinking_brief_accept_reasoning_only", True
+        ):
+            selected_source = "empty"
+        if selected_source == "content":
+            raw_brief = parts.content
+        elif selected_source == "reasoning":
+            raw_brief = parts.reasoning
+        else:
+            raw_brief = ""
+        brief = self._slice_text(
+            raw_brief.strip(),
+            int(workflow.get("spec_thinking_brief_char_limit", 8000) or 8000),
+        )
+        resolved_role = str(parts.usage.get("role") or role)
+        meta = {
+            "role": resolved_role,
+            "call_site": parts.usage.get("call_site", call_site),
+            "model_name": parts.usage.get("model_name"),
+            "provider_kind": parts.usage.get("provider_kind"),
+            "provider_model": parts.usage.get("provider_model"),
+            "content_chars": len(parts.content),
+            "reasoning_chars": len(parts.reasoning),
+            "selected_source": selected_source,
+            "selected_chars": len(brief),
+            "reasoning_only_response": bool(parts.usage.get("reasoning_only_response")),
+            "reasoning_only_accepted": selected_source == "reasoning",
+            "thinking_enabled": self._provider_thinking_enabled(resolved_role),
+            "preserve_thinking_enabled": bool(
+                workflow.get("spec_thinking_brief_preserve_thinking", False)
+            ),
+        }
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = parts.usage.get(key)
+            if isinstance(value, int):
+                meta[key] = value
+        if brief:
+            path = self._spec_think_brief_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(brief.rstrip() + "\n")
+            self.state.scratch["spec_think_brief"] = brief
+            self.state.scratch["spec_idea_brief"] = brief
+            self.state.notes.append(f"Persisted spec think brief: {path}")
+        else:
+            self.state.scratch.pop("spec_think_brief", None)
+            self.state.notes.append(
+                "Spec think brief returned empty output; finalizer will use facts only"
+            )
+        meta_path = self._spec_think_brief_meta_path()
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+        self.state.scratch["spec_think_brief_meta"] = meta
+        context_parts = []
+        if brief:
+            context_parts.append(
+                "Spec thinking brief from a non-authoritative analysis pass "
+                "follows. Use it only as advisory design input. The final JSON "
+                "spec must still obey deterministic grounding facts, synthesis "
+                "constraints, and workflow constraints.\n"
+                + brief
+            )
+        context_parts.append(self._spec_synthesis_constraints_context())
+        return "\n\n".join(part for part in context_parts if part.strip())
+
+    def _provider_thinking_enabled(self, role: str) -> bool | None:
+        provider = self._provider_for_role(role)
+        if "think" in provider:
+            return bool(provider.get("think"))
+        extra_body = provider.get("extra_body")
+        if isinstance(extra_body, dict):
+            if "enable_thinking" in extra_body:
+                return bool(extra_body.get("enable_thinking"))
+            kwargs = extra_body.get("chat_template_kwargs")
+            if isinstance(kwargs, dict) and "enable_thinking" in kwargs:
+                return bool(kwargs.get("enable_thinking"))
+        extra_options = provider.get("extra_options")
+        if isinstance(extra_options, dict) and "enable_thinking" in extra_options:
+            return bool(extra_options.get("enable_thinking"))
+        return None
+
+    def _spec_synthesis_constraints_context(self) -> str:
+        constraints = self._spec_synthesis_constraints()
+        path = self._spec_synthesis_constraints_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(constraints, ensure_ascii=False, indent=2) + "\n")
+        self.state.scratch["spec_synthesis_constraints"] = constraints
+        return (
+            "Controller-owned SPEC synthesis constraints follow. They are "
+            "authoritative over any advisory thinking brief.\n"
+            + json.dumps(constraints, ensure_ascii=False, indent=2)
+        )
+
+    def _spec_synthesis_constraints(self) -> dict[str, Any]:
+        workflow = self.config.get("workflow", {})
+        facts = self._current_spec_grounding_facts()
+        failure_records = self._read_spec_jsonl(self._failure_signature_path())[-12:]
+        issue_codes: list[str] = []
+        for record in failure_records:
+            code = str(record.get("issue_code") or "").strip()
+            if code and code not in issue_codes:
+                issue_codes.append(code)
+        cooldown_keys = self._current_failure_cooldown_keys()
+        plateau_keys = self._metric_neutral_plateau_cooldown_keys()
+        drift_keys = list(self._drift_saturated_cooldown_keys().keys())
+        allowed_regions = [
+            str(region)
+            for region in facts.get("allowed_target_regions", []) or []
+            if str(region).strip()
+        ]
+        return {
+            "allowed_target_regions": allowed_regions[:80],
+            "banned_cooldown_keys": [
+                key for key in [*cooldown_keys, *plateau_keys, *drift_keys] if key
+            ][:24],
+            "banned_issue_codes": issue_codes[:12],
+            "required_material_difference": {
+                "target_region": True,
+                "tactic_stage": True,
+                "validator_kind": False,
+                "deliverables": False,
+            },
+            "probe_contract": {
+                "max_files_changed": int(
+                    workflow.get("spec_probe_max_files_changed", 1) or 1
+                ),
+                "max_hunks": int(workflow.get("spec_probe_max_hunks", 2) or 2),
+                "max_changed_lines": int(
+                    workflow.get("spec_probe_max_changed_lines", 20) or 20
+                ),
+                "max_changed_functions": int(
+                    workflow.get("spec_probe_max_changed_functions", 1) or 1
+                ),
+            },
+            "minimum_runnable_local_edit_tasks": int(
+                workflow.get("spec_minimum_runnable_local_edit_tasks", 1) or 1
+            ),
+            "forbidden_task_shapes": [
+                "broad_structural_probe_without_guard",
+                "rollback_or_shrink_plan_without_smaller_probe",
+            ],
+            "must_preserve_sibling_frontier": bool(
+                self.state.scratch.get("spec_rewrite_target_task_id")
+            ),
+        }
 
     def _spec_grounding_gate_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})
