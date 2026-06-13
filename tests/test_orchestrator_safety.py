@@ -26,6 +26,7 @@ from local_micro_agent.prompts import (
     read_prompt,
     reflect_prompt,
     semantic_analysis_prompt,
+    spec_hypothesis_repair_prompt,
     spec_idea_prompt,
     spec_prompt,
 )
@@ -1772,6 +1773,35 @@ class OrchestratorSafetyTests(unittest.TestCase):
 
             self.assertIn("Semantic analysis", messages[1]["content"])
             self.assertIn("keep output stable", messages[1]["content"])
+
+    def test_spec_hypothesis_repair_prompt_targets_validation_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="optimize")
+            state.plan_markdown = "plan"
+            messages = spec_hypothesis_repair_prompt(
+                state,
+                brief="BEGIN_HYPOTHESIS_OPTION hyp\nchange_boundary.kind: local_edit\nEND_HYPOTHESIS_OPTION",
+                options_payload={
+                    "accepted_count": 0,
+                    "rejected": [
+                        {
+                            "hypothesis_id": "hyp",
+                            "issues": [
+                                "structural_hypothesis_boundary_kind_mismatch",
+                                "unresolved_or_non_writable_boundary:target.py::foo (note)",
+                            ],
+                        }
+                    ],
+                },
+                focus="allowed_target_regions: target.py::foo",
+            )
+
+            content = messages[1]["content"]
+            self.assertIn("Fix every validation issue", content)
+            self.assertIn("structural_hypothesis_boundary_kind_mismatch", content)
+            self.assertIn("structural_probe|structural_expand", content)
+            self.assertIn("exact deterministic grounding regions", content)
+            self.assertIn("do not add parenthetical notes", content)
 
     def test_code_prompt_can_request_xml_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11259,7 +11289,8 @@ END_HYPOTHESIS_OPTION"""
                 self.assertEqual(spec["task_graph"][0]["hypothesis_id"], "hyp-parse-guard")
                 self.assertEqual(len(manager.seen["reasoner"]), 2)
                 repair_prompt = manager.seen["reasoner"][1][-1]["content"]
-                self.assertIn("Repair only the hypothesis brief format", repair_prompt)
+                self.assertIn("Repair the typed hypothesis blocks", repair_prompt)
+                self.assertIn("Fix every validation issue", repair_prompt)
                 self.assertIn("BEGIN_HYPOTHESIS_OPTION", repair_prompt)
                 options = json.loads(
                     (repo / ".local_micro_agent" / "spec_hypothesis_options.json").read_text()
