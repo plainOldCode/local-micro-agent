@@ -78,11 +78,12 @@ generated files. Smoke check: `python3 -m compileall src`.
 
 The workflow section has ~80 flags, and most long-run failures come from
 invalid flag combinations rather than from the model. Set `workflow.preset` to
-one of four vetted bundles from `src/local_micro_agent/presets.py`:
+one of five vetted bundles from `src/local_micro_agent/presets.py`:
 
 | Preset | For | Enables |
 |---|---|---|
 | `minimal` | conservative fix-the-tests loop | deterministic test decisions, retries, target-not-found repair; all exploration machinery off |
+| `simple` | mini-swe/Pi-style classic loop | classic `READ -> CODE -> TEST`, narrow deterministic CODE/TEST mechanics, optional advisory thinking brief; no run-spec graph, scheduler, structural lifecycle, or candidate queue |
 | `search` | long-running metric search | conditional reflect, brainstorm after repeated rejections, novelty/axis/region gates, adaptive gate controller, candidate history + artifacts, continue-after-improvement, profiling |
 | `structural` | multi-step refactors | `search` + run-spec task graph, semantic analysis, structural scaffold/probe/expand lifecycle, structural checkpoints |
 | `spec` | build a spec through a task graph | `structural` + strict spec-mode scheduling: task-scoped READ, synthesized acceptance, dependency gates, recovery rounds, progress/report artifacts, grounded/design/quality/probe gates |

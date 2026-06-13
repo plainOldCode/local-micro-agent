@@ -12705,6 +12705,112 @@ END_HYPOTHESIS_OPTION"""
             self.assertEqual(parts.reasoning, "")
             self.assertEqual(parts.source, "content")
 
+    def test_simple_mode_persists_reasoning_only_thinking_brief(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                brief = "- Edit target.py::parse_item only.\n- Keep the return fallback."
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": ModelResponse("", reasoning=brief),
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "default": "reasoner-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "preset": "simple",
+                            "seed_files": ["target.py"],
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+                self.assertEqual(agent.state.current, AgentStateName.CODE)
+                brief_path = repo / ".local_micro_agent" / "simple_thinking_brief.md"
+                meta_path = repo / ".local_micro_agent" / "simple_thinking_brief_meta.json"
+                self.assertEqual(brief_path.read_text().strip(), brief)
+                meta = json.loads(meta_path.read_text())
+                self.assertEqual(meta["status"], "ok")
+                self.assertEqual(meta["selected_source"], "reasoning")
+                self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
+                self.assertFalse(
+                    (repo / ".local_micro_agent" / "spec_synthesis_constraints.json").exists()
+                )
+
+        asyncio.run(run_case())
+
+    def test_simple_thinking_brief_is_advisory_code_context(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                manager = _RoleModelManager(
+                    {
+                        "coder": '{"changes":[]}',
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "coder": "coder-model",
+                            "default": "coder-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "preset": "simple",
+                            "simple_thinking_brief_enabled": False,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+                agent.state.scratch["simple_thinking_brief"] = (
+                    "- Use one tiny guarded edit in target.py::parse_item.\n"
+                    "- Avoid broad rewrites."
+                )
+
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+                content = "\n\n".join(
+                    message["content"]
+                    for message in manager.seen["coder"][0]
+                    if message.get("role") == "user"
+                )
+                self.assertIn("Simple thinking brief follows", content)
+                self.assertIn("advisory only", content)
+                self.assertIn("one tiny guarded edit", content)
+                self.assertNotIn("Controller-owned SPEC synthesis constraints", content)
+                self.assertNotIn("SPEC hypothesis", content)
+                self.assertNotIn("Run-local spec:", content)
+
+        asyncio.run(run_case())
+
     def test_spec_thinking_brief_empty_output_continues_with_constraints(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:

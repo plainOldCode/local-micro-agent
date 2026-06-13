@@ -23,6 +23,7 @@ from .prompts import (
     plan_prompt,
     read_prompt,
     reflect_prompt,
+    simple_thinking_brief_prompt,
     test_prompt,
 )
 from .state import (
@@ -211,10 +212,98 @@ class MicroAgent(
             self.state.file_context.append(FileSnapshot(path=rel_path, content=content))
         await self._load_external_contexts()
         await self._maybe_refresh_semantic_analysis()
+        await self._maybe_refresh_simple_thinking_brief()
         await self._maybe_refresh_run_spec()
         self.state.current = (
             AgentStateName.SCHEDULE if self._spec_mode_enabled() else AgentStateName.CODE
         )
+
+    async def _maybe_refresh_simple_thinking_brief(self, focus: str = "") -> None:
+        workflow = self.config.get("workflow", {})
+        if self._spec_mode_enabled() or not workflow.get("simple_thinking_brief_enabled"):
+            return
+        if self.state.scratch.get("simple_thinking_brief") and not focus:
+            return
+        role = str(workflow.get("simple_thinking_brief_model_role") or "reasoner")
+        call_site = "simple_thinking_brief" if not focus else "simple_thinking_brief_refresh"
+        meta = {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "call_site": call_site,
+            "status": "pending",
+        }
+        try:
+            parts = await self._model_thinking_brief(
+                role,
+                simple_thinking_brief_prompt(self.state, focus=focus),
+                call_site=call_site,
+            )
+        except Exception as exc:
+            meta.update(
+                {
+                    "status": "model_error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            self._persist_simple_thinking_brief_meta(meta)
+            self.state.notes.append(
+                f"Simple thinking brief model call failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        selected = str(parts.source or parts.usage.get("thinking_brief_selected_source") or "")
+        accept_reasoning = bool(
+            workflow.get("simple_thinking_brief_accept_reasoning_only", True)
+        )
+        if selected == "reasoning" and not accept_reasoning:
+            brief = ""
+        else:
+            brief = parts.content if selected == "content" else parts.reasoning
+        brief = self._slice_text(
+            brief.strip(),
+            int(workflow.get("simple_thinking_brief_char_limit", 3000) or 3000),
+        )
+        meta.update(
+            {
+                "status": "ok" if brief else "empty",
+                "selected_source": selected,
+                "selected_chars": len(brief),
+                "usage": parts.usage,
+            }
+        )
+        path = self._workflow_artifact_path(
+            "simple_thinking_brief_path",
+            ".local_micro_agent/simple_thinking_brief.md",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if brief:
+            path.write_text(brief + "\n")
+            self.state.scratch["simple_thinking_brief"] = brief
+            self.state.notes.append("Simple thinking brief added for CODE context")
+        else:
+            self.state.scratch.pop("simple_thinking_brief", None)
+        self._persist_simple_thinking_brief_meta(meta)
+
+    def _persist_simple_thinking_brief_meta(self, meta: dict[str, Any]) -> None:
+        path = self._workflow_artifact_path(
+            "simple_thinking_brief_meta_path",
+            ".local_micro_agent/simple_thinking_brief_meta.json",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+
+    def _format_simple_thinking_brief_context(self) -> str:
+        workflow = self.config.get("workflow", {})
+        brief = self.state.scratch.get("simple_thinking_brief")
+        if not isinstance(brief, str) or not brief.strip():
+            path = self._workflow_artifact_path(
+                "simple_thinking_brief_path",
+                ".local_micro_agent/simple_thinking_brief.md",
+            )
+            if path.exists():
+                brief = path.read_text(errors="replace")
+            else:
+                return ""
+        limit = int(workflow.get("simple_thinking_brief_code_char_limit", 1200) or 1200)
+        return self._slice_text(brief.strip(), limit)
 
     async def spec_synth(self) -> None:
         await self._maybe_refresh_run_spec(force=True)
@@ -348,6 +437,16 @@ class MicroAgent(
                         "and the 'N: ' prefix are not part of the file content; never "
                         "include them in target/search/replace text.\n"
                         f"{current_source_context}"
+                    )
+                simple_thinking_brief = self._format_simple_thinking_brief_context()
+                if simple_thinking_brief:
+                    add_runtime_context(
+                        "Simple thinking brief follows. It is advisory only: prefer "
+                        "the smallest writable edit, obey current source context, "
+                        "latest failure, validation commands, and deterministic "
+                        "apply/test gates. Do not treat this as a run_spec, task "
+                        "graph, or structural contract.\n"
+                        f"{simple_thinking_brief}"
                     )
                 symbol_source_context = await self._format_symbol_source_context()
                 if symbol_source_context:

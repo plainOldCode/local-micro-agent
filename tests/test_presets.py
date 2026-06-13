@@ -34,6 +34,23 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertTrue(workflow["deterministic_test_decision"])
         self.assertTrue(workflow["repair_target_not_found"])
 
+    def test_simple_preset_keeps_classic_loop_and_thin_thinking(self) -> None:
+        config = apply_workflow_preset({"workflow": {"preset": "simple"}})
+        workflow = config["workflow"]
+        self.assertFalse(workflow["spec_mode"])
+        self.assertFalse(workflow["run_spec_enabled"])
+        self.assertFalse(workflow["run_spec_after_read"])
+        self.assertFalse(workflow["semantic_analysis_after_read"])
+        self.assertFalse(workflow["structural_tactic_lifecycle"])
+        self.assertFalse(workflow["structural_state_checkpoint"])
+        self.assertFalse(workflow["candidate_queue"])
+        self.assertFalse(workflow["adaptive_search_memory"])
+        self.assertFalse(workflow["candidate_novelty_gate"])
+        self.assertTrue(workflow["deterministic_test_decision"])
+        self.assertTrue(workflow["repair_target_not_found"])
+        self.assertTrue(workflow["simple_thinking_brief_enabled"])
+        self.assertEqual(workflow["simple_thinking_brief_model_role"], "reasoner")
+
     def test_structural_preset_extends_search(self) -> None:
         config = apply_workflow_preset({"workflow": {"preset": "structural"}})
         workflow = config["workflow"]

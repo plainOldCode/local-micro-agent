@@ -40,6 +40,20 @@ Keep it domain-neutral and grounded only in the supplied request, plan, source,
 and clearly labeled external advisory context.
 Prefer concrete read/write, ordering, lifecycle, API, or metric facts over generic advice."""
 
+SIMPLE_THINKING_BRIEF_SYSTEM = """You are SIMPLE_THINKING_BRIEF in a local coding-agent FSM.
+Do not write code. Do not output JSON. Do not create a run_spec, task graph,
+hypothesis option, task id, scheduler plan, or structural boundary contract.
+Return only a compact Markdown steering brief for the next classic CODE loop.
+Keep it advisory: CODE must still obey current source, writable files, patch-size
+limits, latest failure, and validation commands.
+Use 5-8 short bullets covering:
+- likely file or region to inspect/edit
+- smallest next edit shape
+- invariant or correctness hazard
+- validation or metric signal
+- one avoid-repeat note from recent failures
+Prefer narrow, executable guidance over broad architecture."""
+
 SPEC_SYSTEM = """You are the SPEC node in a local coding-agent FSM.
 Do not write code. Convert the request, plan, read source, and semantic facts into
 one run-local execution spec that the deterministic spec scheduler can execute.
@@ -420,6 +434,28 @@ def semantic_analysis_prompt(state: AgentState, focus: str = "") -> list[dict[st
                 f"Plan:\n{state.plan_markdown}\n\n"
                 f"Source files:\n{source_blocks}"
                 f"{external_block}"
+                f"{focus_block}"
+            ),
+        },
+    ]
+
+
+def simple_thinking_brief_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content, 6000)}\n```"
+        for snap in state.file_context
+    )
+    focus_block = f"\n\nFocus:\n{focus}" if focus else ""
+    return [
+        {"role": "system", "content": SIMPLE_THINKING_BRIEF_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}\n\n"
+                f"Latest test summary:\n{state.latest_test_summary()}\n\n"
+                f"Recent agent feedback:\n{state.recent_notes_summary(6)}"
                 f"{focus_block}"
             ),
         },

@@ -13,6 +13,9 @@ used as a base and selectively overridden.
   validated by the 100-loop telemetry runs: conditional reflect, brainstorm
   after repeated rejections, novelty/axis/region gates, adaptive gate
   controller, candidate history and artifacts, and profiling.
+- `simple`: classic CODE/TEST loop with thin optional thinking steering.
+  It deliberately avoids run-spec graphs, schedulers, structural lifecycle,
+  adaptive gates, and candidate queues.
 - `structural`: `search` plus the scaffold/probe/expand machinery for
   multi-step refactors: run-spec task graph, semantic analysis, structural
   tactic lifecycle, and structural state checkpoints.
@@ -76,6 +79,38 @@ _SEARCH: dict[str, Any] = {
     "profile_agent": True,
 }
 
+_SIMPLE: dict[str, Any] = {
+    "max_code_test_loops": 25,
+    "deterministic_test_decision": True,
+    "retry_rejected_candidates": True,
+    "repair_target_not_found": True,
+    "reflect_before_retry": False,
+    "brainstorm_after_rejections": 0,
+    "candidate_queue": False,
+    "candidate_novelty_gate": False,
+    "adaptive_search_memory": False,
+    "adaptive_search_reject_cooled_axes": False,
+    "adaptive_search_reject_cooled_regions": False,
+    "adaptive_gate_controller": False,
+    "continue_after_improvement": True,
+    "validated_pattern_followup": False,
+    "semantic_analysis_after_read": False,
+    "run_spec_enabled": False,
+    "run_spec_after_read": False,
+    "spec_mode": False,
+    "structural_tactic_lifecycle": False,
+    "structural_state_checkpoint": False,
+    "record_candidate_artifacts": True,
+    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+    "simple_thinking_brief_enabled": True,
+    "simple_thinking_brief_model_role": "reasoner",
+    "simple_thinking_brief_accept_reasoning_only": True,
+    "simple_thinking_brief_char_limit": 3000,
+    "simple_thinking_brief_path": ".local_micro_agent/simple_thinking_brief.md",
+    "simple_thinking_brief_meta_path": ".local_micro_agent/simple_thinking_brief_meta.json",
+    "simple_thinking_brief_code_char_limit": 1200,
+}
+
 _STRUCTURAL: dict[str, Any] = {
     **_SEARCH,
     "semantic_analysis_after_read": True,
@@ -135,6 +170,7 @@ _SPEC: dict[str, Any] = {
 WORKFLOW_PRESETS: dict[str, dict[str, Any]] = {
     "minimal": _MINIMAL,
     "search": _SEARCH,
+    "simple": _SIMPLE,
     "structural": _STRUCTURAL,
     "spec": _SPEC,
 }
