@@ -2155,13 +2155,17 @@ class TodoLifecycleMixin:
         )
         return any(marker in text for marker in supported_markers)
 
-    @staticmethod
-    def _spec_quality_feedback_context(report: dict[str, Any]) -> str:
+    def _spec_quality_feedback_context(self, report: dict[str, Any]) -> str:
         issues = [
             issue
             for issue in report.get("issues", [])
             if isinstance(issue, dict)
         ]
+        issue_codes = {
+            str(issue.get("code") or "")
+            for issue in issues
+            if str(issue.get("code") or "").strip()
+        }
         compact = [
             {
                 "code": issue.get("code"),
@@ -2172,14 +2176,108 @@ class TodoLifecycleMixin:
             }
             for issue in issues[:12]
         ]
-        return (
+        guidance = [
             "SPEC quality gate rejected the previous finalizer output. Rewrite "
             "the JSON spec to fix only these domain-neutral experiment-design "
             "issues. Do not invent benchmark-specific tactics. If you do not "
             "use the first feasible SPEC_IDEA target, add an "
             "idea_rejection_reason in known_facts or decision_rules that cites "
-            "grounding facts or failure memory.\n"
-            + json.dumps(compact, ensure_ascii=False, indent=2)
+            "grounding facts or failure memory."
+        ]
+        if "hypothesis_option_missing" in issue_codes:
+            guidance.append(
+                "The previous attempt had no accepted typed SPEC hypothesis option. "
+                "The next SPEC_THINK_BRIEF attempt must emit one or more "
+                "BEGIN_HYPOTHESIS_OPTION blocks that pass controller validation. "
+                "Free-form prose ideas and rejected options are not runnable; the "
+                "finalizer must not create implementation tasks until an option is "
+                "accepted."
+            )
+        if any(
+            code.startswith("design_contract_rollback_or_shrink_plan")
+            or "rollback_or_shrink_plan" in code
+            for code in issue_codes
+        ):
+            guidance.append(
+                "For rollback_or_shrink_plan failures, describe the smaller guarded "
+                "probe itself, not only how to revert. The replacement must say what "
+                "narrow branch, observation, guard, or reduced target remains "
+                "executable after shrink."
+            )
+        hypothesis_summary = self._spec_hypothesis_options_feedback_summary()
+        body = ["\n".join(guidance), json.dumps(compact, ensure_ascii=False, indent=2)]
+        if hypothesis_summary:
+            body.append(hypothesis_summary)
+        return "\n\n".join(part for part in body if part.strip())
+
+    def _spec_hypothesis_options_feedback_summary(self) -> str:
+        if not self._spec_hypothesis_brief_enabled():
+            return ""
+        payload = self.state.scratch.get("spec_hypothesis_options")
+        if not isinstance(payload, dict):
+            path = self._spec_hypothesis_options_path()
+            if path.exists():
+                try:
+                    loaded = json.loads(path.read_text(errors="replace"))
+                except json.JSONDecodeError:
+                    loaded = {}
+                payload = loaded if isinstance(loaded, dict) else {}
+            else:
+                payload = {}
+        if not isinstance(payload, dict) or not payload:
+            return ""
+        accepted = payload.get("accepted") if isinstance(payload.get("accepted"), list) else []
+        rejected = payload.get("rejected") if isinstance(payload.get("rejected"), list) else []
+        compact_rejected = []
+        for record in rejected[:8]:
+            if not isinstance(record, dict):
+                continue
+            item = {
+                "hypothesis_id": record.get("hypothesis_id"),
+                "issues": record.get("issues", []),
+            }
+            option = record.get("option")
+            if isinstance(option, dict):
+                boundary = option.get("change_boundary")
+                boundary = boundary if isinstance(boundary, dict) else {}
+                item["change_boundary"] = {
+                    "regions": boundary.get("regions"),
+                    "kind": boundary.get("kind"),
+                }
+                item["has_hypothesis"] = bool(str(option.get("hypothesis") or "").strip())
+                item["has_expected_signal"] = bool(
+                    str(
+                        (
+                            option.get("expected_signal")
+                            if isinstance(option.get("expected_signal"), dict)
+                            else {}
+                        ).get("success_condition")
+                        or ""
+                    ).strip()
+                )
+                item["has_why_not_smaller"] = bool(
+                    str(option.get("why_not_smaller") or "").strip()
+                )
+            if record.get("raw_preview"):
+                item["raw_preview"] = self._slice_text(str(record.get("raw_preview")), 500)
+            compact_rejected.append(
+                {key: value for key, value in item.items() if value not in (None, "", [], {})}
+            )
+        summary = {
+            "accepted_count": len(accepted),
+            "accepted_ids": [
+                str(option.get("hypothesis_id") or "")
+                for option in accepted
+                if isinstance(option, dict) and str(option.get("hypothesis_id") or "")
+            ],
+            "rejected_count": len(rejected),
+            "rejected": compact_rejected,
+        }
+        return (
+            "Latest SPEC hypothesis option validation summary follows. Use this "
+            "as protocol feedback for the next thinking brief: fix these structural "
+            "option issues before the finalizer emits runnable tasks.\n"
+            + json.dumps(summary, ensure_ascii=False, indent=2)
         )
 
     @staticmethod

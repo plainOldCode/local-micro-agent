@@ -11931,6 +11931,88 @@ END_HYPOTHESIS_OPTION"""
                 report["issue_codes"],
             )
 
+    def test_spec_quality_feedback_includes_hypothesis_rejections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_hypothesis_brief_enabled": True,
+                        "spec_hypothesis_options_path": ".local_micro_agent/spec_hypothesis_options.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            options = {
+                "version": 1,
+                "accepted": [],
+                "rejected": [
+                    {
+                        "hypothesis_id": "broad-pack",
+                        "issues": ["missing_why_not_smaller"],
+                        "option": {
+                            "hypothesis": "broad packing",
+                            "change_boundary": {
+                                "regions": ["target.py::Builder.build"],
+                                "kind": "structural_probe",
+                            },
+                            "expected_signal": {"success_condition": ""},
+                            "why_not_smaller": "",
+                        },
+                    }
+                ],
+            }
+            (artifact_dir / "spec_hypothesis_options.json").write_text(
+                json.dumps(options) + "\n"
+            )
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "hypothesis_option_missing",
+                        "task_id": "task-001",
+                        "detail": "no accepted option",
+                        "rewrite_hint": "produce typed option",
+                    }
+                ],
+            }
+
+            feedback = agent._spec_quality_feedback_context(report)
+
+            self.assertIn("BEGIN_HYPOTHESIS_OPTION", feedback)
+            self.assertIn("Free-form prose ideas and rejected options are not runnable", feedback)
+            self.assertIn("Latest SPEC hypothesis option validation summary", feedback)
+            self.assertIn("missing_why_not_smaller", feedback)
+            self.assertIn("broad-pack", feedback)
+
+    def test_spec_quality_feedback_explains_smaller_guarded_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+                        "task_id": "task-001",
+                        "detail": "rollback_or_shrink_plan must describe a smaller probe",
+                        "rewrite_hint": "describe a smaller guarded probe",
+                    }
+                ],
+            }
+
+            feedback = agent._spec_quality_feedback_context(report)
+
+            self.assertIn("describe the smaller guarded probe itself", feedback)
+            self.assertIn("not only how to revert", feedback)
+
     def test_shrink_probe_plan_rejects_rollback_only_single_phrases(self) -> None:
         self.assertFalse(MicroAgent._plan_mentions_shrink_or_probe("Revert the single patch."))
         self.assertFalse(
