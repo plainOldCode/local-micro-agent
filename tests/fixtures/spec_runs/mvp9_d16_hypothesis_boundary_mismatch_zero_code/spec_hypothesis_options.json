@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-13T18:12:54+0900",
+  "source_chars": 1551,
+  "accepted": [],
+  "rejected": [
+    {
+      "hypothesis_id": "opt-vectorize-kernel-loop",
+      "issues": [
+        "structural_hypothesis_boundary_kind_mismatch"
+      ],
+      "option": {
+        "hypothesis_id": "opt-vectorize-kernel-loop",
+        "hypothesis": "Vectorizing the inner loop of `build_kernel` to process VLEN=8 elements per iteration, while reusing constant registers for loop indices and eliminating per-element scratch allocation, will reduce instruction count and pipeline stalls.",
+        "change_boundary": {
+          "regions": [
+            "perf_takehome.py::KernelBuilder.build_kernel"
+          ],
+          "kind": "local_edit",
+          "minimality_claim": "Modifies only the inner loop generation logic and constant handling within build_kernel, preserving outer loop structure, hash computation, and memory access patterns."
+        },
+        "causal_evidence": [
+          {
+            "source": "brief",
+            "claim": "Baseline metric shows 147734 cycles; scratch_const is invoked per element causing redundant load instructions; scalar loop overhead dominates execution time."
+          }
+        ],
+        "expected_signal": {
+          "validator_kind": "metric",
+          "command_or_metric": "/opt/homebrew/bin/python3 perf_takehome.py",
+          "success_condition": "CYCLES metric < 147734"
+        },
+        "invariants": [
+          "Correct hash output",
+          "preserved memory access patterns for forest_values",
+          "VLEN=8 alignment",
+          "preserved scratch_const behavior for non-loop constants."
+        ],
+        "fallback": {
+          "on_failure": "Revert to scalar loop but retain constant register reuse and scratch allocation optimization.",
+          "preserve": [
+            "build_hash logic",
+            "scratch_const caching for static constants",
+            "test correctness assertions."
+          ]
+        },
+        "why_not_smaller": "The optimization spans the entire inner loop body and constant management; splitting would eliminate the batching and register reuse benefits that drive the performance gain."
+      }
+    }
+  ],
+  "accepted_count": 0,
+  "rejected_count": 1
+}

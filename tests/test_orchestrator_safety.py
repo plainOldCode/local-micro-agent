@@ -115,6 +115,14 @@ SPEC_RUN_FIXTURE_EXPECTATIONS = {
         "candidate_failure_class_counts": {},
         "graph_candidate_counts": {"rejected_quality": 3},
     },
+    "mvp9_d16_hypothesis_boundary_mismatch_zero_code": {
+        "stop_reason": "spec_quality_gate_failed",
+        "code_test_loop_count": 0,
+        "zero_code_attempt": True,
+        "spec_synth_calls_used": 5,
+        "candidate_failure_class_counts": {},
+        "graph_candidate_counts": {"rejected_quality": 3},
+    },
 }
 
 
@@ -130,6 +138,8 @@ def _copy_spec_run_fixture(repo: Path, name: str) -> Path:
         "run_spec.json",
         "todo_plan.json",
         "spec_quality_report.json",
+        "spec_hypothesis_options.json",
+        "spec_hypothesis_option_rejections.jsonl",
     ):
         path = source / filename
         if path.exists():
@@ -6362,6 +6372,58 @@ Background / non-constraints
         self.assertEqual(terminal["trajectory_quality"]["scope_drift_count"], 3)
         self.assertEqual(terminal["trajectory_quality"]["improved_count"], 0)
         self.assertEqual(terminal["last_candidate_event"]["applied"], 0)
+
+    def test_fixture_d16_documents_hypothesis_boundary_mismatch_zero_code(
+        self,
+    ) -> None:
+        fixture_dir = (
+            FIXTURE_ROOT
+            / "spec_runs"
+            / "mvp9_d16_hypothesis_boundary_mismatch_zero_code"
+        )
+
+        terminal = json.loads((fixture_dir / "terminal_state.json").read_text())
+        quality = json.loads((fixture_dir / "spec_quality_report.json").read_text())
+        options = json.loads((fixture_dir / "spec_hypothesis_options.json").read_text())
+        rejections = _read_fixture_jsonl(
+            fixture_dir / "spec_hypothesis_option_rejections.jsonl"
+        )
+        graph_candidates = _read_fixture_jsonl(
+            fixture_dir / "spec_graph_candidates.jsonl"
+        )
+
+        self.assertEqual(terminal["stop_reason"], "spec_quality_gate_failed")
+        self.assertEqual(terminal["code_test_loop_count"], 0)
+        self.assertTrue(terminal["zero_code_attempt"])
+        self.assertEqual(terminal["spec_synth_calls_used"], 5)
+        self.assertEqual(terminal["graph_candidate_counts"], {"rejected_quality": 3})
+        self.assertEqual(terminal["last_candidate_event"], None)
+        self.assertEqual(quality["issue_codes"], ["hypothesis_option_missing"])
+        self.assertEqual(options["accepted_count"], 0)
+        self.assertEqual(options["rejected_count"], 1)
+        self.assertEqual(
+            options["rejected"][0]["issues"],
+            ["structural_hypothesis_boundary_kind_mismatch"],
+        )
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(
+            rejections[0]["issues"],
+            ["structural_hypothesis_boundary_kind_mismatch"],
+        )
+        self.assertEqual(
+            [candidate["issue_codes"] for candidate in graph_candidates],
+            [
+                [
+                    "design_contract_unresolvable_probe_region",
+                    "hypothesis_option_missing",
+                ],
+                [
+                    "design_contract_local_risk_level_contradicts_structural_action_in_task_scope",
+                    "hypothesis_option_missing",
+                ],
+                ["hypothesis_option_missing"],
+            ],
+        )
 
     def test_fixture_d15_reseed_focus_bans_repeated_material_axes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

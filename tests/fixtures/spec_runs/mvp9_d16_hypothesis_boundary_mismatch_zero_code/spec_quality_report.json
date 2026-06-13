@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-13T18:14:32+0900",
+  "status": "fail",
+  "attempt": 2,
+  "spec_id": "opt-scratch-const-cache",
+  "issues": [
+    {
+      "code": "hypothesis_option_missing",
+      "severity": "error",
+      "task_id": "task-001",
+      "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+      "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+    }
+  ],
+  "issue_codes": [
+    "hypothesis_option_missing"
+  ]
+}
