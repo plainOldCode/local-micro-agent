@@ -1800,6 +1800,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("Fix every validation issue", content)
             self.assertIn("structural_hypothesis_boundary_kind_mismatch", content)
             self.assertIn("structural_probe|structural_expand", content)
+            self.assertIn("Do not return change_boundary.kind=local_edit", content)
+            self.assertIn("vectorizing, SIMD, reordering, packing", content)
             self.assertIn("exact deterministic grounding regions", content)
             self.assertIn("do not add parenthetical notes", content)
 
