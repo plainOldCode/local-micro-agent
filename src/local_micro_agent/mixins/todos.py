@@ -3239,6 +3239,7 @@ class TodoLifecycleMixin:
             "forbidden_regions",
             "required_unchanged_regions",
             "allowed_change_kinds",
+            "forbidden_edit_shapes",
         ):
             normalized[field] = self._normalize_string_list(value.get(field))
         if not normalized["allowed_files"]:
@@ -3261,6 +3262,13 @@ class TodoLifecycleMixin:
                 continue
             if parsed >= 0:
                 normalized[field] = parsed
+        allowed_edit_shape = self._normalize_task_text_field(
+            value.get("allowed_edit_shape")
+        )
+        if allowed_edit_shape:
+            normalized["allowed_edit_shape"] = allowed_edit_shape
+        if isinstance(value.get("must_include_guard"), bool):
+            normalized["must_include_guard"] = value.get("must_include_guard")
         observation = self._normalize_task_text_field(value.get("observation"))
         if observation:
             normalized["observation"] = observation
@@ -3958,6 +3966,7 @@ class TodoLifecycleMixin:
                 "target_regions": task.get("target_regions"),
                 "target_symbols": task.get("target_symbols"),
                 "tactic_stage": task.get("tactic_stage"),
+                "probe_diff_contract": task.get("probe_diff_contract"),
                 "decision_hint": task.get("decision_hint"),
                 "last_observation": task.get("last_observation"),
             }
@@ -4005,6 +4014,11 @@ class TodoLifecycleMixin:
             "Do not repeat any failed shape identified by cooldown_keys. The new "
             "graph must include at least one runnable local_edit task or a "
             "materially narrower structural_probe with a concrete diff contract.",
+            "For any structural_probe after active-task drift, include a "
+            "probe_diff_contract.allowed_edit_shape plus max_hunks, "
+            "max_changed_lines, max_changed_functions, forbidden_edit_shapes, and "
+            "must_include_guard when the old path must remain as fallback. Changing "
+            "only the task id/title is not a new micro-contract.",
             "Preserve closed/survivor evidence as facts only; do not copy closed "
             "tasks as already-completed graph nodes.",
             "Current exhausted graph tasks:",
@@ -4448,17 +4462,33 @@ class TodoLifecycleMixin:
         ]
         if not replacement_tasks:
             return []
+        issues: list[str] = []
+        for task in replacement_tasks:
+            issues.extend(self._structural_probe_micro_contract_issues(task))
         previous_signature = self._spec_task_material_signature(previous_target)
         if any(
             self._spec_task_material_signature(task) != previous_signature
             for task in replacement_tasks
         ):
-            return []
-        return [
+            return issues
+        issues.append(
             "targeted SPEC rewrite repeated active-task drift material axes "
             "(target_regions, tactic_stage, validator.kind, deliverables) "
             "without a structurally different contract"
-        ]
+        )
+        return issues
+
+    def _structural_probe_micro_contract_issues(self, task: dict[str, Any]) -> list[str]:
+        if str(task.get("tactic_stage") or "") != "structural_probe":
+            return []
+        contract = (
+            task.get("probe_diff_contract")
+            if isinstance(task.get("probe_diff_contract"), dict)
+            else {}
+        )
+        if str(contract.get("allowed_edit_shape") or "").strip():
+            return []
+        return ["targeted SPEC rewrite missing structural probe micro-contract"]
 
     @staticmethod
     def _task_requires_drift_material_diversity(task: dict[str, Any]) -> bool:
@@ -4483,6 +4513,28 @@ class TodoLifecycleMixin:
             str(task.get("tactic_stage") or ""),
             str(validator.get("kind") or ""),
             tuple(sorted(self._normalize_string_list(task.get("deliverables")))),
+            self._spec_task_probe_micro_signature(task),
+        )
+
+    def _spec_task_probe_micro_signature(self, task: dict[str, Any]) -> tuple[Any, ...]:
+        if str(task.get("tactic_stage") or "") != "structural_probe":
+            return ()
+        contract = (
+            task.get("probe_diff_contract")
+            if isinstance(task.get("probe_diff_contract"), dict)
+            else {}
+        )
+        if not contract:
+            return ()
+        return (
+            str(contract.get("allowed_edit_shape") or ""),
+            tuple(sorted(self._normalize_string_list(contract.get("allowed_change_kinds")))),
+            tuple(sorted(self._normalize_string_list(contract.get("forbidden_edit_shapes")))),
+            bool(contract.get("must_include_guard")),
+            int(contract.get("max_hunks", 0) or 0),
+            int(contract.get("max_changed_lines", 0) or 0),
+            int(contract.get("max_changed_functions", 0) or 0),
+            tuple(sorted(self._normalize_string_list(contract.get("expected_changed_regions")))),
         )
 
     def _reject_spec_graph_rewrite(
@@ -5810,6 +5862,11 @@ class TodoLifecycleMixin:
             "candidate evidence: avoid the failed shape, retarget from fresh source, "
             "or choose a bounded sibling hypothesis. Create repair tasks only for "
             "current_repo issue_scope observations.",
+            "For active-task drift rewrites of structural_probe tasks, "
+            "probe_diff_contract must include a concrete allowed_edit_shape "
+            "and narrow max_hunks/max_changed_lines/max_changed_functions. "
+            "Use forbidden_edit_shapes to ban the broad candidate shape that "
+            "just failed.",
             "Rejected task:",
             json.dumps(compact_task, ensure_ascii=False, indent=2),
         ]

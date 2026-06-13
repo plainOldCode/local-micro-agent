@@ -89,6 +89,9 @@ Output strict JSON with:
         "forbidden_regions": ["relative/path.py::symbol_or_region"],
         "required_unchanged_regions": ["relative/path.py::symbol_or_region"],
         "allowed_change_kinds": ["add_guard|add_observation|single_callsite_probe|local_refactor"],
+        "allowed_edit_shape": "add_guard|add_observation|instrument_local_decision|single_branch_reorder|single_callsite_probe|one_hunk_local_refactor",
+        "forbidden_edit_shapes": ["whole_function_refactor|full_rewrite|cross_region_redesign|multi_function_coordination"],
+        "must_include_guard": true,
         "observation": "what the diff-level probe is allowed to observe"
       },
       "invariant_evidence": ["observable invariant or diagnostic proving the probe is safe"],
@@ -151,7 +154,10 @@ Rules:
 - For structural_probe tasks, make probe_diff_contract a diff-level execution
   contract: allowed files/regions, expected changed region, max files/hunks/
   changed lines/functions, forbidden regions, required unchanged regions, and
-  the observation. CODE diffs outside this contract are rejected before tests.
+  the observation. When rewriting after active-task drift, also include one
+  concrete allowed_edit_shape and any forbidden_edit_shapes so CODE has a
+  micro edit shape to execute instead of inferring the shrink from prose.
+  CODE diffs outside this contract are rejected before tests.
 - Set risk_level to "local" and tactic_stage to "local_edit" only when the
   change is a narrow local edit that does not reorder behavior, state, data
   flow, control flow, or side effects.

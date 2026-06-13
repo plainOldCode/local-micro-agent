@@ -6240,6 +6240,8 @@ Background / non-constraints
 
             self.assertIn("materially narrower structural_probe", focus)
             self.assertIn("concrete diff contract", focus)
+            self.assertIn("allowed_edit_shape", focus)
+            self.assertIn("must_include_guard", focus)
             self.assertIn("Recent failure signatures", focus)
             self.assertIn("Cooldown keys banned for this reseed", focus)
             self.assertIn(
@@ -6276,6 +6278,91 @@ Background / non-constraints
             self.assertEqual(score["runnable_tasks"], 0)
             self.assertGreater(score["cooldown_hits"], 0)
             self.assertGreater(score["duplicate_hits"], 0)
+
+    def test_fixture_d15_rewrite_rejects_structural_probe_without_micro_contract(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = _copy_spec_run_fixture(
+                repo, "mvp9_d15_boundary_feedback_r2"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            rewrite_spec = json.loads(json.dumps(previous_spec))
+            rewrite_spec["task_graph"][0]["status"] = "open"
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC rewrite missing structural probe micro-contract",
+                issues,
+            )
+            self.assertIn(
+                "targeted SPEC rewrite repeated active-task drift material axes "
+                "(target_regions, tactic_stage, validator.kind, deliverables) "
+                "without a structurally different contract",
+                issues,
+            )
+
+    def test_fixture_d15_rewrite_allows_narrower_structural_probe_micro_contract(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = _copy_spec_run_fixture(
+                repo, "mvp9_d15_boundary_feedback_r2"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            rewrite_spec = json.loads(json.dumps(previous_spec))
+            task = rewrite_spec["task_graph"][0]
+            task["status"] = "open"
+            task["probe_diff_contract"]["allowed_edit_shape"] = "single_branch_reorder"
+            task["probe_diff_contract"]["forbidden_edit_shapes"] = [
+                "whole_function_refactor",
+                "full_scheduler_rewrite",
+            ]
+            task["probe_diff_contract"]["must_include_guard"] = True
+            task["probe_diff_contract"]["max_hunks"] = 1
+            task["probe_diff_contract"]["max_changed_lines"] = 8
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertNotIn(
+                "targeted SPEC rewrite missing structural probe micro-contract",
+                issues,
+            )
+            self.assertNotIn(
+                "targeted SPEC rewrite repeated active-task drift material axes "
+                "(target_regions, tactic_stage, validator.kind, deliverables) "
+                "without a structurally different contract",
+                issues,
+            )
 
     def test_terminal_report_summarizes_portfolio_recovery_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
