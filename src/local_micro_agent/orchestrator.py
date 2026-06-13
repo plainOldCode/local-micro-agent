@@ -395,6 +395,18 @@ class MicroAgent(
                         "ideas.\n"
                         f"{gate_memory}"
                     )
+                semantic_family_bans = self._format_semantic_failure_family_bans()
+                if semantic_family_bans:
+                    add_runtime_context(
+                        "Semantic failure-family bans follow. Candidate-delta "
+                        "correctness failures are negative evidence, not current "
+                        "repository repair tasks. Do not submit another candidate "
+                        "inside an active banned family. Retarget to a smaller "
+                        "metric-bearing probe outside the banned family unless a "
+                        "current-repo issue or validated checkpoint gives new "
+                        "evidence.\n"
+                        f"{semantic_family_bans}"
+                    )
                 failure_memory = self._format_failure_memory()
                 if failure_memory:
                     add_runtime_context(
@@ -499,6 +511,22 @@ class MicroAgent(
             self.state.scratch["pre_apply_candidate_rejection"] = {
                 "status": status,
                 "note": note,
+            }
+            self.state.scratch["applied_changes"] = 0
+            self.state.current = AgentStateName.TEST
+            return
+        semantic_family_rejection = self._candidate_semantic_family_ban_rejection(
+            self._single_code_candidate(decision.changes)
+        )
+        if semantic_family_rejection is not None:
+            status, note, extra = semantic_family_rejection
+            self.state.notes.append(
+                f"Single CODE candidate rejected before apply: {note}"
+            )
+            self.state.scratch["pre_apply_candidate_rejection"] = {
+                "status": status,
+                "note": note,
+                **extra,
             }
             self.state.scratch["applied_changes"] = 0
             self.state.current = AgentStateName.TEST
@@ -843,6 +871,31 @@ class MicroAgent(
                 self._record_strategy_attempt(
                     candidate,
                     status="rejected_repeated_pattern",
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                )
+                continue
+
+            semantic_family_rejection = self._candidate_semantic_family_ban_rejection(
+                candidate
+            )
+            if semantic_family_rejection is not None:
+                status, note, rejection_extra = semantic_family_rejection
+                self.state.notes.append(f"Candidate {candidate.candidate_id} rejected: {note}")
+                extra = self._candidate_rejection_extra(candidate, status, note)
+                extra.update(rejection_extra)
+                self._append_candidate_history(
+                    candidate,
+                    status=status,
+                    metric=None,
+                    applied=0,
+                    failed=True,
+                    extra=extra,
+                )
+                self._record_strategy_attempt(
+                    candidate,
+                    status=status,
                     metric=None,
                     applied=0,
                     failed=True,

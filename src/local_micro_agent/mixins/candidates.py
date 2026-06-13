@@ -70,6 +70,11 @@ class CandidateRecordsMixin:
                 "diagnostic_summary",
                 "last_correct_state_path",
                 "last_correct_patch_path",
+                "semantic_family_key",
+                "semantic_family_terms",
+                "semantic_family_action",
+                "semantic_family_banned_until_loop",
+                "semantic_family_recent_failures",
             ):
                 value = record.get(key)
                 if value not in (None, "", [], {}):
@@ -159,6 +164,15 @@ class CandidateRecordsMixin:
         )
         observation.update(failure_scope)
         extra.update(observation)
+        extra.update(
+            self._semantic_failure_family_extra(
+                candidate,
+                failure_class=str(observation.get("failure_class", "")),
+                issue_scope=str(failure_scope.get("issue_scope", "")),
+                status=status,
+                failed=failed,
+            )
+        )
         if observation.get("failure_class") == "patch_miss" or repair_parent_id:
             extra.update(self._patch_miss_history_extra())
         if diagnostic_results:
@@ -337,6 +351,8 @@ class CandidateRecordsMixin:
         )
         if status_text in {"improved", "accepted"}:
             return status_text
+        if status_text == "rejected_semantic_family_banned":
+            return "semantic_family_banned"
         if "duplicate" in status_text or "repeated_pattern" in status_text:
             return "duplicate_variant"
         if "axis_drift" in status_text or "cooled_axis" in status_text:
@@ -488,6 +504,10 @@ class CandidateRecordsMixin:
                 "Read the active todo contract and produce a candidate that satisfies it.",
                 "If the contract blocks valid work, surface that as evidence for relaxation.",
             ],
+            "semantic_family_banned": [
+                "Do not repair the banned candidate-delta family.",
+                "Retarget to a smaller metric-bearing probe outside the banned family.",
+            ],
         }
         return actions_by_class.get(
             failure_class,
@@ -542,6 +562,10 @@ class CandidateRecordsMixin:
             "contract_mismatch": (
                 "Recover by following the visible active contract, or produce structured "
                 "evidence for a controller-level relaxation."
+            ),
+            "semantic_family_banned": (
+                "Retarget outside the banned semantic family; only current-repo issues or "
+                "validated checkpoints justify repair."
             ),
             "improved": "Persist the validated pattern and explore follow-ups from the measured gain.",
             "accepted": "Persist the accepted result and stop unless the workflow asks to continue.",

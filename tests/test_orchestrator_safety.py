@@ -14816,6 +14816,263 @@ value = 'fast'
             self.assertIn("+value = 'new'", survivor_path.read_text())
             self.assertEqual(target.read_text(), "value = 'old'\n")
 
+    def test_repeated_candidate_delta_correctness_failure_bans_semantic_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "class Builder:\n"
+                "    def build(self, slots):\n"
+                "        return [{engine: [slot]} for engine, slot in slots]\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "adaptive_search_memory": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "semantic_failure_family_threshold": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test", max_loops=10),
+            )
+            agent.state.scratch["pre_code_snapshot"] = {
+                "target.py": (repo / "target.py").read_text()
+            }
+            result = TestResult(
+                "python3 target.py",
+                1,
+                "",
+                "AssertionError: stale slot value at pc=12",
+            )
+
+            def failed_candidate(candidate_id: str, replacement: str) -> CodeCandidate:
+                return CodeCandidate(
+                    candidate_id,
+                    [
+                        CodeChange(
+                            "target.py",
+                            "group slots by engine into VLIW bundles to reduce cycles",
+                            target="    def build(self, slots):\n",
+                            replacement=replacement,
+                            target_region="target.py::Builder.build",
+                        )
+                    ],
+                    "group slots by engine into VLIW bundles",
+                    "performance",
+                )
+
+            first = failed_candidate("first", "    def build(self, slots):\n        return []\n")
+            first_extra = agent._candidate_history_extra(
+                first,
+                status="rejected",
+                metric=None,
+                applied=1,
+                failed=True,
+                patch_text="diff",
+                results=[result],
+                failure_detail=agent._candidate_failure_detail([], [result], failed=True),
+            )
+            agent._append_candidate_history(first, "rejected", None, 1, True, first_extra)
+
+            agent.state.loop_count = 1
+            second = failed_candidate(
+                "second",
+                "    def build(self, slots):\n        return list(slots)\n",
+            )
+            second_extra = agent._candidate_history_extra(
+                second,
+                status="rejected",
+                metric=None,
+                applied=1,
+                failed=True,
+                patch_text="diff",
+                results=[result],
+                failure_detail=agent._candidate_failure_detail([], [result], failed=True),
+            )
+
+            self.assertEqual(
+                first_extra["semantic_family_key"],
+                second_extra["semantic_family_key"],
+            )
+            self.assertEqual(
+                second_extra["semantic_family_action"],
+                "ban_family_and_retarget",
+            )
+            self.assertEqual(
+                second_extra["failure_memory_next_rule"],
+                "ban_family_and_retarget",
+            )
+            agent._append_candidate_history(second, "rejected", None, 1, True, second_extra)
+
+            agent.state.loop_count = 2
+            third = failed_candidate(
+                "third",
+                "    def build(self, slots):\n        return tuple(slots)\n",
+            )
+            rejection = agent._candidate_semantic_family_ban_rejection(third)
+            self.assertIsNotNone(rejection)
+            assert rejection is not None
+            status, note, extra = rejection
+            self.assertEqual(status, "rejected_semantic_family_banned")
+            self.assertIn("retarget outside", note)
+            self.assertEqual(extra["semantic_family_key"], second_extra["semantic_family_key"])
+
+    def test_semantic_family_ban_does_not_block_different_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "class Builder:\n"
+                "    def build(self, slots):\n"
+                "        return slots\n"
+                "    def other(self, slots):\n"
+                "        return slots\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"adaptive_search_memory": True},
+                },
+                AgentState(repo_root=repo, user_request="test", loop_count=3),
+            )
+            banned = CodeCandidate(
+                "banned",
+                [
+                    CodeChange(
+                        "target.py",
+                        "group slots by engine into VLIW bundles",
+                        target_region="target.py::Builder.build",
+                    )
+                ],
+                "group slots by engine into VLIW bundles",
+                "performance",
+            )
+            family = agent._candidate_semantic_family(banned)
+            agent.state.scratch["semantic_failure_families"] = {
+                family["semantic_family_key"]: {
+                    **family,
+                    "banned_until_loop": 10,
+                    "failures": [{"loop": 1, "candidate_id": "banned"}],
+                }
+            }
+            other = CodeCandidate(
+                "other",
+                [
+                    CodeChange(
+                        "target.py",
+                        "group slots by engine into VLIW bundles",
+                        target_region="target.py::Builder.other",
+                    )
+                ],
+                "group slots by engine into VLIW bundles",
+                "performance",
+            )
+
+            self.assertIsNone(agent._candidate_semantic_family_ban_rejection(other))
+
+    def test_current_repo_failure_does_not_ban_candidate_delta_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("value = 'old'\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "adaptive_search_memory": True,
+                        "semantic_failure_family_threshold": 1,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            candidate = CodeCandidate(
+                "current-repo",
+                [CodeChange("target.py", "group slots by engine", target_region="target.py")],
+                "group slots by engine",
+                "performance",
+            )
+            result = TestResult("python3 target.py", 1, "", "SyntaxError: already broken")
+            extra = agent._candidate_history_extra(
+                candidate,
+                status="rejected",
+                metric=None,
+                applied=0,
+                failed=True,
+                patch_text="",
+                results=[result],
+                failure_detail=agent._candidate_failure_detail([], [result], failed=True),
+            )
+
+            self.assertEqual(extra["issue_scope"], "current_repo")
+            self.assertNotIn("semantic_family_action", extra)
+            self.assertIsNone(agent._candidate_semantic_family_ban_rejection(candidate))
+
+    def test_code_prompt_includes_semantic_family_ban_retarget_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "roles"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "plan_markdown": "seeded",
+                    "seed_files": ["target.py"],
+                    "writable_files": ["target.py"],
+                    "test_commands": ["python3 -c \"print('ok')\""],
+                    "deterministic_test_decision": True,
+                    "adaptive_search_memory": True,
+                },
+            }
+            state = AgentState(
+                repo_root=repo,
+                user_request="test",
+                current=AgentStateName.CODE,
+                loop_count=3,
+                max_loops=1,
+            )
+            state.plan_markdown = "seeded"
+            state.planned_files = ["target.py"]
+            state.scratch["semantic_failure_families"] = {
+                "family123": {
+                    "semantic_family_terms": ["region:target.py::value", "term:bundle"],
+                    "failure_classes": {"correctness_failure": 2},
+                    "banned_until_loop": 8,
+                    "failures": [{"loop": 2, "candidate_id": "old"}],
+                }
+            }
+            models = _RoleModelManager(
+                {
+                    "coder": (
+                        '{"changes":[{"path":"target.py","target":"value = '
+                        "'old'\\n\",\"replacement\":\"value = 'new'\\n\","
+                        '"reason":"try different small probe"}]}'
+                    )
+                }
+            )
+            agent = MicroAgent(config, state)
+            agent.models = models
+
+            async def code_once() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_once())
+
+            coder_messages = models.seen["coder"][0]
+            joined = "\n".join(message["content"] for message in coder_messages)
+            self.assertIn("Semantic failure-family bans", joined)
+            self.assertIn("Candidate-delta correctness failures are negative evidence", joined)
+            self.assertIn("Retarget to a smaller metric-bearing probe", joined)
+
     def test_code_prompt_includes_failure_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

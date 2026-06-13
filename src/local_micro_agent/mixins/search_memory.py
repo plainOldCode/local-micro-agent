@@ -84,6 +84,254 @@ class AdaptiveSearchMixin:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
+    def _semantic_failure_family_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return (
+            workflow.get("semantic_failure_family_ban", True) is not False
+            and self._adaptive_search_memory_enabled()
+        )
+
+    def _semantic_failure_family_pre_apply_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return (
+            workflow.get("semantic_failure_family_reject_pre_apply", True) is not False
+            and self._semantic_failure_family_enabled()
+        )
+
+    def _candidate_semantic_family(self, candidate: CodeCandidate) -> dict[str, Any]:
+        axes = self._candidate_strategy_axes(candidate)
+        family_aliases = sorted(self._candidate_reason_family_aliases(candidate))
+        regions = [self._change_region_key(change) for change in candidate.changes]
+        target_regions = [
+            str(change.target_region).strip()
+            for change in candidate.changes
+            if str(change.target_region or "").strip()
+        ]
+        paths = [str(change.path) for change in candidate.changes if str(change.path)]
+        text_parts = [candidate.reason]
+        for change in candidate.changes:
+            text_parts.extend(
+                [
+                    change.reason,
+                    change.target_region or "",
+                    change.path,
+                ]
+            )
+        tactic_terms = sorted(self._tactic_signature("\n".join(text_parts)))[:16]
+        terms = sorted(
+            set(
+                [
+                    *(f"axis:{axis}" for axis in axes),
+                    *(f"family:{alias}" for alias in family_aliases),
+                    *(f"region:{region}" for region in regions if region),
+                    *(f"target:{region}" for region in target_regions),
+                    *(f"path:{path}" for path in paths),
+                    *(f"term:{term}" for term in tactic_terms),
+                ]
+            )
+        )
+        payload = {
+            "axes": axes,
+            "family_aliases": family_aliases,
+            "regions": sorted(set(regions)),
+            "target_regions": sorted(set(target_regions)),
+            "paths": sorted(set(paths)),
+            "tactic_terms": tactic_terms,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return {
+            "semantic_family_key": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16],
+            "semantic_family_terms": terms[:32],
+        }
+
+    def _semantic_failure_family_state(self) -> dict[str, Any]:
+        state = self.state.scratch.setdefault("semantic_failure_families", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.state.scratch["semantic_failure_families"] = state
+        return state
+
+    def _semantic_failure_family_threshold(self) -> int:
+        return int(
+            self.config.get("workflow", {}).get("semantic_failure_family_threshold", 2)
+            or 2
+        )
+
+    def _semantic_failure_family_window(self) -> int:
+        return int(
+            self.config.get("workflow", {}).get("semantic_failure_family_window", 8)
+            or 8
+        )
+
+    def _semantic_failure_family_cooldown(self) -> int:
+        return int(
+            self.config.get("workflow", {}).get(
+                "semantic_failure_family_cooldown_loops", 12
+            )
+            or 12
+        )
+
+    @staticmethod
+    def _semantic_failure_family_failure_classes() -> set[str]:
+        return {"correctness_failure", "invariant_broken", "scope_too_broad"}
+
+    def _semantic_failure_family_extra(
+        self,
+        candidate: CodeCandidate,
+        *,
+        failure_class: str,
+        issue_scope: str,
+        status: str,
+        failed: bool,
+    ) -> dict[str, Any]:
+        if not self._semantic_failure_family_enabled():
+            return {}
+        family = self._candidate_semantic_family(candidate)
+        extra = dict(family)
+        if not (
+            failed
+            and issue_scope == "candidate_delta"
+            and failure_class in self._semantic_failure_family_failure_classes()
+            and str(status).startswith("rejected")
+        ):
+            return extra
+
+        key = str(family["semantic_family_key"])
+        state = self._semantic_failure_family_state()
+        record = state.setdefault(
+            key,
+            {
+                "semantic_family_key": key,
+                "semantic_family_terms": family["semantic_family_terms"],
+                "failures": [],
+                "failure_classes": {},
+                "banned_until_loop": None,
+            },
+        )
+        if not isinstance(record, dict):
+            record = {
+                "semantic_family_key": key,
+                "semantic_family_terms": family["semantic_family_terms"],
+                "failures": [],
+                "failure_classes": {},
+                "banned_until_loop": None,
+            }
+            state[key] = record
+        record["semantic_family_terms"] = family["semantic_family_terms"]
+        failures = record.setdefault("failures", [])
+        if not isinstance(failures, list):
+            failures = []
+            record["failures"] = failures
+        candidate_id = str(candidate.candidate_id)
+        already_recorded = any(
+            isinstance(item, dict)
+            and item.get("loop") == self.state.loop_count
+            and item.get("candidate_id") == candidate_id
+            for item in failures
+        )
+        if not already_recorded:
+            failures.append(
+                {
+                    "loop": self.state.loop_count,
+                    "candidate_id": candidate_id,
+                    "status": status,
+                    "failure_class": failure_class,
+                }
+            )
+        window = self._semantic_failure_family_window()
+        min_loop = self.state.loop_count - max(window - 1, 0)
+        record["failures"] = [
+            item
+            for item in failures
+            if isinstance(item, dict) and int(item.get("loop", -10**9)) >= min_loop
+        ]
+        classes = record.setdefault("failure_classes", {})
+        if isinstance(classes, dict) and not already_recorded:
+            classes[failure_class] = int(classes.get(failure_class, 0) or 0) + 1
+        recent_count = len(record["failures"])
+        extra["semantic_family_recent_failures"] = recent_count
+        extra["semantic_family_threshold"] = self._semantic_failure_family_threshold()
+        if recent_count >= self._semantic_failure_family_threshold():
+            banned_until = self.state.loop_count + self._semantic_failure_family_cooldown()
+            record["banned_until_loop"] = banned_until
+            record["semantic_family_action"] = "ban_family_and_retarget"
+            extra["semantic_family_action"] = "ban_family_and_retarget"
+            extra["semantic_family_banned_until_loop"] = banned_until
+        return extra
+
+    def _candidate_semantic_family_ban_rejection(
+        self, candidate: CodeCandidate
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        if not self._semantic_failure_family_pre_apply_enabled():
+            return None
+        family = self._candidate_semantic_family(candidate)
+        key = str(family["semantic_family_key"])
+        state = self._semantic_failure_family_state()
+        record = state.get(key)
+        if not isinstance(record, dict):
+            return None
+        banned_until = record.get("banned_until_loop")
+        if not isinstance(banned_until, int) or banned_until <= self.state.loop_count:
+            return None
+        terms = [
+            str(term)
+            for term in record.get("semantic_family_terms", family["semantic_family_terms"])
+            if str(term)
+        ]
+        note = (
+            "semantic failure family is banned until loop "
+            f"{banned_until}; retarget outside this failed family with a smaller "
+            "metric-bearing probe"
+        )
+        return (
+            "rejected_semantic_family_banned",
+            note,
+            {
+                **family,
+                "semantic_family_action": "pre_apply_reject_banned_family",
+                "semantic_family_banned_until_loop": banned_until,
+                "semantic_family_terms": terms[:32],
+            },
+        )
+
+    def _format_semantic_failure_family_bans(self) -> str:
+        if not self._semantic_failure_family_enabled():
+            return ""
+        state = self._semantic_failure_family_state()
+        current_loop = self.state.loop_count
+        active = []
+        recent = []
+        for key, record in sorted(state.items()):
+            if not isinstance(record, dict):
+                continue
+            item = {
+                "semantic_family_key": key,
+                "semantic_family_terms": record.get("semantic_family_terms", [])[:16],
+                "failure_classes": record.get("failure_classes", {}),
+                "banned_until_loop": record.get("banned_until_loop"),
+            }
+            banned_until = record.get("banned_until_loop")
+            if isinstance(banned_until, int) and banned_until > current_loop:
+                active.append(item)
+            elif record.get("failures"):
+                recent.append(item)
+        if not active and not recent:
+            return ""
+        return json.dumps(
+            {
+                "policy": (
+                    "Candidate-delta correctness failures are negative evidence. "
+                    "Do not repair a banned semantic family; retarget to a smaller "
+                    "metric-bearing probe outside the banned family unless a current "
+                    "repo issue or validated checkpoint gives new evidence."
+                ),
+                "active_bans": active,
+                "recent_families": recent[-5:],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
     def _candidate_strategy_axes(self, candidate: CodeCandidate) -> list[str]:
         declared = self._normalize_strategy_axis(candidate.strategy_axis)
         reason_axes = self._candidate_reason_strategy_axes(candidate)
@@ -1705,6 +1953,7 @@ class AdaptiveSearchMixin:
             "rejected_family_drift",
             "rejected_no_changes",
             "rejected_repeated_pattern",
+            "rejected_semantic_family_banned",
             "rejected_todo_axis_drift",
             "rejected_todo_family_drift",
             "rejected_unknown_axis",
@@ -2010,6 +2259,11 @@ class AdaptiveSearchMixin:
             "repo_valid_after_restore",
             "repair_task_eligible",
             "memory_use",
+            "semantic_family_key",
+            "semantic_family_terms",
+            "semantic_family_action",
+            "semantic_family_banned_until_loop",
+            "semantic_family_recent_failures",
         )
         compact = {
             key: record.get(key)
@@ -2103,6 +2357,20 @@ class AdaptiveSearchMixin:
             "repair_hint": self._truncate_text(recovery_hint, 500),
         }
         record.update(scope)
+        semantic_extra = self._semantic_failure_family_extra(
+            candidate,
+            failure_class=failure_class,
+            issue_scope=str(record.get("issue_scope", "")),
+            status=status,
+            failed=failed,
+        )
+        record.update(semantic_extra)
+        if semantic_extra.get("semantic_family_action") == "ban_family_and_retarget":
+            record["next_rule"] = "ban_family_and_retarget"
+            record["repair_hint"] = (
+                "Do not repair this candidate-delta family again; retarget to a "
+                "smaller metric-bearing probe outside the banned family."
+            )
         path = self._failure_memory_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as handle:
