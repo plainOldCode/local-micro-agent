@@ -107,6 +107,258 @@ class CandidateRecordsMixin:
             records.append(record)
         return records
 
+    def _simple_report_paths(self) -> tuple[Path, Path]:
+        workflow = self.config.get("workflow", {})
+        md_path = Path(
+            str(workflow.get("simple_report_path", ".local_micro_agent/simple_report.md"))
+        )
+        json_path = Path(
+            str(
+                workflow.get(
+                    "simple_report_json_path", ".local_micro_agent/simple_report.json"
+                )
+            )
+        )
+        if not md_path.is_absolute():
+            md_path = self.state.repo_root / md_path
+        if not json_path.is_absolute():
+            json_path = self.state.repo_root / json_path
+        return md_path, json_path
+
+    def _simple_report_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return (
+            workflow.get("preset") == "simple"
+            and self._spec_mode_enabled() is False
+            and bool(workflow.get("simple_report_enabled"))
+        )
+
+    def _clear_simple_report_artifacts(self) -> None:
+        self.state.scratch.pop("simple_report", None)
+        for path in self._simple_report_paths():
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _format_simple_report_context(self) -> str:
+        if not self._simple_report_enabled():
+            return ""
+        workflow = self.config.get("workflow", {})
+        limit = int(workflow.get("simple_report_history_limit", 20) or 20)
+        records = self._candidate_history_records(limit=limit)
+        report = self._build_simple_report(records)
+        if not report:
+            self._clear_simple_report_artifacts()
+            return ""
+        md_limit = int(workflow.get("simple_report_char_limit", 3000) or 3000)
+        markdown = self._truncate_simple_report_markdown(report["markdown"], md_limit)
+        report = {**report, "markdown": markdown}
+        md_path, json_path = self._simple_report_paths()
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(markdown, encoding="utf-8")
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
+            json.dumps(self._bounded_simple_report_json(report), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.state.scratch["simple_report"] = markdown
+        return markdown
+
+    def _build_simple_report(self, records: list[dict[str, Any]]) -> dict[str, Any] | None:
+        workflow = self.config.get("workflow", {})
+        threshold = int(workflow.get("simple_report_repeat_threshold", 2) or 2)
+        no_improvement: dict[str, list[dict[str, Any]]] = {}
+        patch_miss: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            failure_class = str(record.get("failure_class") or record.get("stage_result") or "")
+            if failure_class == "patch_miss":
+                key = self._simple_report_group_key(record, "patch_miss")
+                patch_miss.setdefault(key, []).append(record)
+            elif self._simple_report_is_no_improvement(record):
+                key = self._simple_report_group_key(record, "no_improvement")
+                no_improvement.setdefault(key, []).append(record)
+
+        do_not_retry = [
+            self._simple_report_item("no_improvement", grouped)
+            for grouped in no_improvement.values()
+            if len(grouped) >= threshold
+        ]
+        refresh_guidance = [
+            self._simple_report_item("patch_miss", grouped)
+            for grouped in patch_miss.values()
+            if len(grouped) >= threshold
+        ]
+        if not do_not_retry and not refresh_guidance:
+            return None
+        markdown = self._render_simple_report_markdown(do_not_retry, refresh_guidance)
+        return {
+            "schema": "simple_report.v1",
+            "source": "candidates.jsonl",
+            "advisory_only": True,
+            "do_not_retry": do_not_retry,
+            "refresh_guidance": refresh_guidance,
+            "markdown": markdown,
+        }
+
+    def _simple_report_is_no_improvement(self, record: dict[str, Any]) -> bool:
+        failure_class = str(record.get("failure_class") or record.get("stage_result") or "")
+        if failure_class == "no_improvement":
+            return True
+        detail = " ".join(
+            str(record.get(key) or "")
+            for key in ("failure_detail", "summary", "diagnostic_summary")
+        )
+        return "improved=False" in detail or "no improvement" in detail.lower()
+
+    def _simple_report_group_key(self, record: dict[str, Any], kind: str) -> str:
+        regions = record.get("region_keys")
+        if not isinstance(regions, list) or not regions:
+            regions = [
+                str(change.get("target_region") or change.get("path") or "")
+                for change in record.get("changes", [])
+                if isinstance(change, dict)
+            ]
+        region_key = "|".join(sorted(str(item) for item in regions if str(item)))[:300]
+        change_bits = []
+        for change in record.get("changes", [])[:3]:
+            if not isinstance(change, dict):
+                continue
+            change_bits.append(
+                ":".join(
+                    str(part)
+                    for part in (
+                        change.get("path", ""),
+                        change.get("target_region", ""),
+                        change.get("mode", ""),
+                        self._truncate_text(str(change.get("reason", "")), 120),
+                    )
+                )
+            )
+        reason = self._truncate_text(
+            str(record.get("reason") or record.get("summary") or ""), 160
+        )
+        if region_key or change_bits or reason:
+            return f"{kind}:{region_key}:{'|'.join(change_bits)}:{reason}"
+        fingerprint = record.get("fingerprint")
+        return f"{kind}:fingerprint:{fingerprint}" if fingerprint else f"{kind}:unknown"
+
+    def _simple_report_item(
+        self, kind: str, grouped: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        latest = grouped[-1]
+        changes = latest.get("changes") if isinstance(latest.get("changes"), list) else []
+        regions = latest.get("region_keys") if isinstance(latest.get("region_keys"), list) else []
+        if not regions:
+            regions = [
+                change.get("target_region") or change.get("path")
+                for change in changes
+                if isinstance(change, dict)
+            ]
+        reasons = [
+            str(change.get("reason") or "")
+            for change in changes
+            if isinstance(change, dict) and change.get("reason")
+        ]
+        reason = (
+            reasons[0]
+            if reasons
+            else str(latest.get("reason") or latest.get("summary") or kind)
+        )
+        metrics = [
+            record.get("metric")
+            for record in grouped
+            if record.get("metric") not in (None, "", [], {})
+        ]
+        return {
+            "kind": kind,
+            "count": len(grouped),
+            "regions": [self._truncate_text(str(item), 120) for item in regions[:6]],
+            "reason": self._truncate_text(reason, 260),
+            "metrics": metrics[-3:],
+            "latest_candidate_id": latest.get("candidate_id", ""),
+            "latest_loop": latest.get("loop"),
+        }
+
+    def _render_simple_report_markdown(
+        self,
+        do_not_retry: list[dict[str, Any]],
+        refresh_guidance: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            "Simple report (advisory only)",
+            "",
+            "Evidence is compressed from the current candidates.jsonl. Current source, latest failure, writable files, and tests still supersede this report.",
+        ]
+        if do_not_retry:
+            lines.extend(["", "Do not retry without new evidence:"])
+            for item in do_not_retry[:5]:
+                metrics = (
+                    f"; observed metrics={item['metrics']}"
+                    if item.get("metrics")
+                    else ""
+                )
+                regions = ", ".join(item.get("regions") or []) or "unknown region"
+                lines.append(
+                    "- "
+                    f"{item['reason']} "
+                    f"(repeated {item['count']}x in {regions}{metrics})."
+                )
+        if refresh_guidance:
+            lines.extend(["", "Refresh or retarget exact current source:"])
+            for item in refresh_guidance[:5]:
+                regions = ", ".join(item.get("regions") or []) or "unknown region"
+                lines.append(
+                    "- "
+                    f"{item['reason']} hit repeated patch_miss "
+                    f"({item['count']}x in {regions}); re-read the current region and use a smaller exact hunk. This is not a tactic ban."
+                )
+        return "\n".join(lines).strip() + "\n"
+
+    def _truncate_simple_report_markdown(self, markdown: str, limit: int) -> str:
+        if limit <= 0 or len(markdown) <= limit:
+            return markdown
+        marker = "\n[truncated simple report]\n"
+        budget = max(0, limit - len(marker))
+        trimmed = markdown[:budget]
+        if "\n" in trimmed:
+            trimmed = trimmed.rsplit("\n", 1)[0]
+        return trimmed.rstrip() + marker
+
+    def _bounded_simple_report_json(self, report: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": report.get("schema"),
+            "source": report.get("source"),
+            "advisory_only": True,
+            "do_not_retry": [
+                self._bounded_simple_report_item(item)
+                for item in report.get("do_not_retry", [])[:5]
+                if isinstance(item, dict)
+            ],
+            "refresh_guidance": [
+                self._bounded_simple_report_item(item)
+                for item in report.get("refresh_guidance", [])[:5]
+                if isinstance(item, dict)
+            ],
+            "markdown": self._truncate_text(str(report.get("markdown", "")), 4000),
+        }
+
+    def _bounded_simple_report_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "kind": item.get("kind"),
+            "count": item.get("count"),
+            "regions": [
+                self._truncate_text(str(region), 120)
+                for region in (item.get("regions") or [])[:6]
+            ],
+            "reason": self._truncate_text(str(item.get("reason", "")), 260),
+            "metrics": (item.get("metrics") or [])[-3:],
+            "latest_candidate_id": self._truncate_text(
+                str(item.get("latest_candidate_id", "")), 80
+            ),
+            "latest_loop": item.get("latest_loop"),
+        }
+
     def _candidate_rejection_extra(
         self, candidate: CodeCandidate, status: str, failure_detail: str
     ) -> dict[str, Any]:

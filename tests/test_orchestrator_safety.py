@@ -12878,6 +12878,266 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
+    def test_simple_report_groups_repeated_no_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history = repo / ".local_micro_agent" / "candidates.jsonl"
+            history.parent.mkdir()
+            records = [
+                {
+                    "candidate_id": f"loop-{idx}",
+                    "loop": idx,
+                    "status": "rejected",
+                    "failure_class": "no_improvement",
+                    "fingerprint": "same-shape",
+                    "metric": 147734,
+                    "region_keys": ["target.py::parse_item::data_flow"],
+                    "changes": [
+                        {
+                            "path": "target.py",
+                            "target_region": "target.py::parse_item",
+                            "mode": "replacement",
+                            "reason": "Remove debug compare checks",
+                        }
+                    ],
+                }
+                for idx in range(2)
+            ]
+            history.write_text("\n".join(json.dumps(record) for record in records))
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"preset": "simple"},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            report = agent._format_simple_report_context()
+
+            self.assertIn("Do not retry without new evidence", report)
+            self.assertIn("Remove debug compare checks", report)
+            self.assertIn("observed metrics=[147734, 147734]", report)
+            payload = json.loads((repo / ".local_micro_agent" / "simple_report.json").read_text())
+            self.assertEqual(payload["do_not_retry"][0]["count"], 2)
+            self.assertEqual(payload["refresh_guidance"], [])
+
+    def test_simple_report_groups_same_shape_even_when_fingerprints_differ(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history = repo / ".local_micro_agent" / "candidates.jsonl"
+            history.parent.mkdir()
+            records = [
+                {
+                    "candidate_id": f"loop-{idx}",
+                    "loop": idx,
+                    "status": "rejected",
+                    "failure_class": "no_improvement",
+                    "fingerprint": f"shape-{idx}",
+                    "metric": 147734,
+                    "region_keys": ["target.py::parse_item::data_flow"],
+                    "changes": [
+                        {
+                            "path": "target.py",
+                            "target_region": "target.py::parse_item",
+                            "mode": "replacement",
+                            "reason": "Remove debug compare checks",
+                        }
+                    ],
+                }
+                for idx in range(2)
+            ]
+            history.write_text("\n".join(json.dumps(record) for record in records))
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"preset": "simple"},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            payload = agent._build_simple_report(agent._candidate_history_records(limit=20))
+
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["do_not_retry"][0]["count"], 2)
+
+    def test_simple_report_patch_miss_is_refresh_guidance_not_ban(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history = repo / ".local_micro_agent" / "candidates.jsonl"
+            history.parent.mkdir()
+            records = [
+                {
+                    "candidate_id": f"loop-{idx}",
+                    "loop": idx,
+                    "status": "rejected",
+                    "failure_class": "patch_miss",
+                    "region_keys": ["target.py::parse_item::data_flow"],
+                    "changes": [
+                        {
+                            "path": "target.py",
+                            "target_region": "target.py::parse_item",
+                            "mode": "replacement",
+                            "reason": "Retarget parser branch",
+                        }
+                    ],
+                }
+                for idx in range(2)
+            ]
+            history.write_text("\n".join(json.dumps(record) for record in records))
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"preset": "simple"},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            report = agent._format_simple_report_context()
+
+            self.assertIn("Refresh or retarget exact current source", report)
+            self.assertIn("not a tactic ban", report)
+            payload = json.loads((repo / ".local_micro_agent" / "simple_report.json").read_text())
+            self.assertEqual(payload["do_not_retry"], [])
+            self.assertEqual(payload["refresh_guidance"][0]["count"], 2)
+
+    def test_simple_report_injected_before_raw_candidate_history(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                history = repo / ".local_micro_agent" / "candidates.jsonl"
+                history.parent.mkdir()
+                records = [
+                    {
+                        "candidate_id": f"loop-{idx}",
+                        "loop": idx,
+                        "status": "rejected",
+                        "failure_class": "no_improvement",
+                        "fingerprint": "same-shape",
+                        "metric": 10,
+                        "region_keys": ["target.py::parse_item::data_flow"],
+                        "changes": [
+                            {
+                                "path": "target.py",
+                                "target_region": "target.py::parse_item",
+                                "mode": "replacement",
+                                "reason": "Metric-neutral parser rewrite",
+                            }
+                        ],
+                    }
+                    for idx in range(2)
+                ]
+                history.write_text("\n".join(json.dumps(record) for record in records))
+                manager = _RoleModelManager({"coder": '{"changes":[]}'})
+                agent = MicroAgent(
+                    {
+                        "models": {"coder": "coder-model", "default": "coder-model"},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "preset": "simple",
+                            "writable_files": ["target.py"],
+                            "simple_report_char_limit": 500,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+                content = "\n\n".join(
+                    message["content"]
+                    for message in manager.seen["coder"][0]
+                    if message.get("role") == "user"
+                )
+                self.assertLess(
+                    content.index("Simple report follows"),
+                    content.index("Recent candidate history follows"),
+                )
+                self.assertIn("advisory-only compression", content)
+                self.assertNotIn("Run-local spec:", content)
+
+        asyncio.run(run_case())
+
+    def test_simple_report_malformed_history_clears_stale_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state_dir = repo / ".local_micro_agent"
+            state_dir.mkdir()
+            (state_dir / "candidates.jsonl").write_text("{not-json}\n")
+            (state_dir / "simple_report.md").write_text("stale")
+            (state_dir / "simple_report.json").write_text("{}")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"preset": "simple"},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            self.assertEqual(agent._format_simple_report_context(), "")
+            self.assertFalse((state_dir / "simple_report.md").exists())
+            self.assertFalse((state_dir / "simple_report.json").exists())
+
+    def test_simple_report_disabled_and_non_simple_modes_do_not_inject(self) -> None:
+        for workflow in (
+            {"preset": "simple", "simple_report_enabled": False},
+            {"preset": "search", "simple_report_enabled": True},
+            {"preset": "spec", "simple_report_enabled": True},
+        ):
+            with self.subTest(workflow=workflow):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = Path(tmp)
+                    state_dir = repo / ".local_micro_agent"
+                    state_dir.mkdir()
+                    (state_dir / "candidates.jsonl").write_text(
+                        "\n".join(
+                            json.dumps(
+                                {
+                                    "failure_class": "no_improvement",
+                                    "region_keys": ["target.py::parse_item::data_flow"],
+                                    "changes": [
+                                        {
+                                            "path": "target.py",
+                                            "target_region": "target.py::parse_item",
+                                            "reason": "Repeated edit",
+                                        }
+                                    ],
+                                }
+                            )
+                            for _ in range(2)
+                        )
+                    )
+                    agent = MicroAgent(
+                        {
+                            "models": {},
+                            "providers": {},
+                            "mcp_servers": {},
+                            "workflow": workflow,
+                        },
+                        AgentState(repo_root=repo, user_request="test"),
+                    )
+
+                    self.assertEqual(agent._format_simple_report_context(), "")
+                    self.assertFalse((state_dir / "simple_report.md").exists())
+
     def test_spec_thinking_brief_empty_output_continues_with_constraints(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:

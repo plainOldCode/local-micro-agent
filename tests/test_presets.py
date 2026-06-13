@@ -48,8 +48,15 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertFalse(workflow["candidate_novelty_gate"])
         self.assertTrue(workflow["deterministic_test_decision"])
         self.assertTrue(workflow["repair_target_not_found"])
+        self.assertTrue(workflow["simple_report_enabled"])
+        self.assertEqual(workflow["simple_report_path"], ".local_micro_agent/simple_report.md")
         self.assertTrue(workflow["simple_thinking_brief_enabled"])
         self.assertEqual(workflow["simple_thinking_brief_model_role"], "reasoner")
+
+    def test_simple_report_defaults_do_not_leak_to_other_presets(self) -> None:
+        for preset in ("minimal", "search", "structural", "spec"):
+            workflow = apply_workflow_preset({"workflow": {"preset": preset}})["workflow"]
+            self.assertNotIn("simple_report_enabled", workflow, preset)
 
     def test_structural_preset_extends_search(self) -> None:
         config = apply_workflow_preset({"workflow": {"preset": "structural"}})

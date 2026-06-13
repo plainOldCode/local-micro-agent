@@ -563,6 +563,17 @@ class MicroAgent(
                         "matches the required strategy axis and has not been rejected.\n"
                         f"{tactic_library}"
                     )
+                simple_report = self._format_simple_report_context()
+                if simple_report:
+                    add_runtime_context(
+                        "Simple report follows. It is advisory-only compression of "
+                        "current candidates.jsonl for this simple classic run. Use it "
+                        "to avoid repeated no-improvement shapes and to refresh exact "
+                        "source after patch misses; do not treat it as a run_spec, "
+                        "task graph, scheduler, hypothesis, structural contract, or "
+                        "blocking gate.\n"
+                        f"{simple_report}"
+                    )
                 history = self._format_candidate_history()
                 if history:
                     add_runtime_context(
