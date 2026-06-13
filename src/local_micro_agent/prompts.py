@@ -498,6 +498,43 @@ def spec_hypothesis_repair_prompt(
     ]
 
 
+def spec_hypothesis_task_repair_prompt(
+    state: AgentState,
+    *,
+    focus: str,
+    repair_context: str,
+) -> list[dict[str, str]]:
+    source_blocks = "\n\n".join(
+        f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context
+    )
+    semantic_analysis = state.scratch.get("semantic_analysis")
+    semantic_block = (
+        f"\n\nSemantic analysis:\n{semantic_analysis}"
+        if isinstance(semantic_analysis, str) and semantic_analysis.strip()
+        else ""
+    )
+    focus_block = f"\n\nSpec focus:\n{focus}" if focus.strip() else ""
+    return [
+        {"role": "system", "content": SPEC_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                "Repair the previous SPEC_FINALIZE output by converting accepted "
+                "typed hypothesis options into the smallest runnable task graph "
+                "that passes the deterministic quality gate.\n\n"
+                f"User request:\n{state.user_request}\n\n"
+                f"Plan:\n{state.plan_markdown}\n\n"
+                f"Source files:\n{source_blocks}"
+                f"{semantic_block}"
+                f"{focus_block}\n\n"
+                f"Repair context:\n{repair_context}\n\n"
+                "Return one JSON run_spec object only. Copy accepted hypothesis_id "
+                "values exactly. Do not emit markdown, prose, code, or shell commands."
+            ),
+        },
+    ]
+
+
 def spec_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context

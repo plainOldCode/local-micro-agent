@@ -11076,6 +11076,212 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
+    def test_spec_hypothesis_task_repair_persists_guarded_shrink(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text(
+                    "def parse_item(value):\n    return value\n\n"
+                    "def helper(value):\n    return value\n"
+                )
+                brief = self._valid_hypothesis_brief(
+                    hypothesis_id="hyp-wide",
+                    region="target.py::parse_item, target.py::helper",
+                    kind="local_edit",
+                    why_not_smaller=(
+                        "The claim spans parse_item and helper, but finalizer may "
+                        "start with one single guarded branch."
+                    ),
+                )
+                bad_spec = self._valid_hypothesis_spec(
+                    spec_id="bad-shrink",
+                    hypothesis_id="hyp-wide",
+                    region="target.py::parse_item",
+                )
+                bad_payload = json.loads(bad_spec)
+                bad_task = bad_payload["task_graph"][0]
+                bad_task["edit_scope"] = "Change parse_item implementation."
+                bad_task["probe_plan"] = "Change parse_item implementation."
+                bad_task["fallback_plan"] = "Revert the patch."
+                bad_task["rollback_or_shrink_plan"] = "Revert the patch."
+                bad_task["risk_evidence"] = {
+                    "field": "edit_scope",
+                    "quote": "Change parse_item implementation",
+                    "explanation": "implementation change",
+                }
+                repair_spec = self._valid_hypothesis_spec(
+                    spec_id="repaired-shrink",
+                    hypothesis_id="hyp-wide",
+                    region="target.py::parse_item",
+                )
+                repair_payload = json.loads(repair_spec)
+                repair_task = repair_payload["task_graph"][0]
+                repair_task["rollback_or_shrink_plan"] = (
+                    "Shrink to one single guarded branch in parse_item; keep the "
+                    "old return path as fallback and revert the branch if it fails."
+                )
+                repair_spec = json.dumps(repair_payload)
+                manager = _RoleSequenceModelManager(
+                    {
+                        "reasoner": [brief],
+                        "spec_synth": [json.dumps(bad_payload), repair_spec],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_hypothesis_brief_enabled": True,
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(spec["spec_id"], "repaired-shrink")
+                self.assertEqual(len(manager.seen["spec_synth"]), 2)
+                repair_prompt = manager.seen["spec_synth"][1][-1]["content"]
+                self.assertIn("Repair context", repair_prompt)
+                self.assertIn("hypothesis_boundary_shrink_plan_missing", repair_prompt)
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertIn("quality_repaired", progress)
+
+        asyncio.run(run_case())
+
+    def test_spec_hypothesis_task_repair_skips_non_hypothesis_quality_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hypothesis_brief_enabled": True,
+                        "spec_hypothesis_task_repair_enabled": True,
+                    },
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-parse",
+                        "change_boundary": {
+                            "regions": ["target.py::parse_item"],
+                            "kind": "local_edit",
+                        },
+                    }
+                ]
+            }
+            report = {"issue_codes": ["too_many_deliverables"], "issues": []}
+
+            self.assertFalse(agent._spec_hypothesis_task_repair_needed(report))
+
+    def test_spec_hypothesis_task_repair_failure_keeps_hard_block(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text(
+                    "def parse_item(value):\n    return value\n\n"
+                    "def helper(value):\n    return value\n"
+                )
+                brief = self._valid_hypothesis_brief(
+                    hypothesis_id="hyp-wide",
+                    region="target.py::parse_item, target.py::helper",
+                    kind="local_edit",
+                    why_not_smaller="The claim spans both regions.",
+                )
+                bad_spec = self._valid_hypothesis_spec(
+                    spec_id="bad-shrink",
+                    hypothesis_id="hyp-wide",
+                    region="target.py::parse_item",
+                )
+                bad_payload = json.loads(bad_spec)
+                bad_task = bad_payload["task_graph"][0]
+                bad_task["edit_scope"] = "Change parse_item implementation."
+                bad_task["probe_plan"] = "Change parse_item implementation."
+                bad_task["fallback_plan"] = "Revert the patch."
+                bad_task["rollback_or_shrink_plan"] = "Revert the patch."
+                bad_task["risk_evidence"] = {
+                    "field": "edit_scope",
+                    "quote": "Change parse_item implementation",
+                    "explanation": "implementation change",
+                }
+                manager = _RoleSequenceModelManager(
+                    {
+                        "reasoner": [brief],
+                        "spec_synth": [json.dumps(bad_payload), json.dumps(bad_payload)],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_hypothesis_brief_enabled": True,
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_gate_soft_fallback": True,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
+                self.assertEqual(len(manager.seen["spec_synth"]), 2)
+                progress = (repo / ".local_micro_agent" / "spec_progress.jsonl").read_text()
+                self.assertNotIn("quality_soft_fallback", progress)
+                self.assertIn("hypothesis_task_repair", progress)
+                self.assertIn("soft fallback blocked", "\n".join(agent.state.notes))
+
+        asyncio.run(run_case())
+
     def test_spec_hypothesis_brief_accepts_domain_terms_without_interpretation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

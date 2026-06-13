@@ -22,6 +22,7 @@ from ..decisions import CodeCandidate
 from ..prompts import (
     acceptance_synth_prompt,
     spec_hypothesis_repair_prompt,
+    spec_hypothesis_task_repair_prompt,
     spec_idea_prompt,
     spec_prompt,
     spec_think_brief_prompt,
@@ -315,6 +316,23 @@ class TodoLifecycleMixin:
                         self.state.scratch.pop("spec_graph_generation_origin", None)
                         self.state.scratch.pop("spec_graph_parent_graph_id", None)
                         return
+                    if await self._maybe_repair_spec_hypothesis_task_finalizer(
+                        focus=focus,
+                        previous_spec=previous_spec,
+                        failed_spec=spec,
+                        quality_report=quality_report,
+                        role=role,
+                        call_site=call_site,
+                        fallback_role=fallback_role,
+                        graph_origin=graph_origin,
+                        graph_parent_id=graph_parent_id,
+                        targeted_rewrite=targeted_rewrite,
+                    ):
+                        self.state.scratch.pop("spec_rewrite_focus", None)
+                        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                        self.state.scratch.pop("spec_graph_generation_origin", None)
+                        self.state.scratch.pop("spec_graph_parent_graph_id", None)
+                        return
                     if self._maybe_persist_soft_fallback_spec(spec, quality_report):
                         self.state.scratch.pop("spec_rewrite_focus", None)
                         self.state.scratch.pop("spec_rewrite_target_task_id", None)
@@ -335,6 +353,186 @@ class TodoLifecycleMixin:
             if spec:
                 self.state.scratch["run_spec"] = spec
                 self.state.notes.append(f"Loaded run spec: {path}")
+
+    async def _maybe_repair_spec_hypothesis_task_finalizer(
+        self,
+        *,
+        focus: str,
+        previous_spec: dict[str, Any],
+        failed_spec: dict[str, Any],
+        quality_report: dict[str, Any],
+        role: str,
+        call_site: str,
+        fallback_role: str,
+        graph_origin: str,
+        graph_parent_id: str,
+        targeted_rewrite: bool,
+    ) -> bool:
+        if not self._spec_hypothesis_task_repair_needed(quality_report):
+            return False
+        remaining = self._spec_synth_call_budget_remaining()
+        if remaining is not None and remaining <= 0:
+            self.state.notes.append(
+                "Spec hypothesis task repair skipped: spec synthesis call budget exhausted"
+            )
+            return False
+        repair_call_site = f"{call_site}_hypothesis_task_repair"
+        if not self._consume_spec_synth_call_budget(repair_call_site):
+            return False
+        repair_context = self._spec_hypothesis_task_repair_context(
+            failed_spec,
+            quality_report,
+        )
+        prompt = spec_hypothesis_task_repair_prompt(
+            self.state,
+            focus=focus,
+            repair_context=repair_context,
+        )
+        repaired = await self._request_run_spec_from_model(
+            role=role,
+            prompt=prompt,
+            call_site=repair_call_site,
+            fallback_role=fallback_role,
+        )
+        if not repaired:
+            self.state.notes.append(
+                "Spec hypothesis task repair returned no parseable run_spec"
+            )
+            return False
+        self._apply_spec_graph_generation_metadata(
+            repaired,
+            previous_spec=previous_spec,
+            origin=f"{graph_origin}_hypothesis_task_repair",
+            parent_graph_id=graph_parent_id,
+        )
+        repair_report = self._spec_quality_report(
+            repaired,
+            attempt=int(quality_report.get("attempt") or 0) + 1,
+        )
+        self._persist_spec_quality_report(repair_report)
+        if self._spec_quality_report_failed(repair_report):
+            issue_codes = self._spec_quality_issue_codes(repair_report)
+            self.state.notes.append(
+                "Spec hypothesis task repair still failed quality gate: "
+                + ", ".join(code for code in issue_codes if code)
+            )
+            self._append_spec_progress_event(
+                "quality_rejected",
+                repaired,
+                extra={
+                    "quality_attempt": repair_report.get("attempt"),
+                    "quality_issue_codes": issue_codes,
+                    "repair_mode": "hypothesis_task_repair",
+                },
+            )
+            self._append_spec_graph_candidate_event(
+                repaired,
+                event="candidate_rejected",
+                status="rejected_quality",
+                origin=f"{graph_origin}_hypothesis_task_repair",
+                quality_report=repair_report,
+                parent_graph_id=(
+                    self._spec_graph_id(previous_spec)
+                    if targeted_rewrite
+                    else graph_parent_id
+                ),
+            )
+            return False
+        self._append_spec_graph_candidate_event(
+            repaired,
+            event="candidate_selected",
+            status="selected",
+            origin=f"{graph_origin}_hypothesis_task_repair",
+            quality_report=repair_report,
+            parent_graph_id=(
+                self._spec_graph_id(previous_spec)
+                if targeted_rewrite
+                else graph_parent_id
+            ),
+        )
+        self._persist_run_spec(repaired)
+        self._append_spec_progress_event(
+            "quality_repaired",
+            repaired,
+            extra={
+                "repair_mode": "hypothesis_task_repair",
+                "source_issue_codes": self._spec_quality_issue_codes(quality_report),
+            },
+        )
+        self.state.notes.append(
+            "Persisted run spec after hypothesis option-to-task repair"
+        )
+        return True
+
+    def _spec_hypothesis_task_repair_needed(self, report: dict[str, Any]) -> bool:
+        if not self._spec_hypothesis_brief_enabled():
+            return False
+        workflow = self.config.get("workflow", {})
+        if workflow.get("spec_hypothesis_task_repair_enabled", True) is False:
+            return False
+        if not self._accepted_spec_hypothesis_options():
+            return False
+        issue_codes = set(self._spec_quality_issue_codes(report))
+        repair_codes = {
+            "hypothesis_boundary_shrink_plan_missing",
+            "hypothesis_boundary_structural_task_mismatch",
+            "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+            "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+        }
+        return bool(issue_codes & repair_codes)
+
+    def _spec_hypothesis_task_repair_context(
+        self,
+        failed_spec: dict[str, Any],
+        quality_report: dict[str, Any],
+    ) -> str:
+        accepted_payload = self._spec_hypothesis_options_feedback_summary()
+        compact_failed_tasks = []
+        tasks = failed_spec.get("task_graph")
+        if isinstance(tasks, list):
+            for task in tasks[:6]:
+                if not isinstance(task, dict):
+                    continue
+                compact_failed_tasks.append(
+                    {
+                        key: task.get(key)
+                        for key in (
+                            "task_id",
+                            "hypothesis_id",
+                            "title",
+                            "target_regions",
+                            "edit_scope",
+                            "risk_level",
+                            "tactic_stage",
+                            "probe_plan",
+                            "rollback_or_shrink_plan",
+                        )
+                        if task.get(key) not in (None, "", [], {})
+                    }
+                )
+        guidance = [
+            "The accepted hypothesis options are valid, but the previous JSON "
+            "run_spec failed while translating those options into runnable tasks.",
+            "Repair only the option-to-task mapping. Do not invent new hypothesis "
+            "ids, do not use rejected options, and do not create tasks outside the "
+            "accepted option change_boundary.regions.",
+            "If narrowing a multi-region hypothesis to one runnable task, explicitly "
+            "describe the smaller guarded probe in edit_scope, probe_plan, and "
+            "rollback_or_shrink_plan. Revert-only text is insufficient.",
+            "Prefer one smallest runnable local_edit task when the accepted option "
+            "can be safely narrowed; otherwise emit one structural_probe with a "
+            "concrete probe_diff_contract.",
+        ]
+        body = [
+            "\n".join(guidance),
+            "Quality report:",
+            json.dumps(quality_report, ensure_ascii=False, indent=2),
+            "Previous failed task graph excerpt:",
+            json.dumps(compact_failed_tasks, ensure_ascii=False, indent=2),
+        ]
+        if accepted_payload:
+            body.extend(["Accepted hypothesis options:", accepted_payload])
+        return "\n\n".join(part for part in body if str(part).strip())
 
     def _maybe_persist_soft_fallback_spec(
         self,

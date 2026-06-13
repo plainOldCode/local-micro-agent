@@ -1287,3 +1287,52 @@ behavior:
   justified, observable, and bounded.
 - Do not let unstructured thinking prose bypass the existing spec quality gate.
 - Do not increase model-call budgets to compensate for malformed brief options.
+
+### MVP 9-D''' - Option-To-Task Finalizer Repair
+
+#### Problem
+
+MVP 9-D'' fixed missing typed hypothesis options by adding a bounded brief
+repair. The next smoke showed a later failure: accepted hypothesis options
+existed, but the no-think finalizer still failed to translate them into a
+runnable task graph. The representative quality issues were:
+
+- `design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe`
+- `design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe`
+- `hypothesis_boundary_shrink_plan_missing`
+
+That is not a reason to weaken D' hard provenance gates. It is a narrower
+finalizer repair problem: the controller has valid option ids and boundaries,
+but the finalizer needs one bounded chance to repair the option-to-task mapping.
+
+#### Design
+
+After normal SPEC quality rewrites are exhausted, run at most one
+`hypothesis_task_repair` finalizer call when all of these hold:
+
+- `spec_hypothesis_brief_enabled` is true;
+- at least one accepted hypothesis option is available;
+- the latest quality report contains option-boundary or shrink/probe contract
+  failures;
+- SPEC synthesis budget remains.
+
+The repair prompt receives:
+
+- the authoritative focus, grounding facts, and synthesis constraints;
+- accepted hypothesis options and rejected-option summary;
+- the exact quality report;
+- a compact excerpt of the failed task graph.
+
+The repair output is still ordinary run-spec JSON and must pass the same
+quality gate before persistence. If it passes, persist the repaired graph and
+record `quality_repaired`. If it fails, record the rejected graph candidate and
+continue the existing terminal/soft-fallback logic. D' hard hypothesis
+provenance failures still block soft fallback into CODE.
+
+#### Tests
+
+| kind | case | expected |
+|---|---|---|
+| normal | accepted multi-region option is narrowed to one guarded local task after first finalizer misses shrink text | repair prompt runs once and persists the repaired spec |
+| edge | quality failure is unrelated to hypothesis boundary/shrink | no repair call is attempted |
+| error | repair output repeats the invalid shrink plan | no `run_spec.json` is persisted and hard fallback remains blocked |
