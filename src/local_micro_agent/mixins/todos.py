@@ -5203,6 +5203,7 @@ class TodoLifecycleMixin:
             str(record.get("symbol") or "")
             for record in imported_symbols
             if str(record.get("symbol") or "")
+            and self._spec_path_is_writable(str(record.get("path") or ""), writable)
         }
         issues: list[str] = []
         for path in self._normalize_string_list(task.get("deliverables")):

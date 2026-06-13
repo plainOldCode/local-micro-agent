@@ -8355,6 +8355,85 @@ Background / non-constraints
             self.assertIn("imported_symbol_targeted:Machine.step", issues)
             self.assertIn("unresolvable_target_region:perf_takehome.py::Machine.step", issues)
 
+    def test_spec_grounding_gate_allows_writable_symbol_imported_by_read_only_tests(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "tests").mkdir()
+            (repo / "perf_takehome.py").write_text(
+                "class KernelBuilder:\n"
+                "    def build(self):\n"
+                "        return []\n"
+            )
+            (repo / "tests" / "submission_tests.py").write_text(
+                "from perf_takehome import KernelBuilder\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "spec_design_contract_gate": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["perf_takehome.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(
+                    path="perf_takehome.py",
+                    content=(repo / "perf_takehome.py").read_text(),
+                ),
+                FileSnapshot(
+                    path="tests/submission_tests.py",
+                    content=(repo / "tests" / "submission_tests.py").read_text(),
+                ),
+            ]
+            agent.state.scratch["spec_grounding_facts"] = {
+                "writable_files": ["perf_takehome.py"],
+                "allowed_target_regions": [
+                    "perf_takehome.py::KernelBuilder",
+                    "perf_takehome.py::KernelBuilder.build",
+                ],
+                "read_only_symbols": [],
+                "imported_symbols": [
+                    {
+                        "path": "tests/submission_tests.py",
+                        "symbol": "KernelBuilder",
+                        "imported_name": "KernelBuilder",
+                        "module": "perf_takehome",
+                        "origin_path": "perf_takehome.py",
+                        "origin_region": "perf_takehome.py::KernelBuilder",
+                    }
+                ],
+            }
+            task = {
+                "task_id": "task-001",
+                "title": "guard build branch",
+                "strategy_axis": "general_edit",
+                "deliverables": ["perf_takehome.py"],
+                "target_symbols": ["KernelBuilder.build"],
+                "target_regions": ["perf_takehome.py::KernelBuilder.build"],
+                "preserved_invariants": ["build return behavior stays unchanged"],
+                "edit_scope": "Change one guarded branch in KernelBuilder.build.",
+                "validator": {
+                    "kind": "command",
+                    "failure_condition": "pytest fails",
+                },
+                "correctness_rationale": "The fallback branch is unchanged.",
+                "fallback_plan": "Revert the guarded branch.",
+                "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+            }
+
+            issues = agent._spec_task_grounding_issues(task)
+
+            self.assertNotIn("imported_symbol_targeted:KernelBuilder.build", issues)
+
     def test_spec_grounding_gate_rejects_read_only_deliverable_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
