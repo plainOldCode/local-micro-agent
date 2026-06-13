@@ -5219,6 +5219,11 @@ class TodoLifecycleMixin:
                 issues.append(f"unresolvable_target_region:{region}")
             elif region in read_only_symbols:
                 issues.append(f"non_writable_target_region:{region}")
+        grounded_target_symbol_suffixes = {
+            region.split("::", 1)[1].strip()
+            for region in target_regions
+            if "::" in region and region in allowed_regions
+        }
         for symbol in self._normalize_string_list(task.get("target_symbols")):
             symbol_root = self._symbol_root(symbol)
             if symbol in read_only_symbols:
@@ -5229,6 +5234,8 @@ class TodoLifecycleMixin:
                     issues.append(f"non_writable_symbol:{symbol}")
                 elif region_path and region_path.endswith(".py") and symbol not in allowed_regions:
                     issues.append(f"unresolvable_target_region:{symbol}")
+            elif symbol in grounded_target_symbol_suffixes:
+                pass
             elif symbol_root in imported_roots:
                 issues.append(f"imported_symbol_targeted:{symbol}")
         contract = task.get("probe_diff_contract")
