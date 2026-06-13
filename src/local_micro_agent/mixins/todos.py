@@ -3096,6 +3096,7 @@ class TodoLifecycleMixin:
                 normalized["design_contract"] = copy.deepcopy(task["design_contract"])
             if version >= 2:
                 normalized.update(self._normalize_run_spec_v2_task(task))
+                normalized = self._repair_narrowed_hypothesis_task(normalized)
             normalized_tasks.append(normalized)
         if not normalized_tasks:
             return {}
@@ -3406,6 +3407,67 @@ class TodoLifecycleMixin:
         if command:
             normalized["command"] = command
         return {key: item for key, item in normalized.items() if item}
+
+    def _repair_narrowed_hypothesis_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        if not self._spec_hypothesis_brief_enabled():
+            return task
+        hypothesis_id = str(task.get("hypothesis_id") or "").strip()
+        if not hypothesis_id:
+            return task
+        option = self._accepted_spec_hypothesis_options().get(hypothesis_id)
+        if not isinstance(option, dict):
+            return task
+        boundary = option.get("change_boundary")
+        boundary = boundary if isinstance(boundary, dict) else {}
+        option_regions = self._normalize_string_list(boundary.get("regions"))
+        target_regions = self._normalize_string_list(task.get("target_regions"))
+        if (
+            len(option_regions) <= 1
+            or len(target_regions) != 1
+            or target_regions[0] not in option_regions
+            or set(target_regions) == set(option_regions)
+        ):
+            return task
+
+        target_region = target_regions[0]
+        option_region_set = set(option_regions)
+        repaired = dict(task)
+        contract = (
+            dict(repaired.get("probe_diff_contract"))
+            if isinstance(repaired.get("probe_diff_contract"), dict)
+            else {}
+        )
+        repaired_issues: list[str] = []
+        for field in ("allowed_regions", "expected_changed_regions"):
+            regions = self._normalize_string_list(contract.get(field))
+            if regions and set(regions).issubset(option_region_set) and regions != [target_region]:
+                contract[field] = [target_region]
+                repaired_issues.append(f"narrowed_hypothesis_{field}_trimmed")
+        if contract:
+            repaired["probe_diff_contract"] = contract
+
+        if repaired_issues and not self._spec_task_describes_hypothesis_shrink(repaired):
+            repaired["probe_plan"] = self._synthesize_narrowed_hypothesis_probe_plan(
+                target_region
+            )
+            repaired["rollback_or_shrink_plan"] = (
+                self._synthesize_structural_probe_shrink_plan([target_region])
+            )
+            repaired_issues.append("narrowed_hypothesis_shrink_plan_synthesized")
+
+        if repaired_issues:
+            existing = self._normalize_string_list(repaired.get("auto_repaired_issues"))
+            repaired["auto_repaired_issues"] = list(dict.fromkeys([*existing, *repaired_issues]))
+        return repaired
+
+    @staticmethod
+    def _synthesize_narrowed_hypothesis_probe_plan(target_region: str) -> str:
+        return (
+            "Run a smaller guarded probe inside "
+            f"{target_region} only; do not edit sibling hypothesis regions. "
+            "Keep existing behavior as the fallback path and use validation or "
+            "metric signal to decide whether expansion is warranted later."
+        )
 
     def _todo_soft_until_first_improvement_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})

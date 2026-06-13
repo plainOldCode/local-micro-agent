@@ -13120,6 +13120,112 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
+    def test_normalize_repairs_narrowed_hypothesis_probe_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def parse_item(value):\n    return value\n\n"
+                "def helper(value):\n    return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_hypothesis_brief_enabled": True,
+                        "spec_quality_gate": True,
+                        "spec_grounding_gate": True,
+                        "spec_design_contract_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-wide",
+                        "change_boundary": {
+                            "regions": [
+                                "target.py::parse_item",
+                                "target.py::helper",
+                            ],
+                            "kind": "local_edit",
+                        },
+                    }
+                ]
+            }
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "narrowed-contract",
+                    "objective": "Validate a narrowed hypothesis task.",
+                    "invariants": ["parse_item behavior remains stable"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "hypothesis_id": "hyp-wide",
+                            "title": "narrow wide hypothesis",
+                            "strategy_axis": "parser_guard",
+                            "expected_signal": "metric improves while tests pass",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["parse_item"],
+                            "target_regions": ["target.py::parse_item"],
+                            "preserved_invariants": ["parse_item returns values unchanged"],
+                            "edit_scope": "Change parse_item implementation.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "Change parse_item implementation",
+                                "explanation": "implementation change",
+                            },
+                            "probe_plan": "Change parse_item and helper together.",
+                            "probe_diff_contract": {
+                                "allowed_files": ["target.py"],
+                                "allowed_regions": [
+                                    "target.py::parse_item",
+                                    "target.py::helper",
+                                ],
+                                "expected_changed_regions": [
+                                    "target.py::parse_item",
+                                    "target.py::helper",
+                                ],
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The fallback path remains intact.",
+                            "fallback_plan": "Revert the patch.",
+                            "rollback_or_shrink_plan": "Revert the patch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            task = spec["task_graph"][0]
+            contract = task["probe_diff_contract"]
+            self.assertEqual(contract["allowed_regions"], ["target.py::parse_item"])
+            self.assertEqual(
+                contract["expected_changed_regions"],
+                ["target.py::parse_item"],
+            )
+            self.assertIn("smaller guarded probe", task["probe_plan"])
+            self.assertIn("target.py::parse_item only", task["probe_plan"])
+            self.assertIn(
+                "narrowed_hypothesis_shrink_plan_synthesized",
+                task["auto_repaired_issues"],
+            )
+            report = agent._spec_quality_report(spec)
+            self.assertEqual(report["status"], "pass")
+
     def test_spec_hypothesis_task_repair_skips_non_hypothesis_quality_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             agent = MicroAgent(
