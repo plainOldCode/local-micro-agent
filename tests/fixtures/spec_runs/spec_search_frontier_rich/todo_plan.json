@@ -664,7 +664,7 @@
         "spec_task_id": "task-005",
         "budget_counted": false,
         "failure_class": "active_task_drift",
-        "summary": "correctness_failure: status=rejected_active_task_shape_drift; applied=0; metric=None; axis=local_edit; candidate declares 36 changed lines, max_changed_lines=10; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-005; Persisted spec grounding facts: /Users/m2max/tmp/local-micro-agent-homewor...",
+        "summary": "correctness_failure: status=rejected_active_task_shape_drift; applied=0; metric=None; axis=local_edit; candidate declares 36 changed lines, max_changed_lines=10; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-005; Persisted spec grounding facts: <source-run>",
         "next_actions": [
           "Use the failing command output as the next hypothesis.",
           "Make a smaller semantic change that preserves observed invariants."
@@ -817,7 +817,7 @@
         "spec_task_id": "task-006",
         "budget_counted": false,
         "failure_class": "active_task_drift",
-        "summary": "correctness_failure: status=rejected_active_task_shape_drift; applied=0; metric=None; axis=local_edit; candidate declares 36 changed lines, max_changed_lines=10; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-006; Persisted spec grounding facts: /Users/m2max/tmp/local-micro-agent-homewor...",
+        "summary": "correctness_failure: status=rejected_active_task_shape_drift; applied=0; metric=None; axis=local_edit; candidate declares 36 changed lines, max_changed_lines=10; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-006; Persisted spec grounding facts: <source-run>",
         "next_actions": [
           "Use the failing command output as the next hypothesis.",
           "Make a smaller semantic change that preserves observed invariants."

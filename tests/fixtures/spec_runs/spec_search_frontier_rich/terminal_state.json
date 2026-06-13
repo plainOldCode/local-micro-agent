@@ -520,7 +520,7 @@
       "state_management"
     ],
     "strategy_axis": "local_edit",
-    "summary": "correctness_failure: status=rejected_active_task_shape_drift; applied=0; metric=None; axis=local_edit; candidate declares 36 changed lines, max_changed_lines=10; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-006; Persisted spec grounding facts: /Users/m2max/tmp/local-micro-agent-homewor...",
+    "summary": "correctness_failure: status=rejected_active_task_shape_drift; applied=0; metric=None; axis=local_edit; candidate declares 36 changed lines, max_changed_lines=10; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-006; Persisted spec grounding facts: <source-run>",
     "tactic_stage": "local_edit",
     "todo_id": "task-006",
     "ts": "2026-06-12T15:56:41+0900"

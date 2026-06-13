@@ -10,6 +10,7 @@ import shlex
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 import local_micro_agent.models as model_module
@@ -134,6 +135,27 @@ def _copy_spec_run_fixture(repo: Path, name: str) -> Path:
         if path.exists():
             shutil.copyfile(path, artifact_dir / filename)
     return artifact_dir
+
+
+def _read_fixture_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line:
+            records.append(json.loads(line))
+    return records
+
+
+def _count_fixture_jsonl_values(path: Path, key: str) -> dict[str, int]:
+    counts = Counter(
+        str(value)
+        for record in _read_fixture_jsonl(path)
+        for value in [record.get(key)]
+        if value not in (None, "")
+    )
+    return dict(counts)
 
 
 class _BadJsonModel:
@@ -6245,23 +6267,65 @@ Background / non-constraints
             self.assertEqual(terminal["spec_budget_saved_by_drift_backoff"], 0)
 
     def test_spec_run_fixtures_lock_expected_terminal_shapes(self) -> None:
+        fixture_names = {
+            path.name
+            for path in (FIXTURE_ROOT / "spec_runs").iterdir()
+            if path.is_dir()
+        }
+        self.assertEqual(fixture_names, set(SPEC_RUN_FIXTURE_EXPECTATIONS))
         for name, expected in SPEC_RUN_FIXTURE_EXPECTATIONS.items():
             with self.subTest(fixture=name):
-                fixture = FIXTURE_ROOT / "spec_runs" / name / "terminal_state.json"
-                terminal = json.loads(fixture.read_text())
+                fixture_dir = FIXTURE_ROOT / "spec_runs" / name
+                terminal = json.loads((fixture_dir / "terminal_state.json").read_text())
                 self.assertEqual(terminal["state"], "failed")
                 for key, value in expected.items():
                     self.assertEqual(terminal.get(key), value)
+                self.assertEqual(
+                    terminal.get("candidate_status_counts", {}),
+                    _count_fixture_jsonl_values(
+                        fixture_dir / "candidates.jsonl", "status"
+                    ),
+                )
+                candidate_failure_counts = _count_fixture_jsonl_values(
+                    fixture_dir / "candidates.jsonl", "failure_class"
+                )
+                self.assertEqual(
+                    terminal.get("candidate_failure_class_counts", {}),
+                    candidate_failure_counts,
+                )
+                self.assertEqual(
+                    terminal.get("active_task_drift_count", 0),
+                    candidate_failure_counts.get("active_task_drift", 0),
+                )
+                self.assertEqual(
+                    terminal.get("failure_signature_counts", {}),
+                    _count_fixture_jsonl_values(
+                        fixture_dir / "failure_signatures.jsonl", "failure_class"
+                    ),
+                )
+                self.assertEqual(
+                    terminal.get("graph_candidate_counts", {}),
+                    _count_fixture_jsonl_values(
+                        fixture_dir / "spec_graph_candidates.jsonl", "status"
+                    ),
+                )
+                self.assertEqual(
+                    terminal.get("graph_candidate_event_counts", {}),
+                    _count_fixture_jsonl_values(
+                        fixture_dir / "spec_graph_candidates.jsonl", "event"
+                    ),
+                )
 
     def test_spec_run_fixtures_do_not_embed_source_run_paths_in_json(self) -> None:
-        source_path = "/Users/m2max/tmp/local-micro-agent-homework-runs"
         for name in SPEC_RUN_FIXTURE_EXPECTATIONS:
             fixture_dir = FIXTURE_ROOT / "spec_runs" / name
             for path in fixture_dir.iterdir():
                 if path.suffix not in {".json", ".jsonl"}:
                     continue
                 with self.subTest(fixture=name, file=path.name):
-                    self.assertNotIn(source_path, path.read_text())
+                    text = path.read_text()
+                    self.assertNotIn("/Users/", text)
+                    self.assertNotIn("/tmp/local-micro-agent-homework-runs", text)
 
     def test_fixture_d15_terminal_shape_documents_structural_probe_narrowing_failure(
         self,
