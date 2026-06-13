@@ -108,7 +108,7 @@
         "spec_task_id": "task-001",
         "budget_counted": false,
         "failure_class": "active_task_drift",
-        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=vliw_packing_probe; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Persisted spec think brief: /Users/m2max/tmp/local-micro-agent-homework-runs/run-20260613-163019-agents-json-regex-64k-20loop-bf69405-ollama-qwen36-35b...",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=vliw_packing_probe; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Persisted spec think brief: <source-run>",
         "next_actions": [
           "Read the active todo contract and produce a candidate that satisfies it.",
           "If the contract blocks valid work, surface that as evidence for relaxation."
