@@ -27,6 +27,7 @@ from local_micro_agent.prompts import (
     reflect_prompt,
     semantic_analysis_prompt,
     spec_hypothesis_repair_prompt,
+    spec_hypothesis_task_repair_prompt,
     spec_idea_prompt,
     spec_prompt,
 )
@@ -1801,7 +1802,8 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("structural_hypothesis_boundary_kind_mismatch", content)
             self.assertIn("structural_probe|structural_expand", content)
             self.assertIn("Do not return change_boundary.kind=local_edit", content)
-            self.assertIn("vectorizing, SIMD, reordering, packing", content)
+            self.assertIn("broad data transformation", content)
+            self.assertIn("global state/ordering changes", content)
             self.assertIn("exact deterministic grounding regions", content)
             self.assertIn("do not add parenthetical notes", content)
 
@@ -13311,6 +13313,132 @@ END_HYPOTHESIS_OPTION"""
             self.assertIn("exactly one runnable task", feedback)
             self.assertIn("exactly one target_region", feedback)
             self.assertIn("change_boundary.regions", feedback)
+
+    def test_spec_quality_feedback_lists_hypothesis_boundary_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_hypothesis_brief_enabled": True},
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-build",
+                        "change_boundary": {
+                            "regions": [
+                                "target.py::Builder.add",
+                                "target.py::Builder.build",
+                            ],
+                            "kind": "structural_expand",
+                        },
+                    }
+                ]
+            }
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "hypothesis_boundary_mismatch",
+                        "task_id": "task-001",
+                        "detail": (
+                            "task target_regions=['target.py::Builder.other'] are "
+                            "outside hypothesis hyp-build regions=['target.py::Builder.add']"
+                        ),
+                    },
+                    {
+                        "code": "hypothesis_boundary_structural_task_mismatch",
+                        "task_id": "task-001",
+                        "detail": (
+                            "hypothesis hyp-build boundary kind=structural_expand "
+                            "but task risk_level=local tactic_stage=local_edit"
+                        ),
+                    },
+                ],
+            }
+
+            feedback = agent._spec_quality_feedback_context(report)
+
+            self.assertIn("strict boundary contract", feedback)
+            self.assertIn("hyp-build", feedback)
+            self.assertIn("target.py::Builder.add", feedback)
+            self.assertIn("target.py::Builder.build", feedback)
+            self.assertIn("risk_level=structural", feedback)
+            self.assertIn("tactic_stage=structural_probe", feedback)
+
+    def test_hypothesis_task_repair_context_includes_boundary_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_hypothesis_brief_enabled": True},
+                },
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-pipeline",
+                        "change_boundary": {
+                            "regions": ["target.py::Pipeline.run"],
+                            "kind": "structural_probe",
+                        },
+                    }
+                ]
+            }
+            failed_spec = {
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "hypothesis_id": "hyp-pipeline",
+                        "target_regions": ["target.py::Pipeline.helper"],
+                        "risk_level": "local",
+                        "tactic_stage": "local_edit",
+                    }
+                ]
+            }
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "hypothesis_boundary_mismatch",
+                        "task_id": "task-001",
+                        "detail": (
+                            "task target_regions=['target.py::Pipeline.helper'] are "
+                            "outside hypothesis hyp-pipeline regions=['target.py::Pipeline.run']"
+                        ),
+                    }
+                ],
+            }
+
+            context = agent._spec_hypothesis_task_repair_context(failed_spec, report)
+
+            self.assertIn("strict boundary contract", context)
+            self.assertIn("hyp-pipeline", context)
+            self.assertIn("target.py::Pipeline.run", context)
+            self.assertIn("risk_level=structural", context)
+
+    def test_hypothesis_task_repair_prompt_preserves_boundary_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            prompt = spec_hypothesis_task_repair_prompt(
+                state,
+                focus="",
+                repair_context="Accepted hypothesis boundary contracts: hyp-pipeline",
+            )
+
+            content = prompt[1]["content"]
+
+            self.assertIn("preserve its accepted change_boundary.regions", content)
+            self.assertIn("target_regions must be inside the accepted regions", content)
+            self.assertIn("boundaries must remain risk_level=structural", content)
+            self.assertIn("one guarded local probe", content)
 
     def test_structural_probe_drift_rewrite_summary_keeps_hypothesis_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

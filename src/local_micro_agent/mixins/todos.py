@@ -475,6 +475,7 @@ class TodoLifecycleMixin:
         issue_codes = set(self._spec_quality_issue_codes(report))
         repair_codes = {
             "hypothesis_boundary_shrink_plan_missing",
+            "hypothesis_boundary_mismatch",
             "hypothesis_boundary_structural_task_mismatch",
             "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
             "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
@@ -519,10 +520,16 @@ class TodoLifecycleMixin:
             "If narrowing a multi-region hypothesis to one runnable task, explicitly "
             "describe the smaller guarded probe in edit_scope, probe_plan, and "
             "rollback_or_shrink_plan. Revert-only text is insufficient.",
+            "A copied hypothesis_id is a strict boundary contract: task target_regions "
+            "must stay inside that accepted option's change_boundary.regions, and "
+            "structural boundaries must remain risk_level=structural with "
+            "tactic_stage=structural_probe unless the task explicitly narrows to "
+            "one guarded local probe inside the accepted regions.",
             "Prefer one smallest runnable local_edit task when the accepted option "
             "can be safely narrowed; otherwise emit one structural_probe with a "
             "concrete probe_diff_contract.",
         ]
+        boundary_feedback = self._spec_hypothesis_boundary_feedback(quality_report)
         body = [
             "\n".join(guidance),
             "Quality report:",
@@ -530,6 +537,8 @@ class TodoLifecycleMixin:
             "Previous failed task graph excerpt:",
             json.dumps(compact_failed_tasks, ensure_ascii=False, indent=2),
         ]
+        if boundary_feedback:
+            body.extend(["Accepted hypothesis boundary contracts:", boundary_feedback])
         if accepted_payload:
             body.extend(["Accepted hypothesis options:", accepted_payload])
         return "\n\n".join(part for part in body if str(part).strip())
@@ -2689,6 +2698,20 @@ class TodoLifecycleMixin:
                 "change_boundary.regions. Do not split one structural probe across "
                 "multiple runnable target_regions."
             )
+        if "hypothesis_boundary_mismatch" in issue_codes:
+            guidance.append(
+                "For hypothesis_boundary_mismatch failures, the copied hypothesis_id "
+                "is a strict boundary contract. Keep every task target_region inside "
+                "that accepted option's exact change_boundary.regions."
+            )
+        if "hypothesis_boundary_structural_task_mismatch" in issue_codes:
+            guidance.append(
+                "For hypothesis_boundary_structural_task_mismatch failures, preserve "
+                "structural accepted boundaries as risk_level=structural and "
+                "tactic_stage=structural_probe, with a concrete probe_diff_contract, "
+                "unless the task explicitly narrows to one guarded local probe "
+                "inside the accepted regions."
+            )
         if any(
             code.startswith("design_contract_rollback_or_shrink_plan")
             or "rollback_or_shrink_plan" in code
@@ -2702,9 +2725,71 @@ class TodoLifecycleMixin:
             )
         hypothesis_summary = self._spec_hypothesis_options_feedback_summary()
         body = ["\n".join(guidance), json.dumps(compact, ensure_ascii=False, indent=2)]
+        boundary_feedback = self._spec_hypothesis_boundary_feedback(report)
+        if boundary_feedback:
+            body.append(boundary_feedback)
         if hypothesis_summary:
             body.append(hypothesis_summary)
         return "\n\n".join(part for part in body if part.strip())
+
+    def _spec_hypothesis_boundary_feedback(self, report: dict[str, Any]) -> str:
+        issues = [
+            issue
+            for issue in report.get("issues", [])
+            if isinstance(issue, dict)
+            and str(issue.get("code") or "")
+            in {
+                "hypothesis_boundary_mismatch",
+                "hypothesis_boundary_structural_task_mismatch",
+            }
+        ]
+        if not issues:
+            return ""
+        accepted = self._accepted_spec_hypothesis_options()
+        if not accepted:
+            return ""
+        wanted_ids: set[str] = set()
+        for issue in issues:
+            text = " ".join(
+                str(issue.get(key) or "")
+                for key in ("detail", "rewrite_hint", "task_id")
+            )
+            for match in re.finditer(r"\bhypothesis\s+([A-Za-z0-9_.:-]+)", text):
+                hypothesis_id = match.group(1).strip(".,;:")
+                if hypothesis_id in accepted:
+                    wanted_ids.add(hypothesis_id)
+        if not wanted_ids:
+            wanted_ids.update(accepted.keys())
+        contracts = []
+        for hypothesis_id in sorted(wanted_ids):
+            option = accepted.get(hypothesis_id)
+            if not isinstance(option, dict):
+                continue
+            boundary = option.get("change_boundary")
+            boundary = boundary if isinstance(boundary, dict) else {}
+            regions = self._normalize_string_list(boundary.get("regions"))
+            kind = str(boundary.get("kind") or "").strip()
+            contracts.append(
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "boundary_kind": kind,
+                    "allowed_target_regions": regions,
+                    "task_rule": (
+                        "target_regions must be a subset of allowed_target_regions; "
+                        "if boundary_kind is structural_probe or structural_expand, "
+                        "use risk_level=structural and tactic_stage=structural_probe "
+                        "unless the task explicitly narrows to one guarded local probe "
+                        "inside the accepted regions."
+                    ),
+                }
+            )
+        if not contracts:
+            return ""
+        return (
+            "Accepted hypothesis boundary contracts follow. Treat each copied "
+            "hypothesis_id as a strict task contract.\n"
+            + json.dumps(contracts, ensure_ascii=False, indent=2)
+        )
 
     def _spec_hypothesis_options_feedback_summary(self) -> str:
         if not self._spec_hypothesis_brief_enabled():

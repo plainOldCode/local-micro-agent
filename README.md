@@ -552,7 +552,7 @@ prompts; local source and tests stay authoritative. Bound with
 exact function/class excerpts for narrow Python edits. Separately,
 `symbol_source_context_before_code=true` (default) scans the request, plan,
 active spec task, active todo, and reflection for dotted Python symbols such as
-`KernelBuilder.build`, then injects the current exact unnumbered source span
+`Parser.parse_item`, then injects the current exact unnumbered source span
 before CODE so search/target blocks can be copied from the live method body.
 
 **Prompt-cache friendly layout.** `prompt_cache_friendly_layout=true` keeps a
