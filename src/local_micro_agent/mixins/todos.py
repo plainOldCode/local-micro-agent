@@ -4465,6 +4465,13 @@ class TodoLifecycleMixin:
             return issues
         if not replacement_tasks:
             issues.append("targeted SPEC rewrite omitted target replacement")
+        previous_target = self._spec_task_by_id(previous_tasks, target_task_id)
+        issues.extend(
+            self._targeted_micro_probe_identity_issues(
+                previous_target,
+                replacement_tasks,
+            )
+        )
         issues.extend(
             self._targeted_rewrite_material_diversity_issues(
                 previous_tasks,
@@ -4580,8 +4587,9 @@ class TodoLifecycleMixin:
         if not replacement_tasks:
             return []
         issues: list[str] = []
-        for task in replacement_tasks:
-            issues.extend(self._structural_probe_micro_contract_issues(task))
+        if not self._task_requires_micro_probe_identity(previous_target):
+            for task in replacement_tasks:
+                issues.extend(self._structural_probe_micro_contract_issues(task))
         previous_signature = self._spec_task_material_signature(previous_target)
         if any(
             self._spec_task_material_signature(task) != previous_signature
@@ -4594,6 +4602,79 @@ class TodoLifecycleMixin:
             "without a structurally different contract"
         )
         return issues
+
+    @staticmethod
+    def _task_requires_micro_probe_identity(task: dict[str, Any] | None) -> bool:
+        if not isinstance(task, dict):
+            return False
+        contract = task.get("contract_rewrite")
+        if isinstance(contract, dict) and str(contract.get("reason") or "") == (
+            "micro_probe_required"
+        ):
+            return True
+        gate = task.get("micro_probe_gate")
+        return isinstance(gate, dict) and str(gate.get("status") or "") in {
+            "required",
+            "unshrinkable",
+        }
+
+    def _targeted_micro_probe_identity_issues(
+        self,
+        previous_task: dict[str, Any] | None,
+        replacement_tasks: list[dict[str, Any]],
+    ) -> list[str]:
+        if not self._task_requires_micro_probe_identity(previous_task):
+            return []
+        issues: list[str] = []
+        if not replacement_tasks:
+            return ["targeted SPEC micro-probe rewrite omitted target replacement"]
+        previous_regions = self._normalize_string_list(
+            previous_task.get("target_regions") if isinstance(previous_task, dict) else []
+        )
+        previous_hypothesis = str(
+            (
+                previous_task.get("hypothesis_id")
+                if isinstance(previous_task, dict)
+                else ""
+            )
+            or ""
+        ).strip()
+        for task in replacement_tasks:
+            tactic_stage = str(task.get("tactic_stage") or "").strip()
+            if tactic_stage != "structural_probe":
+                issues.append(
+                    "targeted SPEC micro-probe rewrite changed tactic_stage "
+                    f"from structural_probe to {tactic_stage or 'missing'}"
+                )
+            risk_level = str(task.get("risk_level") or "").strip()
+            if risk_level != "structural":
+                issues.append(
+                    "targeted SPEC micro-probe rewrite changed risk_level "
+                    f"from structural to {risk_level or 'missing'}"
+                )
+            if previous_hypothesis:
+                replacement_hypothesis = str(task.get("hypothesis_id") or "").strip()
+                if replacement_hypothesis != previous_hypothesis:
+                    issues.append(
+                        "targeted SPEC micro-probe rewrite changed hypothesis_id"
+                    )
+            replacement_regions = self._normalize_string_list(task.get("target_regions"))
+            if not replacement_regions:
+                issues.append(
+                    "targeted SPEC micro-probe rewrite missing target_regions"
+                )
+            for region in replacement_regions:
+                if previous_regions and not self._region_matches_task_targets(
+                    region,
+                    previous_regions,
+                ):
+                    issues.append(
+                        "targeted SPEC micro-probe rewrite moved outside original "
+                        f"target boundary: {region}"
+                    )
+            if tactic_stage == "structural_probe":
+                issues.extend(self._structural_probe_micro_contract_issues(task))
+        return list(dict.fromkeys(issues))
 
     def _structural_probe_micro_contract_issues(self, task: dict[str, Any]) -> list[str]:
         if str(task.get("tactic_stage") or "") != "structural_probe":
@@ -6202,6 +6283,8 @@ class TodoLifecycleMixin:
                 "Spec micro-probe shrink focus:",
                 "must:\n"
                 "- Preserve the same accepted hypothesis_id and stay inside the same writable target region.\n"
+                "- Return a replacement for the rejected task: keep the same task_id or set replaces_task_id to the rejected task_id.\n"
+                "- Keep risk_level=structural and tactic_stage=structural_probe; this is a shrink, not a local_edit conversion.\n"
                 "- Produce exactly one executable structural_probe micro contract.\n"
                 f"- Set probe_diff_contract.max_hunks <= {max_hunks}, "
                 f"max_changed_lines <= {max_lines}, "
@@ -6210,6 +6293,7 @@ class TodoLifecycleMixin:
                 "must_not:\n"
                 "- Do not emit a whole-function, whole-class, full implementation, full rewrite, or cross-region redesign.\n"
                 "- Do not change tactic_stage to local_edit just to bypass the structural probe contract.\n"
+                "- Do not omit the rejected task and do not substitute an unrelated sibling task.\n"
                 "- Do not invent a benchmark-specific split outside the accepted boundary.",
                 "current_blocker:\n" + json.dumps(issues, ensure_ascii=False, indent=2),
                 "next_required_shape:\n"
