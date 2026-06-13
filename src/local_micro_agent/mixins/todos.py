@@ -2986,6 +2986,17 @@ class TodoLifecycleMixin:
         attempts_used = int(budget.get("attempts_used", task.get("attempts", 0)) or 0)
         target_symbols = self._normalize_string_list(task.get("target_symbols"))
         target_regions = self._normalize_string_list(task.get("target_regions"))
+        tactic_stage = self._normalize_tactic_stage(task.get("tactic_stage"))
+        rollback_or_shrink_plan = self._normalize_task_text_field(
+            task.get("rollback_or_shrink_plan")
+        )
+        if (
+            tactic_stage == "structural_probe"
+            and not self._plan_mentions_shrink_or_probe(rollback_or_shrink_plan)
+        ):
+            rollback_or_shrink_plan = self._synthesize_structural_probe_shrink_plan(
+                target_regions
+            )
         return {
             "depends_on": depends_on,
             "deliverables": deliverables,
@@ -2997,7 +3008,7 @@ class TodoLifecycleMixin:
             ),
             "edit_scope": self._normalize_task_text_field(task.get("edit_scope")),
             "risk_level": self._normalize_risk_level(task.get("risk_level")),
-            "tactic_stage": self._normalize_tactic_stage(task.get("tactic_stage")),
+            "tactic_stage": tactic_stage,
             "risk_evidence": self._normalize_task_risk_evidence(
                 task.get("risk_evidence")
             ),
@@ -3016,15 +3027,22 @@ class TodoLifecycleMixin:
                 task.get("correctness_rationale")
             ),
             "fallback_plan": self._normalize_task_text_field(task.get("fallback_plan")),
-            "rollback_or_shrink_plan": self._normalize_task_text_field(
-                task.get("rollback_or_shrink_plan")
-            ),
+            "rollback_or_shrink_plan": rollback_or_shrink_plan,
             "acceptance": normalized_acceptance,
             "budget": {"attempts_max": attempts_max, "attempts_used": attempts_used},
             "closed_at": task.get("closed_at"),
             "recovery_rounds": int(task.get("recovery_rounds", 0) or 0),
             "attempts_total": int(task.get("attempts_total", 0) or 0),
         }
+
+    @staticmethod
+    def _synthesize_structural_probe_shrink_plan(target_regions: list[str]) -> str:
+        region = target_regions[0] if target_regions else "the active target region"
+        return (
+            "Shrink to one guarded inner statement, branch, or loop body inside "
+            f"{region}; keep the existing behavior as the fallback path and revert "
+            "if validation fails or the metric does not improve."
+        )
 
     @staticmethod
     def _normalize_string_list(value: Any) -> list[str]:

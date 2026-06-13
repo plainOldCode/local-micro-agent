@@ -12317,10 +12317,11 @@ END_HYPOTHESIS_OPTION"""
             report = agent._spec_quality_report(spec)
 
             self.assertEqual(report["status"], "fail")
-            self.assertIn(
+            self.assertNotIn(
                 "hypothesis_boundary_shrink_plan_missing",
                 report["issue_codes"],
             )
+            self.assertIn("structural_probe_expected_region_count", report["issue_codes"])
 
     def test_spec_hypothesis_brief_rejects_unresolved_symbol_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13141,10 +13142,15 @@ END_HYPOTHESIS_OPTION"""
 
             report = agent._spec_quality_report(spec)
 
-            self.assertEqual(report["status"], "fail")
-            self.assertIn(
+            self.assertEqual(report["status"], "pass")
+            self.assertNotIn(
                 "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
                 report["issue_codes"],
+            )
+            normalized_task = spec["task_graph"][0]
+            self.assertIn(
+                "one guarded inner statement",
+                normalized_task["rollback_or_shrink_plan"],
             )
 
     def test_spec_quality_feedback_includes_hypothesis_rejections(self) -> None:
@@ -13356,6 +13362,61 @@ END_HYPOTHESIS_OPTION"""
         self.assertTrue(
             MicroAgent._plan_mentions_shrink_or_probe("Revert if the smaller probe fails.")
         )
+
+    def test_structural_probe_normalization_synthesizes_revert_only_shrink_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            normalized = agent._normalize_run_spec_v2_task(
+                {
+                    "tactic_stage": "structural_probe",
+                    "target_regions": ["problem.py::Machine.run"],
+                    "rollback_or_shrink_plan": "Revert the patch.",
+                }
+            )
+
+            shrink_plan = normalized["rollback_or_shrink_plan"]
+            self.assertIn("one guarded inner statement", shrink_plan)
+            self.assertIn("problem.py::Machine.run", shrink_plan)
+            self.assertIn("fallback path", shrink_plan)
+
+    def test_structural_probe_normalization_preserves_valid_shrink_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            plan = "Shrink to one guarded parser branch and keep the old path as fallback."
+
+            normalized = agent._normalize_run_spec_v2_task(
+                {
+                    "tactic_stage": "structural_probe",
+                    "target_regions": ["target.py::parse_item"],
+                    "rollback_or_shrink_plan": plan,
+                }
+            )
+
+            self.assertEqual(normalized["rollback_or_shrink_plan"], plan)
+
+    def test_local_edit_normalization_does_not_synthesize_structural_shrink_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            normalized = agent._normalize_run_spec_v2_task(
+                {
+                    "tactic_stage": "local_edit",
+                    "target_regions": ["target.py::parse_item"],
+                    "rollback_or_shrink_plan": "Revert the patch.",
+                }
+            )
+
+            self.assertEqual(normalized["rollback_or_shrink_plan"], "Revert the patch.")
 
     def test_spec_quality_gate_rejects_local_signature_callsite_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
