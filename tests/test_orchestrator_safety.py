@@ -1803,6 +1803,53 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("exact deterministic grounding regions", content)
             self.assertIn("do not add parenthetical notes", content)
 
+    def test_change_targets_unique_class_method_from_unqualified_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = (
+                "class KernelBuilder:\n"
+                "    def build_hash(self):\n"
+                "        return 1\n"
+            )
+            (repo / "target.py").write_text(source)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                target="    def build_hash(self):\n        return 1",
+                replacement="    def build_hash(self):\n        return 2",
+                reason="edit build_hash",
+            )
+
+            self.assertTrue(agent._change_targets_any_symbol(change, ["build_hash"]))
+
+    def test_change_targets_unqualified_class_method_requires_unique_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = (
+                "class A:\n"
+                "    def build_hash(self):\n"
+                "        return 1\n"
+                "class B:\n"
+                "    def build_hash(self):\n"
+                "        return 2\n"
+            )
+            (repo / "target.py").write_text(source)
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            change = CodeChange(
+                path="target.py",
+                target="    def build_hash(self):\n        return 1",
+                replacement="    def build_hash(self):\n        return 3",
+                reason="edit build_hash",
+            )
+
+            self.assertFalse(agent._change_targets_any_symbol(change, ["build_hash"]))
+
     def test_code_prompt_can_request_xml_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")

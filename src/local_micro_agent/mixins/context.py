@@ -590,6 +590,16 @@ class PromptContextMixin:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if node.name == symbol:
                     return node
+        nested_matches: list[ast.AST] = []
+        for node in ast.iter_child_nodes(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if child.name == symbol:
+                        nested_matches.append(child)
+        if len(nested_matches) == 1:
+            return nested_matches[0]
         return None
 
     @staticmethod
