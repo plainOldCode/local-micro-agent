@@ -5223,14 +5223,14 @@ class TodoLifecycleMixin:
             symbol_root = self._symbol_root(symbol)
             if symbol in read_only_symbols:
                 issues.append(f"non_writable_symbol:{symbol}")
-            elif symbol_root in imported_roots:
-                issues.append(f"imported_symbol_targeted:{symbol}")
             elif "::" in symbol:
                 region_path = self._region_path(symbol)
                 if region_path and not self._spec_path_is_writable(region_path, writable):
                     issues.append(f"non_writable_symbol:{symbol}")
                 elif region_path and region_path.endswith(".py") and symbol not in allowed_regions:
                     issues.append(f"unresolvable_target_region:{symbol}")
+            elif symbol_root in imported_roots:
+                issues.append(f"imported_symbol_targeted:{symbol}")
         contract = task.get("probe_diff_contract")
         if isinstance(contract, dict):
             writable_probe_regions: list[str] = []
