@@ -472,6 +472,32 @@ def spec_think_brief_prompt(state: AgentState, focus: str = "") -> list[dict[str
     ]
 
 
+def spec_hypothesis_repair_prompt(
+    state: AgentState,
+    *,
+    brief: str,
+    options_payload: dict,
+    focus: str = "",
+) -> list[dict[str, str]]:
+    focus_block = f"\n\nSpec focus and deterministic constraints:\n{focus}" if focus.strip() else ""
+    user = (
+        "The previous SPEC_THINK_BRIEF did not produce accepted typed "
+        "hypothesis options. Repair only the hypothesis brief format.\n\n"
+        f"User request:\n{state.user_request}\n\n"
+        f"Plan:\n{state.plan_markdown}\n\n"
+        f"Previous brief preview:\n{brief[:4000]}\n\n"
+        "Controller validation summary:\n"
+        f"{json.dumps(options_payload, ensure_ascii=False, indent=2)[:4000]}"
+        f"{focus_block}\n\n"
+        "Return only 1-3 BEGIN_HYPOTHESIS_OPTION blocks. Do not emit run_spec "
+        "JSON, prose outside blocks, code, shell commands, or markdown fences."
+    )
+    return [
+        {"role": "system", "content": SPEC_THINK_BRIEF_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
 def spec_prompt(state: AgentState, focus: str = "") -> list[dict[str, str]]:
     source_blocks = "\n\n".join(
         f"### {snap.path}\n```text\n{slice_text(snap.content)}\n```" for snap in state.file_context

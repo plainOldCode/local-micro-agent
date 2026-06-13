@@ -21,6 +21,7 @@ from typing import Any
 from ..decisions import CodeCandidate
 from ..prompts import (
     acceptance_synth_prompt,
+    spec_hypothesis_repair_prompt,
     spec_idea_prompt,
     spec_prompt,
     spec_think_brief_prompt,
@@ -835,6 +836,23 @@ class TodoLifecycleMixin:
         self.state.scratch["spec_think_brief_meta"] = meta
         context_parts = []
         if brief:
+            hypothesis_context = self._spec_hypothesis_options_context(brief)
+            options_payload = self.state.scratch.get("spec_hypothesis_options")
+            if self._spec_hypothesis_brief_repair_needed(options_payload):
+                repaired_brief = await self._maybe_repair_spec_hypothesis_brief(
+                    role=role,
+                    brief=brief,
+                    options_payload=options_payload,
+                    focus=focus,
+                    call_site=call_site,
+                )
+                if repaired_brief:
+                    brief = repaired_brief
+                    path = self._spec_think_brief_path()
+                    path.write_text(brief.rstrip() + "\n")
+                    self.state.scratch["spec_think_brief"] = brief
+                    self.state.scratch["spec_idea_brief"] = brief
+                    hypothesis_context = self._spec_hypothesis_options_context(brief)
             context_parts.append(
                 "Spec thinking brief from a non-authoritative analysis pass "
                 "follows. Use it only as advisory design input. The final JSON "
@@ -842,11 +860,101 @@ class TodoLifecycleMixin:
                 "constraints, and workflow constraints.\n"
                 + brief
             )
-            hypothesis_context = self._spec_hypothesis_options_context(brief)
             if hypothesis_context:
                 context_parts.append(hypothesis_context)
         context_parts.append(self._spec_synthesis_constraints_context())
         return "\n\n".join(part for part in context_parts if part.strip())
+
+    def _spec_hypothesis_brief_repair_needed(self, payload: Any) -> bool:
+        if not self._spec_hypothesis_brief_enabled():
+            return False
+        workflow = self.config.get("workflow", {})
+        if not workflow.get("spec_hypothesis_brief_repair_enabled", True):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if int(payload.get("accepted_count") or 0) > 0:
+            return False
+        rejected = payload.get("rejected")
+        if not isinstance(rejected, list) or not rejected:
+            return False
+        return True
+
+    async def _maybe_repair_spec_hypothesis_brief(
+        self,
+        *,
+        role: str,
+        brief: str,
+        options_payload: Any,
+        focus: str,
+        call_site: str,
+    ) -> str:
+        if not isinstance(options_payload, dict):
+            return ""
+        remaining = self._spec_synth_call_budget_remaining()
+        if remaining is not None and remaining <= 1:
+            self.state.notes.append(
+                "Spec hypothesis repair skipped: preserving final spec synthesis call budget"
+            )
+            return ""
+        repair_call_site = f"{call_site}_repair"
+        if not self._consume_spec_synth_call_budget(repair_call_site):
+            return ""
+        try:
+            parts = await self._model_thinking_brief(
+                role,
+                spec_hypothesis_repair_prompt(
+                    self.state,
+                    brief=brief,
+                    options_payload=options_payload,
+                    focus=focus,
+                ),
+                call_site=repair_call_site,
+            )
+        except Exception as exc:
+            self.state.notes.append(
+                "Spec hypothesis repair model call failed; continuing with "
+                f"original brief: {type(exc).__name__}: {exc}"
+            )
+            return ""
+        selected_source = parts.source
+        if selected_source == "reasoning" and not self.config.get("workflow", {}).get(
+            "spec_thinking_brief_accept_reasoning_only", True
+        ):
+            selected_source = "empty"
+        if selected_source == "content":
+            raw_brief = parts.content
+        elif selected_source == "reasoning":
+            raw_brief = parts.reasoning
+        else:
+            raw_brief = ""
+        repaired = self._slice_text(
+            raw_brief.strip(),
+            int(self.config.get("workflow", {}).get("spec_thinking_brief_char_limit", 8000) or 8000),
+        )
+        if not repaired:
+            self.state.notes.append("Spec hypothesis repair returned empty output")
+            return ""
+        meta_path = self._spec_think_brief_meta_path()
+        meta: dict[str, Any] = {}
+        if meta_path.exists():
+            try:
+                loaded = json.loads(meta_path.read_text(errors="replace"))
+            except json.JSONDecodeError:
+                loaded = {}
+            meta = loaded if isinstance(loaded, dict) else {}
+        meta["hypothesis_repair"] = {
+            "attempted": True,
+            "call_site": parts.usage.get("call_site", repair_call_site),
+            "selected_source": selected_source,
+            "content_chars": len(parts.content),
+            "reasoning_chars": len(parts.reasoning),
+            "selected_chars": len(repaired),
+        }
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+        self.state.notes.append("Repaired spec hypothesis brief with typed option retry")
+        return repaired
 
     def _spec_hypothesis_brief_enabled(self) -> bool:
         workflow = self.config.get("workflow", {})

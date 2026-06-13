@@ -10900,6 +10900,182 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
+    def test_spec_hypothesis_brief_repairs_freeform_brief_once(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                manager = _RoleSequenceModelManager(
+                    {
+                        "reasoner": [
+                            "We should inspect parse_item and make a narrow guard.",
+                            self._valid_hypothesis_brief(),
+                        ],
+                        "spec_synth": [self._valid_hypothesis_spec()],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_hypothesis_brief_enabled": True,
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                spec = json.loads((repo / ".local_micro_agent" / "run_spec.json").read_text())
+                self.assertEqual(spec["task_graph"][0]["hypothesis_id"], "hyp-parse-guard")
+                self.assertEqual(len(manager.seen["reasoner"]), 2)
+                repair_prompt = manager.seen["reasoner"][1][-1]["content"]
+                self.assertIn("Repair only the hypothesis brief format", repair_prompt)
+                self.assertIn("BEGIN_HYPOTHESIS_OPTION", repair_prompt)
+                options = json.loads(
+                    (repo / ".local_micro_agent" / "spec_hypothesis_options.json").read_text()
+                )
+                self.assertEqual(options["accepted_count"], 1)
+                meta = json.loads(
+                    (repo / ".local_micro_agent" / "spec_think_brief_meta.json").read_text()
+                )
+                self.assertTrue(meta["hypothesis_repair"]["attempted"])
+
+        asyncio.run(run_case())
+
+    def test_spec_hypothesis_brief_skips_repair_when_options_valid(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                manager = _RoleSequenceModelManager(
+                    {
+                        "reasoner": [self._valid_hypothesis_brief()],
+                        "spec_synth": [self._valid_hypothesis_spec()],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_hypothesis_brief_enabled": True,
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                self.assertTrue((repo / ".local_micro_agent" / "run_spec.json").exists())
+                self.assertEqual(len(manager.seen["reasoner"]), 1)
+
+        asyncio.run(run_case())
+
+    def test_spec_hypothesis_brief_repair_failure_stays_hard_blocked(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                manager = _RoleSequenceModelManager(
+                    {
+                        "reasoner": [
+                            "Free-form analysis only.",
+                            "Still free-form with no typed blocks.",
+                        ],
+                        "spec_synth": [self._valid_hypothesis_spec()],
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_hypothesis_brief_enabled": True,
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_gate_soft_fallback": True,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
+                self.assertEqual(len(manager.seen["reasoner"]), 2)
+                report = json.loads(
+                    (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
+                )
+                self.assertIn("hypothesis_option_missing", report["issue_codes"])
+                progress_path = repo / ".local_micro_agent" / "spec_progress.jsonl"
+                progress = progress_path.read_text() if progress_path.exists() else ""
+                self.assertNotIn("quality_soft_fallback", progress)
+
+        asyncio.run(run_case())
+
     def test_spec_hypothesis_brief_accepts_domain_terms_without_interpretation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
