@@ -1,0 +1,366 @@
+{
+  "ts": "2026-06-13T16:53:41+0900",
+  "state": "failed",
+  "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+  "code_test_loop_count": 3,
+  "fsm_step_count": 27,
+  "max_code_test_loops": 20,
+  "zero_code_attempt": false,
+  "spec_synth_call_count": 17,
+  "spec_synth_calls_used": 17,
+  "spec_synth_call_budget": 24,
+  "spec_synth_budget_exhausted": false,
+  "spec_synth_model_profile": {
+    "model_call_count": 1,
+    "elapsed_ms": 40141.165,
+    "call_site_counts": {
+      "spec_synth": 1
+    }
+  },
+  "spec_id": "vliw-bundle-probe",
+  "selected_graph_id": "graph-0006",
+  "graph_reseed_attempts": 2,
+  "graph_reseed_attempts_max": 2,
+  "cooldown_keys": [
+    "ffafc8c9:structural_probe:ad08849bdd0aee18",
+    "ffafc8c9:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta",
+    "4a609a5f:structural_probe:958d6d8b585af7ac",
+    "4a609a5f:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta"
+  ],
+  "active_task_id": null,
+  "progress": {
+    "total": 1,
+    "closed": 0,
+    "deferred": 1,
+    "failed": 0
+  },
+  "pending_spec_rewrite_reason": null,
+  "tasks": [
+    {
+      "task_id": "task-001",
+      "status": "deferred_contract_drift",
+      "title": "Pack independent slots into single VLIW bundles in KernelBuilder.build",
+      "attempts": 0,
+      "attempts_used": 0,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "target_symbols": [
+        "KernelBuilder",
+        "build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 20,
+        "max_changed_functions": 1,
+        "observation": "Cycle count reduction due to improved VLIW utilization"
+      },
+      "last_observation": {
+        "loop": 2,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "candidate_transition_bound": true,
+        "candidate_id": "loop-002-single",
+        "todo_id": "task-001",
+        "spec_task_id": "task-001",
+        "candidate_status": "rejected_todo_scope_drift",
+        "candidate_failure_class": "active_task_drift",
+        "candidate_metric": 147734,
+        "metric_observation_id": "loop-2-loop-002-single",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 4,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "decision_hint": "targeted_rewrite_rejected_preserve_siblings: targeted SPEC rewrite failed target-local graph/material checks. Defer only this target and continue with preserved sibling or backtrack frontier."
+    }
+  ],
+  "spec_progress_counts": {
+    "scheduled": 3,
+    "drift_recovery": 6,
+    "graph_reseed_requested": 2,
+    "quality_rejected": 1,
+    "blocked": 1
+  },
+  "candidate_status_counts": {
+    "rejected_active_task_shape_drift": 1,
+    "rejected_todo_scope_drift": 2
+  },
+  "candidate_failure_class_counts": {
+    "active_task_drift": 3
+  },
+  "failure_signature_counts": {
+    "active_task_drift": 6
+  },
+  "failure_signature_issue_counts": {
+    "ad08849bdd0aee18": 1,
+    "targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta": 3,
+    "958d6d8b585af7ac": 1,
+    "8f881051d7d6872d": 1
+  },
+  "graph_candidate_counts": {
+    "selected": 3,
+    "rejected_graph_contract": 3,
+    "rejected_quality": 1
+  },
+  "graph_candidate_event_counts": {
+    "candidate_selected": 3,
+    "candidate_rejected": 4
+  },
+  "last_spec_progress_event": {
+    "active_task_id": null,
+    "blocked_tasks": [],
+    "design_failed_tasks": [],
+    "drift_deferred_tasks": [
+      "task-001"
+    ],
+    "event": "blocked",
+    "failed_prerequisites": [],
+    "fsm_step": 27,
+    "graph_reseed_attempts": 2,
+    "graph_reseed_attempts_max": 2,
+    "graph_reseed_exhausted": true,
+    "loop": 3,
+    "plateau_deferred_tasks": [],
+    "portfolio_exhausted_tasks": [],
+    "progress": {
+      "closed": 0,
+      "deferred": 1,
+      "failed": 0,
+      "total": 1
+    },
+    "remaining_loops": 17,
+    "runnable_tasks_at_exit": 0,
+    "spec_id": "vliw-bundle-probe",
+    "state": "schedule",
+    "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+    "ts": "2026-06-13T16:53:41+0900"
+  },
+  "last_candidate_event": {
+    "applied": 0,
+    "budget_counted": false,
+    "candidate_id": "loop-002-single",
+    "changes": [
+      {
+        "line_range": {
+          "end_line": 56,
+          "start_line": 51
+        },
+        "mode": "replacement",
+        "path": "perf_takehome.py",
+        "reason": "The active task (task-001) requires implementing a dependency-aware VLIW packing scheduler in KernelBuilder.build to reduce cycle count by exploiting parallelism. The current implementation uses one slot per instruction bundle, resulting in zero parallelism (147,734 cycles). This change implements a conservative scheduler that groups independent slots int...",
+        "target_region": "perf_takehome.py::KernelBuilder.build"
+      }
+    ],
+    "drift_attempted_regions": [
+      "perf_takehome.py::KernelBuilder.build"
+    ],
+    "drift_cooldown_key": "4a609a5f:structural_probe:8f881051d7d6872d",
+    "drift_declared_regions": [
+      "perf_takehome.py::KernelBuilder.build"
+    ],
+    "drift_declared_symbols": [
+      "KernelBuilder",
+      "build"
+    ],
+    "drift_region_pairs": [
+      {
+        "attempted": "perf_takehome.py::KernelBuilder.build",
+        "declared": "perf_takehome.py::KernelBuilder.build"
+      }
+    ],
+    "drift_target_region_hash": "4a609a5f",
+    "failed": true,
+    "failure_class": "active_task_drift",
+    "failure_memory_next_rule": "avoid_or_repair_with_new_evidence",
+    "failure_memory_path": ".local_micro_agent/failure_memory.jsonl",
+    "failure_origin": "pre_apply_contract",
+    "family_aliases": [],
+    "fingerprint": "8f881051d7d6872d",
+    "issue_scope": "candidate_delta",
+    "loop": 2,
+    "memory_use": "avoid_shape",
+    "metric": 147734,
+    "next_actions": [
+      "Read the active todo contract and produce a candidate that satisfies it.",
+      "If the contract blocks valid work, surface that as evidence for relaxation."
+    ],
+    "reason": "Pack independent slots into single VLIW bundles in KernelBuilder.build",
+    "recovery_hint": "Retry the same active task using only its declared contract.",
+    "region_keys": [
+      "perf_takehome.py::build::correctness",
+      "perf_takehome.py::build::data_flow",
+      "perf_takehome.py::build::runtime_control",
+      "perf_takehome.py::build::vliw_packing_probe"
+    ],
+    "repair_task_eligible": false,
+    "repo_valid_after_restore": true,
+    "semantic_family_key": "88499bc16f94f6e6",
+    "spec_task_id": "task-001",
+    "spec_task_identity_source": "candidate_record",
+    "stage_result": "contract_mismatch",
+    "status": "rejected_todo_scope_drift",
+    "strategy_axes": [
+      "correctness",
+      "data_flow",
+      "runtime_control",
+      "vliw_packing_probe"
+    ],
+    "strategy_axis": "vliw_packing_probe",
+    "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=vliw_packing_probe; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Persisted spec think brief: /Users/m2max/tmp/local-micro-agent-homework-runs/run-20260613-163019-agents-json-regex-64k-20loop-bf69405-ollama-qwen36-35b...",
+    "tactic_stage": "structural_probe",
+    "todo_id": "task-001",
+    "ts": "2026-06-13T16:51:30+0900"
+  },
+  "last_failure_signature": {
+    "action": "defer_target_preserve_siblings",
+    "cooldown_key": "4a609a5f:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta",
+    "created_loop": 3,
+    "drift_related": true,
+    "episode_fingerprint": "graph-0006:active_task:task-001:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta:4a609a5f",
+    "failure_class": "active_task_drift",
+    "fsm_step": 26,
+    "graph_id": "graph-0006",
+    "issue_code": "targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta",
+    "issue_scope": "target_task",
+    "issues": [
+      "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract"
+    ],
+    "phase": "active_task",
+    "reason": "targeted_rewrite_graph_rejected",
+    "replacement_task_ids": [
+      "task-001"
+    ],
+    "schedulable_sibling_count_after": 0,
+    "schedulable_sibling_count_before": 0,
+    "schema": "failure_signature.v1",
+    "spec_id": "vliw-bundle-probe",
+    "status": "deferred_contract_drift",
+    "summary": "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract",
+    "tactic_stage": "structural_probe",
+    "target_outcome": "replaced",
+    "target_region_hash": "4a609a5f",
+    "target_regions": [
+      "perf_takehome.py::KernelBuilder.build"
+    ],
+    "target_symbols": [
+      "KernelBuilder",
+      "build"
+    ],
+    "target_task_id": "task-001",
+    "task_id": "task-001",
+    "ts": "2026-06-13T16:53:41+0900"
+  },
+  "last_graph_candidate_event": {
+    "event": "candidate_rejected",
+    "fsm_step": 26,
+    "graph_id": "graph-0007",
+    "graph_signature": [
+      "perf_takehome.py::KernelBuilder.build:structural_probe"
+    ],
+    "issue_codes": [
+      "targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta"
+    ],
+    "loop": 3,
+    "origin": "targeted_design_rewrite",
+    "parent_graph_id": "graph-0006",
+    "schema": "spec_graph_candidate.v1",
+    "score": {
+      "cooldown_hits": 1,
+      "design_issues": 0,
+      "drift_saturation_hits": 0,
+      "duplicate_hits": 1,
+      "plateau_cooldown_hits": 0,
+      "quality_issues": 0,
+      "runnable_tasks": 1
+    },
+    "spec_id": "vliw-bundle-packing-probe",
+    "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0007.json",
+    "spec_synth_call_budget": 24,
+    "spec_synth_calls_used": 17,
+    "status": "rejected_graph_contract",
+    "ts": "2026-06-13T16:53:41+0900"
+  },
+  "active_task_drift_count": 3,
+  "max_active_task_drift_streak": 3,
+  "drift_recovery_count": 6,
+  "drift_deferred_task_ids": [
+    "task-001"
+  ],
+  "active_task_drift_attempted_region_counts": {
+    "perf_takehome.py::KernelBuilder.build": 2,
+    "perf_takehome.py::KernelBuilder.build_kernel": 1
+  },
+  "active_task_drift_region_pair_counts": {
+    "perf_takehome.py::KernelBuilder.build -> perf_takehome.py::KernelBuilder.build": 2,
+    "perf_takehome.py::KernelBuilder.build_kernel -> perf_takehome.py::KernelBuilder.build_kernel": 1
+  },
+  "drift_cooldown_key_counts": {
+    "4a609a5f:structural_probe:8f881051d7d6872d": 1,
+    "4a609a5f:structural_probe:958d6d8b585af7ac": 1,
+    "ffafc8c9:structural_probe:ad08849bdd0aee18": 1
+  },
+  "drift_saturation_threshold": 3,
+  "same_region_drift_saturation_count": 0,
+  "same_region_drift_saturated_keys": {},
+  "targeted_rewrite_rejected_duplicate_drift": 0,
+  "spec_budget_saved_by_drift_backoff": 0,
+  "portfolio_reopened_count": 0,
+  "portfolio_exhausted_count": 0,
+  "portfolio_exhausted_task_ids": [],
+  "max_portfolio_recovery_rounds": 2,
+  "targeted_rewrite_target_local_rejection_count": 3,
+  "targeted_rewrite_preserved_sibling_task_ids": [],
+  "targeted_rewrite_ignored_non_target_task_ids": [],
+  "trajectory_quality": {
+    "label": "chaotic_retry",
+    "spec_aligned_success_count": 0,
+    "improved_count": 0,
+    "scope_drift_count": 3,
+    "budget_free_contract_rejection_count": 3,
+    "improved_candidate_id": null,
+    "improved_candidate_spec_task_id": null,
+    "improved_candidate_matches_probe_plan": false
+  }
+}

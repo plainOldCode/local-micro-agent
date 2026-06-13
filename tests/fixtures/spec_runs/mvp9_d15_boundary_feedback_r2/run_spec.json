@@ -1,0 +1,199 @@
+{
+  "version": 2,
+  "spec_id": "vliw-bundle-probe",
+  "objective": "Probe VLIW bundle packing in KernelBuilder.build to reduce cycles below baseline by grouping independent slots.",
+  "invariants": [
+    "Scratch space layout and addresses must remain identical.",
+    "Instruction ordering within the bundle must preserve data dependencies.",
+    "Function signatures and output formats must remain unchanged."
+  ],
+  "known_facts": [
+    "The simulator supports multiple engines per cycle (alu, load, store, flow).",
+    "Current implementation emits one instruction bundle per slot in KernelBuilder.build.",
+    "SLOT_LIMITS allows up to 12 alu, 2 load, 2 store, and 1 flow slots per instruction.",
+    "Baseline metric is 147734 cycles."
+  ],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "hypothesis_id": "opt-vliw-packing-probe",
+      "replaces_task_id": "",
+      "title": "Pack independent slots into single VLIW bundles in KernelBuilder.build",
+      "strategy_axis": "vliw_packing_probe",
+      "family_key": "vliw_scheduling",
+      "expected_signal": "CYCLES metric strictly less than 147734",
+      "status": "deferred_contract_drift",
+      "attempts": 0,
+      "last_observation": {
+        "loop": 2,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "candidate_transition_bound": true,
+        "candidate_id": "loop-002-single",
+        "todo_id": "task-001",
+        "spec_task_id": "task-001",
+        "candidate_status": "rejected_todo_scope_drift",
+        "candidate_failure_class": "active_task_drift",
+        "candidate_metric": 147734,
+        "metric_observation_id": "loop-2-loop-002-single",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 4,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "decision_hint": "targeted_rewrite_rejected_preserve_siblings: targeted SPEC rewrite failed target-local graph/material checks. Defer only this target and continue with preserved sibling or backtrack frontier.",
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py",
+        "problem.py"
+      ],
+      "target_symbols": [
+        "KernelBuilder",
+        "build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "preserved_invariants": [
+        "Scratch space layout",
+        "function signatures",
+        "correctness of computed values"
+      ],
+      "edit_scope": "Modify KernelBuilder.build to group independent slots into single instruction bundles instead of emitting one bundle per slot.",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Modify KernelBuilder.build to group independent slots into single instruction bundles instead of emitting one bundle per slot.",
+        "explanation": "Changing instruction scheduling affects control flow and parallelism execution order, which is a structural change to the program's execution model."
+      },
+      "probe_plan": "Implement a conservative packing strategy that groups slots only if they belong to different engines and do not have data dependencies. Preserve original single-slot bundles as fallback if packing fails or exceeds limits.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 20,
+        "max_changed_functions": 1,
+        "observation": "Cycle count reduction due to improved VLIW utilization"
+      },
+      "invariant_evidence": [
+        "Dependencies between slots are preserved by checking engine types and data flow.",
+        "Scratch space addresses remain unchanged as alloc_scratch is not modified."
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES metric >= 147734 or test assertions fail"
+      },
+      "correctness_rationale": "The probe only changes how independent operations are grouped into cycles, not the operations themselves or their order relative to dependencies. Scratch space and data flow remain identical.",
+      "fallback_plan": "If metric does not improve or tests fail, revert to original single-slot bundling strategy.",
+      "rollback_or_shrink_plan": "Revert changes to KernelBuilder.build to restore original behavior. If partial success, shrink to only packing slots that are definitely independent (e.g., different engines with no data dependency).",
+      "acceptance": {
+        "kind": "metric",
+        "commands": [
+          "/opt/homebrew/bin/python3 perf_takehome.py"
+        ]
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0,
+      "contract_rewrite": {
+        "status": "deferred_contract_drift",
+        "reason": "targeted_rewrite_graph_rejected",
+        "issues": [
+          "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract"
+        ],
+        "checked_at": "2026-06-13T16:53:41+0900"
+      }
+    }
+  ],
+  "decision_rules": [
+    "If metric does not improve after 3 attempts, revert to baseline and terminate optimization.",
+    "If correctness tests fail, immediately revert changes and report failure."
+  ],
+  "updated_at": "2026-06-13T16:53:41+0900",
+  "progress": {
+    "total": 1,
+    "closed": 0,
+    "deferred": 1,
+    "failed": 0
+  },
+  "search": {
+    "parent_graph_id": "graph-0003",
+    "reseed_attempts": 2,
+    "reseed_attempts_max": 2,
+    "cooldown_keys": [
+      "ffafc8c9:structural_probe:ad08849bdd0aee18",
+      "ffafc8c9:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta",
+      "4a609a5f:structural_probe:958d6d8b585af7ac",
+      "4a609a5f:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta"
+    ],
+    "graph_id": "graph-0006",
+    "created_loop": 2,
+    "created_at": "2026-06-13T16:50:40+0900",
+    "origin": "reseed_after_graph_frontier_exhausted",
+    "last_seen_loop": 3,
+    "spec_synth_calls_used_at_selection": 15,
+    "spec_synth_calls_used": 17
+  },
+  "active_task_id": null,
+  "last_targeted_rewrite_rejected": {
+    "task_id": "task-001",
+    "issues": [
+      "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract"
+    ],
+    "reason": "targeted_rewrite_graph_rejected",
+    "target_task_id": "task-001",
+    "target_outcome": "replaced",
+    "drift_related": true,
+    "preserved_sibling_task_ids": [],
+    "ignored_non_target_task_ids": [],
+    "schedulable_sibling_count_before": 0,
+    "schedulable_sibling_count_after": 0,
+    "replacement_task_ids": [
+      "task-001"
+    ]
+  },
+  "last_stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted"
+}

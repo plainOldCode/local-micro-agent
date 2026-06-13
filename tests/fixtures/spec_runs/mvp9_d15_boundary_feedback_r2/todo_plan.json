@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "todos": [
+    {
+      "todo_id": "task-001",
+      "spec_task_id": "task-001",
+      "status": "active",
+      "strategy_axis": "vliw_packing_probe",
+      "family_key": "vliw_scheduling",
+      "title": "Pack independent slots into single VLIW bundles in KernelBuilder.build",
+      "context": "CYCLES metric strictly less than 147734",
+      "micro_goal": "Implement the scheduled design contract within this scope: Modify KernelBuilder.build to group independent slots into single instruction bundles instead of emitting one bundle per slot.",
+      "implementation_hint": "",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "CYCLES metric strictly less than 147734",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Modify KernelBuilder.build to group independent slots into single instruction bundles instead of emitting one bundle per slot.",
+        "explanation": "Changing instruction scheduling affects control flow and parallelism execution order, which is a structural change to the program's execution model."
+      },
+      "probe_plan": "Implement a conservative packing strategy that groups slots only if they belong to different engines and do not have data dependencies. Preserve original single-slot bundles as fallback if packing fails or exceeds limits.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 20,
+        "max_changed_functions": 1,
+        "observation": "Cycle count reduction due to improved VLIW utilization"
+      },
+      "invariant_evidence": [
+        "Dependencies between slots are preserved by checking engine types and data flow.",
+        "Scratch space addresses remain unchanged as alloc_scratch is not modified."
+      ],
+      "target_symbols": [
+        "KernelBuilder",
+        "build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "preserved_invariants": [
+        "Scratch space layout",
+        "function signatures",
+        "correctness of computed values"
+      ],
+      "edit_scope": "Modify KernelBuilder.build to group independent slots into single instruction bundles instead of emitting one bundle per slot.",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES metric >= 147734 or test assertions fail"
+      },
+      "correctness_rationale": "The probe only changes how independent operations are grouped into cycles, not the operations themselves or their order relative to dependencies. Scratch space and data flow remain identical.",
+      "fallback_plan": "If metric does not improve or tests fail, revert to original single-slot bundling strategy.",
+      "rollback_or_shrink_plan": "Revert changes to KernelBuilder.build to restore original behavior. If partial success, shrink to only packing slots that are definitely independent (e.g., different engines with no data dependency).",
+      "attempts": 0,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-13T16:50:40+0900",
+      "created_loop": 2,
+      "last_non_budget_attempt": {
+        "ts": "2026-06-13T16:51:30+0900",
+        "loop": 2,
+        "todo_id": "task-001",
+        "candidate_id": "loop-002-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": 147734,
+        "failed": true,
+        "strategy_axis": "vliw_packing_probe",
+        "strategy_axes": [
+          "correctness",
+          "data_flow",
+          "runtime_control",
+          "vliw_packing_probe"
+        ],
+        "tactic_stage": "structural_probe",
+        "stage_result": "contract_mismatch",
+        "reason": "Pack independent slots into single VLIW bundles in KernelBuilder.build",
+        "spec_task_id": "task-001",
+        "budget_counted": false,
+        "failure_class": "active_task_drift",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=vliw_packing_probe; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Persisted spec think brief: /Users/m2max/tmp/local-micro-agent-homework-runs/run-20260613-163019-agents-json-regex-64k-20loop-bf69405-ollama-qwen36-35b...",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "fingerprint": "8f881051d7d6872d",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "changes": [
+          {
+            "path": "perf_takehome.py",
+            "reason": "The active task (task-001) requires implementing a dependency-aware VLIW packing scheduler in KernelBuilder.build to reduce cycle count by exploiting parallelism. The current implementation uses one slot per instruction bundle, resulting in zero parallelism (147,734 cycles). This change implements a conservative scheduler that groups independent slots int...",
+            "mode": "replacement",
+            "target_region": "perf_takehome.py::KernelBuilder.build",
+            "line_range": {
+              "start_line": 51,
+              "end_line": 56
+            }
+          }
+        ],
+        "drift_declared_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "drift_declared_symbols": [
+          "KernelBuilder",
+          "build"
+        ],
+        "drift_attempted_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "drift_region_pairs": [
+          {
+            "declared": "perf_takehome.py::KernelBuilder.build",
+            "attempted": "perf_takehome.py::KernelBuilder.build"
+          }
+        ],
+        "drift_target_region_hash": "4a609a5f",
+        "drift_cooldown_key": "4a609a5f:structural_probe:8f881051d7d6872d"
+      },
+      "non_budget_attempts": 3
+    }
+  ],
+  "updated_at": "2026-06-13T16:51:30+0900",
+  "active_todo_id": "task-001"
+}

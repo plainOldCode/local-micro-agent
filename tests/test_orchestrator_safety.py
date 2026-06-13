@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import io
 import json
+import shutil
 import shlex
 import sys
 import tempfile
@@ -40,6 +41,25 @@ from local_micro_agent.state import (
     TestResult,
 )
 from local_micro_agent.validators import JsonValidationError
+
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+
+def _copy_spec_run_fixture(repo: Path, name: str) -> Path:
+    source = FIXTURE_ROOT / "spec_runs" / name
+    artifact_dir = repo / ".local_micro_agent"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for filename in (
+        "terminal_state.json",
+        "candidates.jsonl",
+        "failure_signatures.jsonl",
+        "spec_graph_candidates.jsonl",
+        "run_spec.json",
+        "todo_plan.json",
+    ):
+        shutil.copyfile(source / filename, artifact_dir / filename)
+    return artifact_dir
 
 
 class _BadJsonModel:
@@ -6149,6 +6169,113 @@ Background / non-constraints
             )
             self.assertEqual(terminal["targeted_rewrite_rejected_duplicate_drift"], 0)
             self.assertEqual(terminal["spec_budget_saved_by_drift_backoff"], 0)
+
+    def test_fixture_d15_terminal_shape_documents_structural_probe_narrowing_failure(
+        self,
+    ) -> None:
+        fixture = (
+            FIXTURE_ROOT
+            / "spec_runs"
+            / "mvp9_d15_boundary_feedback_r2"
+            / "terminal_state.json"
+        )
+
+        terminal = json.loads(fixture.read_text())
+
+        self.assertEqual(
+            terminal["stop_reason"],
+            "search_frontier_exhausted_after_graph_reseed_exhausted",
+        )
+        self.assertEqual(terminal["code_test_loop_count"], 3)
+        self.assertFalse(terminal["zero_code_attempt"])
+        self.assertEqual(terminal["graph_reseed_attempts"], 2)
+        self.assertEqual(terminal["graph_reseed_attempts_max"], 2)
+        self.assertEqual(
+            terminal["candidate_status_counts"],
+            {
+                "rejected_active_task_shape_drift": 1,
+                "rejected_todo_scope_drift": 2,
+            },
+        )
+        self.assertEqual(
+            terminal["candidate_failure_class_counts"],
+            {"active_task_drift": 3},
+        )
+        self.assertEqual(terminal["active_task_drift_count"], 3)
+        self.assertEqual(terminal["trajectory_quality"]["scope_drift_count"], 3)
+        self.assertEqual(terminal["trajectory_quality"]["improved_count"], 0)
+        self.assertEqual(terminal["last_candidate_event"]["applied"], 0)
+
+    def test_fixture_d15_reseed_focus_bans_repeated_material_axes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = _copy_spec_run_fixture(
+                repo, "mvp9_d15_boundary_feedback_r2"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                        "spec_graph_candidates_path": ".local_micro_agent/spec_graph_candidates.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+            tasks = spec["task_graph"]
+            cooldown_keys = spec.get("search", {}).get("cooldown_keys", [])
+
+            focus = agent._spec_graph_reseed_focus(
+                spec,
+                tasks,
+                reseed_attempt=2,
+                reseed_attempts_max=2,
+                cooldown_keys=cooldown_keys,
+            )
+
+            self.assertIn("materially narrower structural_probe", focus)
+            self.assertIn("concrete diff contract", focus)
+            self.assertIn("Recent failure signatures", focus)
+            self.assertIn("Cooldown keys banned for this reseed", focus)
+            self.assertIn(
+                "targeted_spec_rewrite_repeated_active_task_drift_material_axes",
+                focus,
+            )
+
+    def test_fixture_d15_graph_score_detects_repeated_broad_structural_probe(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = _copy_spec_run_fixture(
+                repo, "mvp9_d15_boundary_feedback_r2"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                        "spec_graph_candidates_path": ".local_micro_agent/spec_graph_candidates.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            spec = json.loads((artifact_dir / "run_spec.json").read_text())
+
+            score = agent._spec_graph_candidate_score(spec)
+
+            self.assertEqual(score["runnable_tasks"], 0)
+            self.assertGreater(score["cooldown_hits"], 0)
+            self.assertGreater(score["duplicate_hits"], 0)
 
     def test_terminal_report_summarizes_portfolio_recovery_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
