@@ -12897,7 +12897,11 @@ END_HYPOTHESIS_OPTION"""
                             "path": "target.py",
                             "target_region": "target.py::parse_item",
                             "mode": "replacement",
-                            "reason": "Remove debug compare checks",
+                            "reason": (
+                                "Remove `debug` compare checks"
+                                if idx == 0
+                                else "Remove debug compare checks"
+                            ),
                         }
                     ],
                 }

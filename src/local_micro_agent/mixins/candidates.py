@@ -231,15 +231,16 @@ class CandidateRecordsMixin:
                         change.get("path", ""),
                         change.get("target_region", ""),
                         change.get("mode", ""),
-                        self._truncate_text(str(change.get("reason", "")), 120),
                     )
                 )
             )
         reason = self._truncate_text(
             str(record.get("reason") or record.get("summary") or ""), 160
         )
-        if region_key or change_bits or reason:
-            return f"{kind}:{region_key}:{'|'.join(change_bits)}:{reason}"
+        if region_key or change_bits:
+            return f"{kind}:{region_key}:{'|'.join(change_bits)}"
+        if reason:
+            return f"{kind}:{reason}"
         fingerprint = record.get("fingerprint")
         return f"{kind}:fingerprint:{fingerprint}" if fingerprint else f"{kind}:unknown"
 
