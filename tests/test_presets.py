@@ -63,6 +63,7 @@ class WorkflowPresetTests(unittest.TestCase):
             "spec_structural_risk_gate",
             "spec_two_call_synthesis",
             "spec_probe_diff_contract_required",
+            "spec_micro_probe_executable_gate",
             "probe_diff_contract_gate",
         ):
             self.assertTrue(workflow[key], key)
@@ -70,6 +71,10 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertEqual(workflow["spec_synth_call_budget"], 24)
         self.assertEqual(workflow["spec_reseed_reserved_synth_calls"], 4)
         self.assertTrue(workflow["spec_gate_soft_fallback"])
+        self.assertEqual(workflow["spec_micro_probe_rewrite_attempts"], 1)
+        self.assertEqual(workflow["spec_micro_probe_max_hunks"], 1)
+        self.assertEqual(workflow["spec_micro_probe_max_changed_lines"], 15)
+        self.assertEqual(workflow["spec_micro_probe_max_changed_functions"], 1)
         self.assertEqual(workflow["spec_active_task_drift_streak_limit"], 3)
         self.assertEqual(workflow["spec_active_task_drift_same_fingerprint_limit"], 2)
         self.assertEqual(workflow["spec_active_task_drift_rewrite_attempts"], 1)

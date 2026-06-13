@@ -6583,6 +6583,401 @@ Background / non-constraints
                 issues,
             )
 
+    def test_before_code_gate_blocks_broad_structural_probe_before_active_todo(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": False,
+                        "spec_micro_probe_executable_gate": True,
+                        "spec_micro_probe_rewrite_attempts": 1,
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "active_todo_path": ".local_micro_agent/active_todo.json",
+                        "todo_plan_path": ".local_micro_agent/todo_plan.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "objective": "test",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "title": "Rewrite the whole parser scheduling function",
+                        "tactic_stage": "structural_probe",
+                        "risk_level": "structural",
+                        "target_regions": ["target.py::parse_item"],
+                        "target_symbols": ["parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Rewrite the whole function",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::parse_item"],
+                            "max_files_changed": 1,
+                            "max_hunks": 2,
+                            "max_changed_lines": 40,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+            agent.state.scratch["run_spec"] = spec
+
+            agent._schedule_spec_task()
+
+            task = agent.state.scratch["run_spec"]["task_graph"][0]
+            self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+            self.assertEqual(task["status"], "needs_contract_rewrite")
+            self.assertNotIn("active_todo", agent.state.scratch)
+            self.assertIn("micro_probe_gate", task)
+            self.assertIn("micro_probe_required", agent.state.scratch["spec_rewrite_focus"])
+            progress = _read_fixture_jsonl(repo / ".local_micro_agent" / "spec_progress.jsonl")
+            self.assertEqual(progress[-1]["event"], "micro_probe_required")
+            self.assertEqual(progress[-1]["code_call_avoided_by_micro_probe_gate"], 1)
+            self.assertEqual(progress[-1]["spec_budget_saved_by_micro_probe_gate"], 0)
+
+    def test_before_code_gate_allows_executable_structural_probe_micro_contract(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": False,
+                        "spec_micro_probe_executable_gate": True,
+                        "spec_micro_probe_max_changed_lines": 15,
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "active_todo_path": ".local_micro_agent/active_todo.json",
+                        "todo_plan_path": ".local_micro_agent/todo_plan.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "objective": "test",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "title": "Add one guarded parser branch",
+                        "tactic_stage": "structural_probe",
+                        "risk_level": "structural",
+                        "strategy_axis": "guard_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "target_symbols": ["parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Add one guarded branch inside parse_item",
+                        "expected_signal": "configured command still passes",
+                        "micro_probe_gate": {"status": "required"},
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::parse_item"],
+                            "expected_changed_regions": ["target.py::parse_item"],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+            agent.state.scratch["run_spec"] = spec
+
+            agent._schedule_spec_task()
+
+            self.assertEqual(agent.state.current, AgentStateName.TASK_READ)
+            todo = agent.state.scratch["active_todo"]
+            self.assertEqual(todo["spec_task_id"], "task-001")
+            self.assertEqual(todo["probe_diff_contract"]["allowed_edit_shape"], "single_guarded_branch")
+            progress = _read_fixture_jsonl(repo / ".local_micro_agent" / "spec_progress.jsonl")
+            self.assertEqual(progress[-2]["event"], "micro_probe_shrunk")
+
+    def test_code_entry_gate_blocks_stale_broad_structural_probe_without_model_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_micro_probe_executable_gate": True,
+                        "spec_micro_probe_rewrite_attempts": 1,
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "run_spec_path": ".local_micro_agent/run_spec.json",
+                        "active_todo_path": ".local_micro_agent/active_todo.json",
+                        "todo_plan_path": ".local_micro_agent/todo_plan.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "objective": "test",
+                "active_task_id": "task-001",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "in_progress",
+                        "title": "Replace whole scheduler",
+                        "tactic_stage": "structural_probe",
+                        "risk_level": "structural",
+                        "target_regions": ["target.py::parse_item"],
+                        "target_symbols": ["parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Replace the whole scheduling function",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::parse_item"],
+                            "max_files_changed": 1,
+                            "max_hunks": 2,
+                            "max_changed_lines": 40,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+            active_todo = {
+                "todo_id": "task-001",
+                "spec_task_id": "task-001",
+                "status": "active",
+                "title": "Replace whole scheduler",
+                "tactic_stage": "structural_probe",
+                "risk_level": "structural",
+                "target_regions": ["target.py::parse_item"],
+                "target_symbols": ["parse_item"],
+                "allowed_files": ["target.py"],
+                "edit_scope": "Replace the whole scheduling function",
+                "probe_diff_contract": spec["task_graph"][0]["probe_diff_contract"],
+            }
+            agent.state.scratch["run_spec"] = spec
+            agent.state.scratch["active_todo"] = active_todo
+            (artifact_dir / "active_todo.json").write_text(json.dumps(active_todo) + "\n")
+
+            asyncio.run(agent.code())
+
+            self.assertEqual(agent.state.current, AgentStateName.SPEC_SYNTH)
+            self.assertFalse((artifact_dir / "active_todo.json").exists())
+            progress = _read_fixture_jsonl(artifact_dir / "spec_progress.jsonl")
+            self.assertEqual(progress[-1]["event"], "micro_probe_required")
+            self.assertEqual(progress[-1]["source"], "code_entry")
+
+    def test_before_code_gate_rejects_micro_probe_without_target_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_micro_probe_executable_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            task = {
+                "task_id": "task-001",
+                "tactic_stage": "structural_probe",
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "allowed_edit_shape": "single_guarded_branch",
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 8,
+                    "max_changed_functions": 1,
+                },
+            }
+
+            issues = agent._structural_probe_executable_issues(task)
+
+            self.assertIn(
+                "micro_probe_required: expected one primary target_region",
+                issues,
+            )
+
+    def test_before_code_gate_rejects_allowed_regions_wider_than_expected_region(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_micro_probe_executable_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            task = {
+                "task_id": "task-001",
+                "tactic_stage": "structural_probe",
+                "target_regions": ["target.py::parse_item"],
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item", "target.py::other"],
+                    "expected_changed_regions": ["target.py::parse_item"],
+                    "allowed_edit_shape": "single_guarded_branch",
+                    "max_files_changed": 1,
+                    "max_hunks": 1,
+                    "max_changed_lines": 8,
+                    "max_changed_functions": 1,
+                },
+            }
+
+            issues = agent._structural_probe_executable_issues(task)
+
+            self.assertIn(
+                "micro_probe_required: expected exactly one allowed_region",
+                issues,
+            )
+
+    def test_targeted_rewrite_rejects_malformed_micro_contract_without_crashing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "validator": {"kind": "metric"},
+                    }
+                ],
+            }
+            rewrite_spec = json.loads(json.dumps(previous_spec))
+            task = rewrite_spec["task_graph"][0]
+            task["status"] = "open"
+            task["probe_diff_contract"] = {
+                "allowed_files": ["target.py"],
+                "allowed_regions": ["target.py::parse_item"],
+                "expected_changed_regions": ["target.py::parse_item"],
+                "allowed_edit_shape": "single_guarded_branch",
+                "max_files_changed": 1,
+                "max_hunks": "one",
+                "max_changed_lines": 8,
+                "max_changed_functions": 1,
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC rewrite structural probe not executable: "
+                "micro_probe_required: max_hunks must be <= 1",
+                issues,
+            )
+
+    def test_code_entry_gate_clears_unmapped_active_todo_without_rewrite_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_micro_probe_executable_gate": True,
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                        "failure_signatures_path": ".local_micro_agent/failure_signatures.jsonl",
+                        "active_todo_path": ".local_micro_agent/active_todo.json",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "active_task_id": "task-missing",
+                "task_graph": [
+                    {"task_id": "task-other", "status": "open"},
+                ],
+            }
+            active_todo = {
+                "todo_id": "task-missing",
+                "spec_task_id": "task-missing",
+                "status": "active",
+                "tactic_stage": "structural_probe",
+                "target_regions": ["target.py::parse_item"],
+                "probe_diff_contract": {
+                    "allowed_files": ["target.py"],
+                    "allowed_regions": ["target.py::parse_item"],
+                    "max_files_changed": 1,
+                    "max_hunks": 2,
+                    "max_changed_lines": 40,
+                    "max_changed_functions": 1,
+                },
+            }
+            agent.state.scratch["active_todo"] = active_todo
+            (artifact_dir / "active_todo.json").write_text(json.dumps(active_todo) + "\n")
+
+            blocked = agent._block_active_todo_if_micro_probe_not_executable()
+
+            self.assertTrue(blocked)
+            self.assertEqual(agent.state.current, AgentStateName.SCHEDULE)
+            self.assertNotIn("spec_rewrite_target_task_id", agent.state.scratch)
+            self.assertFalse((artifact_dir / "active_todo.json").exists())
+            progress = _read_fixture_jsonl(artifact_dir / "spec_progress.jsonl")
+            self.assertEqual(progress[-1]["event"], "micro_probe_unmapped_active_todo")
+            self.assertEqual(progress[-1]["reason"], "active_todo_not_found_in_run_spec")
+
     def test_terminal_report_summarizes_portfolio_recovery_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -4598,14 +4598,17 @@ class TodoLifecycleMixin:
     def _structural_probe_micro_contract_issues(self, task: dict[str, Any]) -> list[str]:
         if str(task.get("tactic_stage") or "") != "structural_probe":
             return []
-        contract = (
-            task.get("probe_diff_contract")
-            if isinstance(task.get("probe_diff_contract"), dict)
-            else {}
-        )
-        if str(contract.get("allowed_edit_shape") or "").strip():
+        executable_issues = self._structural_probe_executable_issues(task)
+        if not executable_issues:
             return []
-        return ["targeted SPEC rewrite missing structural probe micro-contract"]
+        issues: list[str] = []
+        if any("missing allowed_edit_shape" in issue for issue in executable_issues):
+            issues.append("targeted SPEC rewrite missing structural probe micro-contract")
+        issues.extend(
+            "targeted SPEC rewrite structural probe not executable: " + issue
+            for issue in executable_issues
+        )
+        return issues
 
     @staticmethod
     def _task_requires_drift_material_diversity(task: dict[str, Any]) -> bool:
@@ -4648,9 +4651,9 @@ class TodoLifecycleMixin:
             tuple(sorted(self._normalize_string_list(contract.get("allowed_change_kinds")))),
             tuple(sorted(self._normalize_string_list(contract.get("forbidden_edit_shapes")))),
             bool(contract.get("must_include_guard")),
-            int(contract.get("max_hunks", 0) or 0),
-            int(contract.get("max_changed_lines", 0) or 0),
-            int(contract.get("max_changed_functions", 0) or 0),
+            self._probe_contract_positive_int(contract, "max_hunks") or 0,
+            self._probe_contract_positive_int(contract, "max_changed_lines") or 0,
+            self._probe_contract_positive_int(contract, "max_changed_functions") or 0,
             tuple(sorted(self._normalize_string_list(contract.get("expected_changed_regions")))),
         )
 
@@ -5516,6 +5519,142 @@ class TodoLifecycleMixin:
         issues.extend(self._spec_task_structural_risk_issues(task))
         return issues
 
+    def _spec_task_before_code_executable_issues(
+        self, task: dict[str, Any]
+    ) -> list[str]:
+        if not self._spec_micro_probe_executable_gate_enabled():
+            return []
+        return self._structural_probe_executable_issues(task)
+
+    def _spec_micro_probe_executable_gate_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return bool(workflow.get("spec_micro_probe_executable_gate"))
+
+    @staticmethod
+    def _spec_task_was_shrunk_to_micro_probe(task: dict[str, Any]) -> bool:
+        gate = task.get("micro_probe_gate")
+        if isinstance(gate, dict) and str(gate.get("status") or "") == "required":
+            return True
+        contract = task.get("contract_rewrite")
+        return (
+            isinstance(contract, dict)
+            and str(contract.get("reason") or "") == "micro_probe_required"
+            and str(task.get("tactic_stage") or "") == "structural_probe"
+        )
+
+    def _structural_probe_executable_issues(
+        self, task: dict[str, Any]
+    ) -> list[str]:
+        if str(task.get("tactic_stage") or "") != "structural_probe":
+            return []
+        contract = (
+            task.get("probe_diff_contract")
+            if isinstance(task.get("probe_diff_contract"), dict)
+            else {}
+        )
+        issues: list[str] = []
+        if not contract:
+            return ["micro_probe_required: missing probe_diff_contract"]
+
+        allowed_shape = str(contract.get("allowed_edit_shape") or "").strip()
+        if not allowed_shape:
+            issues.append("micro_probe_required: missing allowed_edit_shape")
+
+        target_regions = self._normalize_string_list(task.get("target_regions"))
+        expected_regions = self._normalize_string_list(
+            contract.get("expected_changed_regions")
+        )
+        allowed_regions = self._normalize_string_list(contract.get("allowed_regions"))
+        if len(target_regions) != 1:
+            issues.append("micro_probe_required: expected one primary target_region")
+        if len(expected_regions) != 1:
+            issues.append(
+                "micro_probe_required: expected exactly one expected_changed_region"
+            )
+        elif target_regions and not self._region_matches_task_targets(
+            expected_regions[0],
+            target_regions,
+        ):
+            issues.append(
+                "micro_probe_required: expected_changed_region must stay inside target_regions"
+            )
+        if len(allowed_regions) != 1:
+            issues.append(
+                "micro_probe_required: expected exactly one allowed_region"
+            )
+        elif target_regions and not self._region_matches_task_targets(
+            allowed_regions[0],
+            target_regions,
+        ):
+            issues.append(
+                "micro_probe_required: allowed_region must stay inside target_regions"
+            )
+        if expected_regions and allowed_regions and expected_regions != allowed_regions:
+            issues.append(
+                "micro_probe_required: allowed_regions must match expected_changed_regions"
+            )
+
+        max_files = self._probe_contract_positive_int(contract, "max_files_changed")
+        if max_files is None or max_files > 1:
+            issues.append("micro_probe_required: max_files_changed must be 1")
+
+        workflow = self.config.get("workflow", {})
+        max_hunks_limit = int(workflow.get("spec_micro_probe_max_hunks", 1) or 1)
+        max_lines_limit = int(
+            workflow.get("spec_micro_probe_max_changed_lines", 15) or 15
+        )
+        max_functions_limit = int(
+            workflow.get("spec_micro_probe_max_changed_functions", 1) or 1
+        )
+        max_hunks = self._probe_contract_positive_int(contract, "max_hunks")
+        if max_hunks is None or max_hunks > max_hunks_limit:
+            issues.append(
+                f"micro_probe_required: max_hunks must be <= {max_hunks_limit}"
+            )
+        max_lines = self._probe_contract_positive_int(contract, "max_changed_lines")
+        if max_lines is None or max_lines > max_lines_limit:
+            issues.append(
+                f"micro_probe_required: max_changed_lines must be <= {max_lines_limit}"
+            )
+        max_functions = self._probe_contract_positive_int(
+            contract,
+            "max_changed_functions",
+        )
+        if max_functions is None or max_functions > max_functions_limit:
+            issues.append(
+                "micro_probe_required: max_changed_functions must be <= "
+                f"{max_functions_limit}"
+            )
+
+        broad_text = " ".join(
+            str(value or "")
+            for value in (
+                task.get("title"),
+                task.get("edit_scope"),
+                task.get("probe_plan"),
+                allowed_shape,
+            )
+        )
+        if self._structural_probe_scope_too_broad(broad_text):
+            issues.append(
+                "micro_probe_required: structural probe wording is still broad"
+            )
+        return sorted(dict.fromkeys(issues))
+
+    @staticmethod
+    def _probe_contract_positive_int(
+        contract: dict[str, Any],
+        key: str,
+    ) -> int | None:
+        value = contract.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     def _spec_task_grounding_issues(self, task: dict[str, Any]) -> list[str]:
         if not self._spec_grounding_gate_enabled():
             return []
@@ -5930,6 +6069,165 @@ class TodoLifecycleMixin:
         self.state.scratch.pop("spec_rewrite_target_task_id", None)
         self.state.current = AgentStateName.SCHEDULE
 
+    def _require_spec_task_micro_probe(
+        self,
+        spec: dict[str, Any],
+        task: dict[str, Any],
+        issues: list[str],
+        *,
+        source: str = "schedule",
+    ) -> None:
+        workflow = self.config.get("workflow", {})
+        max_rewrites = int(workflow.get("spec_micro_probe_rewrite_attempts", 1) or 0)
+        task_id = str(task.get("task_id") or task.get("spec_task_id") or "")
+        attempt_key = self._spec_rewrite_origin_task_id(task, task_id)
+        micro_gate = task.get("micro_probe_gate")
+        persisted_attempts = (
+            int(micro_gate.get("rewrite_attempts", 0) or 0)
+            if isinstance(micro_gate, dict)
+            else 0
+        )
+        attempts_by_task = self.state.scratch.setdefault(
+            "spec_micro_probe_rewrite_attempts_by_task",
+            {},
+        )
+        if not isinstance(attempts_by_task, dict):
+            attempts_by_task = {}
+            self.state.scratch["spec_micro_probe_rewrite_attempts_by_task"] = (
+                attempts_by_task
+            )
+        scratch_attempts = int(attempts_by_task.get(attempt_key, 0) or 0)
+        attempts = max(scratch_attempts, persisted_attempts)
+        next_attempt = attempts + 1
+        can_rewrite = max_rewrites > 0 and attempts < max_rewrites
+        now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        task["status"] = "needs_contract_rewrite" if can_rewrite else "deferred_contract_drift"
+        task["micro_probe_gate"] = {
+            "status": "required" if can_rewrite else "unshrinkable",
+            "issues": issues,
+            "source": source,
+            "rewrite_attempt_key": attempt_key,
+            "rewrite_attempts": next_attempt,
+            "rewrite_attempts_max": max_rewrites,
+            "checked_at": now,
+        }
+        task["contract_rewrite"] = {
+            "status": str(task["status"]),
+            "reason": "micro_probe_required",
+            "issues": issues,
+            "rewrite_attempt_key": attempt_key,
+            "rewrite_attempts": next_attempt,
+            "rewrite_attempts_max": max_rewrites,
+            "checked_at": now,
+        }
+        task["decision_hint"] = (
+            "micro_probe_required: structural_probe is not executable as one CODE "
+            "attempt yet. Shrink it to one target region, one hunk, one allowed "
+            "edit shape, and one small validation signal before CODE."
+        )
+        spec["active_task_id"] = None
+        spec["last_micro_probe_gate"] = {
+            "task_id": task_id,
+            "issues": issues,
+            "source": source,
+            "rewrite_attempt": next_attempt,
+            "rewrite_attempts_max": max_rewrites,
+        }
+        self._persist_run_spec(spec)
+        self._clear_active_spec_task()
+        event = "micro_probe_required" if can_rewrite else "micro_probe_unshrinkable"
+        extra = {
+            "issues": issues,
+            "source": source,
+            "rewrite_attempt": next_attempt,
+            "rewrite_attempts_max": max_rewrites,
+            "code_call_avoided_by_micro_probe_gate": 1,
+            "spec_budget_saved_by_micro_probe_gate": 0 if can_rewrite else 1,
+        }
+        self._append_spec_progress_event(event, spec, task, extra=extra)
+        self._append_failure_signature(
+            phase="before_code",
+            spec=spec,
+            task=task,
+            status=str(task.get("status") or ""),
+            failure_class="not_executable",
+            issue_code="micro_probe_required",
+            issue_scope="spec_task",
+            summary=str(task.get("decision_hint") or ""),
+            extra=extra,
+        )
+        self.state.notes.append(
+            f"Spec task {task_id or '<unknown>'} blocked before CODE by "
+            "micro-probe gate: " + "; ".join(issues)
+        )
+        if can_rewrite:
+            attempts_by_task[attempt_key] = next_attempt
+            self.state.scratch["spec_rewrite_focus"] = (
+                self._spec_micro_probe_rewrite_focus(task, issues)
+            )
+            self.state.scratch["spec_rewrite_target_task_id"] = task_id
+            self.state.current = AgentStateName.SPEC_SYNTH
+            return
+        self.state.scratch.pop("spec_rewrite_focus", None)
+        self.state.scratch.pop("spec_rewrite_target_task_id", None)
+        self.state.current = AgentStateName.SCHEDULE
+
+    def _spec_micro_probe_rewrite_focus(
+        self,
+        task: dict[str, Any],
+        issues: list[str],
+    ) -> str:
+        compact_task = {
+            "task_id": task.get("task_id"),
+            "hypothesis_id": task.get("hypothesis_id"),
+            "title": task.get("title"),
+            "strategy_axis": task.get("strategy_axis"),
+            "family_key": task.get("family_key"),
+            "tactic_stage": task.get("tactic_stage"),
+            "target_regions": task.get("target_regions"),
+            "target_symbols": task.get("target_symbols"),
+            "edit_scope": task.get("edit_scope"),
+            "probe_plan": task.get("probe_plan"),
+            "probe_diff_contract": task.get("probe_diff_contract"),
+            "validator": task.get("validator"),
+        }
+        workflow = self.config.get("workflow", {})
+        max_hunks = int(workflow.get("spec_micro_probe_max_hunks", 1) or 1)
+        max_lines = int(workflow.get("spec_micro_probe_max_changed_lines", 15) or 15)
+        max_functions = int(
+            workflow.get("spec_micro_probe_max_changed_functions", 1) or 1
+        )
+        return "\n\n".join(
+            [
+                "Spec micro-probe shrink focus:",
+                "must:\n"
+                "- Preserve the same accepted hypothesis_id and stay inside the same writable target region.\n"
+                "- Produce exactly one executable structural_probe micro contract.\n"
+                f"- Set probe_diff_contract.max_hunks <= {max_hunks}, "
+                f"max_changed_lines <= {max_lines}, "
+                f"max_changed_functions <= {max_functions}, and max_files_changed = 1.\n"
+                "- Set one concrete probe_diff_contract.allowed_edit_shape and one expected_changed_region.",
+                "must_not:\n"
+                "- Do not emit a whole-function, whole-class, full implementation, full rewrite, or cross-region redesign.\n"
+                "- Do not change tactic_stage to local_edit just to bypass the structural probe contract.\n"
+                "- Do not invent a benchmark-specific split outside the accepted boundary.",
+                "current_blocker:\n" + json.dumps(issues, ensure_ascii=False, indent=2),
+                "next_required_shape:\n"
+                "- Choose one branch, one guard, one helper extraction, one validation-only scaffold, "
+                "or one localized reversible probe that CODE can execute in one small hunk.",
+                "Rejected task:\n"
+                + json.dumps(
+                    {
+                        key: value
+                        for key, value in compact_task.items()
+                        if value not in (None, "", [], {})
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            ]
+        )
+
     def _spec_design_rewrite_focus(
         self, task: dict[str, Any], issues: list[str], failure_summary: str = ""
     ) -> str:
@@ -6312,6 +6610,26 @@ class TodoLifecycleMixin:
             else:
                 self._reject_spec_task_for_design_contract(spec, task, design_issues)
                 return
+        executable_issues = self._spec_task_before_code_executable_issues(task)
+        if executable_issues:
+            self._require_spec_task_micro_probe(
+                spec,
+                task,
+                executable_issues,
+                source="schedule",
+            )
+            return
+        if self._spec_task_was_shrunk_to_micro_probe(task):
+            gate = task.get("micro_probe_gate")
+            if isinstance(gate, dict):
+                gate["status"] = "shrunk"
+                gate["shrunk_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self._append_spec_progress_event(
+                "micro_probe_shrunk",
+                spec,
+                task,
+                extra={"source": "schedule"},
+            )
         task["status"] = "in_progress"
         task["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         spec["active_task_id"] = task.get("task_id")
@@ -7031,6 +7349,110 @@ class TodoLifecycleMixin:
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "created_loop": self.state.loop_count,
         }
+
+    def _block_active_todo_if_micro_probe_not_executable(self) -> bool:
+        if not self._spec_mode_enabled() or not self._spec_micro_probe_executable_gate_enabled():
+            return False
+        active_todo = self.state.scratch.get("active_todo")
+        if not isinstance(active_todo, dict):
+            active_todo = self._load_active_todo()
+            if active_todo:
+                self.state.scratch["active_todo"] = active_todo
+        if not isinstance(active_todo, dict) or not active_todo:
+            return False
+        if str(active_todo.get("status") or "") not in {"active", "attempted"}:
+            return False
+        issues = self._structural_probe_executable_issues(active_todo)
+        if not issues:
+            return False
+        spec = self.state.scratch.get("run_spec")
+        if not isinstance(spec, dict) or not spec:
+            spec = self._load_run_spec(self._run_spec_path())
+            if spec:
+                self.state.scratch["run_spec"] = spec
+        if not isinstance(spec, dict) or not spec:
+            self.state.notes.append(
+                "Active structural_probe todo failed micro-probe gate but no run_spec "
+                "was available for rewrite routing"
+            )
+            self._append_spec_progress_event(
+                "micro_probe_unmapped_active_todo",
+                {"spec_id": "", "task_graph": []},
+                active_todo,
+                extra={
+                    "issues": issues,
+                    "source": "code_entry",
+                    "code_call_avoided_by_micro_probe_gate": 1,
+                    "reason": "run_spec_missing",
+                },
+            )
+            self._append_failure_signature(
+                phase="before_code",
+                spec={},
+                task={},
+                status="stale_active_todo_cleared",
+                failure_class="not_executable",
+                issue_code="micro_probe_unmapped_active_todo",
+                issue_scope="active_todo",
+                summary=(
+                    "Active structural_probe todo failed the micro-probe gate, "
+                    "but no run_spec was available."
+                ),
+                extra={
+                    "active_todo_id": active_todo.get("todo_id"),
+                    "spec_task_id": active_todo.get("spec_task_id"),
+                    "issues": issues,
+                },
+            )
+            self._clear_active_spec_task()
+            self.state.current = AgentStateName.SCHEDULE
+            return True
+        task = self._spec_task_by_id(
+            spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else [],
+            str(active_todo.get("spec_task_id") or active_todo.get("todo_id") or ""),
+        )
+        if not isinstance(task, dict):
+            spec["active_task_id"] = None
+            self._persist_run_spec(spec)
+            self._append_spec_progress_event(
+                "micro_probe_unmapped_active_todo",
+                spec,
+                active_todo,
+                extra={
+                    "issues": issues,
+                    "source": "code_entry",
+                    "code_call_avoided_by_micro_probe_gate": 1,
+                    "reason": "active_todo_not_found_in_run_spec",
+                },
+            )
+            self._append_failure_signature(
+                phase="before_code",
+                spec=spec,
+                task={},
+                status="stale_active_todo_cleared",
+                failure_class="not_executable",
+                issue_code="micro_probe_unmapped_active_todo",
+                issue_scope="active_todo",
+                summary=(
+                    "Active structural_probe todo failed the micro-probe gate, "
+                    "but it no longer mapped to a run_spec task."
+                ),
+                extra={
+                    "active_todo_id": active_todo.get("todo_id"),
+                    "spec_task_id": active_todo.get("spec_task_id"),
+                    "issues": issues,
+                },
+            )
+            self._clear_active_spec_task()
+            self.state.current = AgentStateName.SCHEDULE
+            return True
+        self._require_spec_task_micro_probe(
+            spec,
+            task,
+            issues,
+            source="code_entry",
+        )
+        return True
 
     async def _read_current_spec_task_context(self) -> None:
         task = self._current_spec_task()

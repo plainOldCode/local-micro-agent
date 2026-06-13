@@ -271,6 +271,8 @@ class MicroAgent(
         self.state.current = AgentStateName.CODE
 
     async def code(self) -> None:
+        if self._block_active_todo_if_micro_probe_not_executable():
+            return
         if self._brainstorm_all_tactics_failed_for_current_loop():
             self.state.notes.append(
                 "Skipping CODE because all brainstorm tactics matched failed families"
