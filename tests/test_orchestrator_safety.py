@@ -13418,6 +13418,68 @@ END_HYPOTHESIS_OPTION"""
 
             self.assertEqual(normalized["rollback_or_shrink_plan"], "Revert the patch.")
 
+    def test_structural_probe_normalization_synthesizes_broad_edit_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            normalized = agent._normalize_run_spec_v2_task(
+                {
+                    "tactic_stage": "structural_probe",
+                    "target_regions": ["perf_takehome.py::KernelBuilder.build_kernel"],
+                    "edit_scope": "Replace scalar inner loop with vectorized valu operations.",
+                    "risk_evidence": {
+                        "field": "edit_scope",
+                        "quote": "Replace scalar inner loop",
+                        "explanation": "loop change",
+                    },
+                }
+            )
+
+            edit_scope = normalized["edit_scope"]
+            self.assertIn("one guarded inner statement", edit_scope)
+            self.assertIn("perf_takehome.py::KernelBuilder.build_kernel", edit_scope)
+            self.assertFalse(MicroAgent._structural_probe_scope_too_broad(edit_scope))
+            self.assertEqual(normalized["risk_evidence"]["quote"], edit_scope)
+
+    def test_structural_probe_normalization_preserves_narrow_edit_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            scope = "Probe one guarded branch inside target.py::parse_item."
+
+            normalized = agent._normalize_run_spec_v2_task(
+                {
+                    "tactic_stage": "structural_probe",
+                    "target_regions": ["target.py::parse_item"],
+                    "edit_scope": scope,
+                }
+            )
+
+            self.assertEqual(normalized["edit_scope"], scope)
+
+    def test_local_edit_normalization_does_not_synthesize_structural_edit_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            scope = "Replace parser loop."
+
+            normalized = agent._normalize_run_spec_v2_task(
+                {
+                    "tactic_stage": "local_edit",
+                    "target_regions": ["target.py::parse_item"],
+                    "edit_scope": scope,
+                }
+            )
+
+            self.assertEqual(normalized["edit_scope"], scope)
+
     def test_spec_quality_gate_rejects_local_signature_callsite_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

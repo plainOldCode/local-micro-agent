@@ -2987,6 +2987,21 @@ class TodoLifecycleMixin:
         target_symbols = self._normalize_string_list(task.get("target_symbols"))
         target_regions = self._normalize_string_list(task.get("target_regions"))
         tactic_stage = self._normalize_tactic_stage(task.get("tactic_stage"))
+        edit_scope = self._normalize_task_text_field(task.get("edit_scope"))
+        risk_evidence = self._normalize_task_risk_evidence(task.get("risk_evidence"))
+        if tactic_stage == "structural_probe" and (
+            not edit_scope
+            or (
+                self._structural_probe_scope_too_broad(edit_scope)
+                and self._structural_probe_scope_can_be_synthesized(edit_scope)
+            )
+        ):
+            edit_scope = self._synthesize_structural_probe_edit_scope(
+                target_regions,
+                edit_scope,
+            )
+            if risk_evidence.get("field") == "edit_scope":
+                risk_evidence["quote"] = edit_scope
         rollback_or_shrink_plan = self._normalize_task_text_field(
             task.get("rollback_or_shrink_plan")
         )
@@ -3006,12 +3021,10 @@ class TodoLifecycleMixin:
             "preserved_invariants": self._normalize_string_list(
                 task.get("preserved_invariants")
             ),
-            "edit_scope": self._normalize_task_text_field(task.get("edit_scope")),
+            "edit_scope": edit_scope,
             "risk_level": self._normalize_risk_level(task.get("risk_level")),
             "tactic_stage": tactic_stage,
-            "risk_evidence": self._normalize_task_risk_evidence(
-                task.get("risk_evidence")
-            ),
+            "risk_evidence": risk_evidence,
             "probe_plan": self._normalize_task_text_field(task.get("probe_plan")),
             "probe_diff_contract": self._normalize_probe_diff_contract(
                 task.get("probe_diff_contract"),
@@ -3043,6 +3056,32 @@ class TodoLifecycleMixin:
             f"{region}; keep the existing behavior as the fallback path and revert "
             "if validation fails or the metric does not improve."
         )
+
+    def _synthesize_structural_probe_edit_scope(
+        self,
+        target_regions: list[str],
+        original_scope: str,
+    ) -> str:
+        region = target_regions[0] if target_regions else "the active target region"
+        context = " Original broad intent was preserved by target metadata." if original_scope.strip() else ""
+        return (
+            "Probe one guarded inner statement, branch, or loop body inside "
+            f"{region}, preserving the existing path as fallback.{context}"
+        )
+
+    @classmethod
+    def _structural_probe_scope_can_be_synthesized(cls, edit_scope: str) -> bool:
+        text = edit_scope.lower()
+        if cls._structural_probe_action_count(text) >= 3:
+            return False
+        if re.search(
+            r"\b(entire|whole|all)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
+            text,
+        ):
+            return False
+        if re.search(r"\b(across|throughout)\b.*\b(file|module|codebase|pipeline|system)\b", text):
+            return False
+        return True
 
     @staticmethod
     def _normalize_string_list(value: Any) -> list[str]:
