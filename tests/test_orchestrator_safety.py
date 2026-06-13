@@ -7043,8 +7043,432 @@ Background / non-constraints
             )
 
             self.assertIn(
-                "targeted SPEC micro-probe rewrite moved outside original "
-                "target boundary: target.py::other_item",
+                "targeted SPEC micro-probe rewrite changed target_regions "
+                "from ['target.py::parse_item'] to ['target.py::other_item']",
+                issues,
+            )
+
+    def test_micro_probe_shrink_rejects_allowed_region_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "probe_diff_contract": {
+                            "allowed_regions": ["target.py::parse_item"],
+                            "expected_changed_regions": ["target.py::parse_item"],
+                        },
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                    }
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Add one guard inside parse_item",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::other_item"],
+                            "expected_changed_regions": ["target.py::parse_item"],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC micro-probe rewrite changed allowed_regions "
+                "from ['target.py::parse_item'] to ['target.py::other_item']",
+                issues,
+            )
+
+    def test_micro_probe_shrink_rejects_expected_region_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "probe_diff_contract": {
+                            "allowed_regions": ["target.py::parse_item"],
+                            "expected_changed_regions": ["target.py::parse_item"],
+                        },
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                    }
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Add one guard inside parse_item",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::parse_item"],
+                            "expected_changed_regions": ["target.py::other_item"],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC micro-probe rewrite changed "
+                "expected_changed_regions from ['target.py::parse_item'] "
+                "to ['target.py::other_item']",
+                issues,
+            )
+
+    def test_micro_probe_shrink_falls_back_to_target_regions_for_contract_regions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                    }
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Add one guard inside parse_item",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::parse_item"],
+                            "expected_changed_regions": ["target.py::other_item"],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC micro-probe rewrite changed "
+                "expected_changed_regions from ['target.py::parse_item'] "
+                "to ['target.py::other_item']",
+                issues,
+            )
+
+    def test_micro_probe_shrink_allows_multi_region_task_to_choose_one_region(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "hypothesis_id": "hyp-1",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": [
+                            "target.py::parse_item",
+                            "target.py::format_item",
+                        ],
+                        "deliverables": ["target.py"],
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                    }
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "hypothesis_id": "hyp-1",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::parse_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Add one guard inside parse_item",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::parse_item"],
+                            "expected_changed_regions": ["target.py::parse_item"],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertEqual(issues, [])
+
+    def test_micro_probe_shrink_rejects_multi_region_task_to_unknown_region(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": [
+                            "target.py::parse_item",
+                            "target.py::format_item",
+                        ],
+                        "deliverables": ["target.py"],
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                    }
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["target.py::other_item"],
+                        "deliverables": ["target.py"],
+                        "edit_scope": "Add one guard inside other_item",
+                        "probe_diff_contract": {
+                            "allowed_files": ["target.py"],
+                            "allowed_regions": ["target.py::other_item"],
+                            "expected_changed_regions": ["target.py::other_item"],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC micro-probe rewrite changed target_regions "
+                "from ['target.py::parse_item', 'target.py::format_item'] "
+                "to ['target.py::other_item']",
+                issues,
+            )
+
+    def test_micro_probe_shrink_rejects_build_kernel_to_build_shift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {"spec_mode": True},
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            previous_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "needs_contract_rewrite",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["perf_takehome.py::KernelBuilder.build_kernel"],
+                        "deliverables": ["perf_takehome.py"],
+                        "probe_diff_contract": {
+                            "allowed_regions": [
+                                "perf_takehome.py::KernelBuilder.build_kernel"
+                            ],
+                            "expected_changed_regions": [
+                                "perf_takehome.py::KernelBuilder.build_kernel"
+                            ],
+                            "max_hunks": 2,
+                            "max_changed_lines": 20,
+                        },
+                        "contract_rewrite": {"reason": "micro_probe_required"},
+                    }
+                ],
+            }
+            rewrite_spec = {
+                "version": 2,
+                "spec_id": "micro-gate",
+                "task_graph": [
+                    {
+                        "task_id": "task-001",
+                        "status": "open",
+                        "risk_level": "structural",
+                        "tactic_stage": "structural_probe",
+                        "target_regions": ["perf_takehome.py::KernelBuilder.build"],
+                        "deliverables": ["perf_takehome.py"],
+                        "edit_scope": "Add one guard inside build",
+                        "probe_diff_contract": {
+                            "allowed_files": ["perf_takehome.py"],
+                            "allowed_regions": ["perf_takehome.py::KernelBuilder.build"],
+                            "expected_changed_regions": [
+                                "perf_takehome.py::KernelBuilder.build"
+                            ],
+                            "allowed_edit_shape": "single_guarded_branch",
+                            "max_files_changed": 1,
+                            "max_hunks": 1,
+                            "max_changed_lines": 8,
+                            "max_changed_functions": 1,
+                        },
+                    }
+                ],
+            }
+
+            issues = agent._spec_rewrite_graph_contract_issues(
+                previous_spec,
+                rewrite_spec,
+                "task-001",
+            )
+
+            self.assertIn(
+                "targeted SPEC micro-probe rewrite changed target_regions "
+                "from ['perf_takehome.py::KernelBuilder.build_kernel'] "
+                "to ['perf_takehome.py::KernelBuilder.build']",
                 issues,
             )
 

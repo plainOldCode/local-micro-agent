@@ -4631,6 +4631,23 @@ class TodoLifecycleMixin:
         previous_regions = self._normalize_string_list(
             previous_task.get("target_regions") if isinstance(previous_task, dict) else []
         )
+        previous_contract = (
+            previous_task.get("probe_diff_contract")
+            if isinstance(previous_task, dict)
+            else {}
+        )
+        if not isinstance(previous_contract, dict):
+            previous_contract = {}
+        previous_allowed_regions = (
+            self._normalize_string_list(previous_contract.get("allowed_regions"))
+            or previous_regions
+        )
+        previous_expected_regions = (
+            self._normalize_string_list(
+                previous_contract.get("expected_changed_regions")
+            )
+            or previous_regions
+        )
         previous_hypothesis = str(
             (
                 previous_task.get("hypothesis_id")
@@ -4663,18 +4680,61 @@ class TodoLifecycleMixin:
                 issues.append(
                     "targeted SPEC micro-probe rewrite missing target_regions"
                 )
-            for region in replacement_regions:
-                if previous_regions and not self._region_matches_task_targets(
-                    region,
-                    previous_regions,
-                ):
-                    issues.append(
-                        "targeted SPEC micro-probe rewrite moved outside original "
-                        f"target boundary: {region}"
+            else:
+                issues.extend(
+                    self._micro_probe_region_identity_issues(
+                        "target_regions",
+                        previous_regions,
+                        replacement_regions,
                     )
+                )
+            probe_contract = task.get("probe_diff_contract")
+            if not isinstance(probe_contract, dict):
+                probe_contract = {}
+            replacement_allowed_regions = self._normalize_string_list(
+                probe_contract.get("allowed_regions")
+            )
+            issues.extend(
+                self._micro_probe_region_identity_issues(
+                    "allowed_regions",
+                    previous_allowed_regions,
+                    replacement_allowed_regions,
+                )
+            )
+            replacement_expected_regions = self._normalize_string_list(
+                probe_contract.get("expected_changed_regions")
+            )
+            issues.extend(
+                self._micro_probe_region_identity_issues(
+                    "expected_changed_regions",
+                    previous_expected_regions,
+                    replacement_expected_regions,
+                )
+            )
             if tactic_stage == "structural_probe":
                 issues.extend(self._structural_probe_micro_contract_issues(task))
         return list(dict.fromkeys(issues))
+
+    @staticmethod
+    def _micro_probe_region_identity_issues(
+        label: str,
+        previous_regions: list[str],
+        replacement_regions: list[str],
+    ) -> list[str]:
+        if not previous_regions:
+            return []
+        if replacement_regions == previous_regions:
+            return []
+        if (
+            len(previous_regions) > 1
+            and len(replacement_regions) == 1
+            and replacement_regions[0] in previous_regions
+        ):
+            return []
+        return [
+            "targeted SPEC micro-probe rewrite changed "
+            f"{label} from {previous_regions} to {replacement_regions}"
+        ]
 
     def _structural_probe_micro_contract_issues(self, task: dict[str, Any]) -> list[str]:
         if str(task.get("tactic_stage") or "") != "structural_probe":
@@ -6285,6 +6345,7 @@ class TodoLifecycleMixin:
                 "- Preserve the same accepted hypothesis_id and stay inside the same writable target region.\n"
                 "- Return a replacement for the rejected task: keep the same task_id or set replaces_task_id to the rejected task_id.\n"
                 "- Keep risk_level=structural and tactic_stage=structural_probe; this is a shrink, not a local_edit conversion.\n"
+                "- Keep target_regions, probe_diff_contract.allowed_regions, and probe_diff_contract.expected_changed_regions unchanged; if the rejected task had multiple regions, choose exactly one of those existing regions.\n"
                 "- Produce exactly one executable structural_probe micro contract.\n"
                 f"- Set probe_diff_contract.max_hunks <= {max_hunks}, "
                 f"max_changed_lines <= {max_lines}, "
