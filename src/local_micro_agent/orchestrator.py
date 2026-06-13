@@ -280,6 +280,13 @@ class MicroAgent(
             self.state.notes.append("Simple thinking brief added for CODE context")
         else:
             self.state.scratch.pop("simple_thinking_brief", None)
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    self.state.notes.append(
+                        f"Failed to clear stale simple thinking brief: {type(exc).__name__}: {exc}"
+                    )
         self._persist_simple_thinking_brief_meta(meta)
 
     def _persist_simple_thinking_brief_meta(self, meta: dict[str, Any]) -> None:
@@ -292,6 +299,8 @@ class MicroAgent(
 
     def _format_simple_thinking_brief_context(self) -> str:
         workflow = self.config.get("workflow", {})
+        if self._spec_mode_enabled() or not workflow.get("simple_thinking_brief_enabled"):
+            return ""
         brief = self.state.scratch.get("simple_thinking_brief")
         if not isinstance(brief, str) or not brief.strip():
             path = self._workflow_artifact_path(

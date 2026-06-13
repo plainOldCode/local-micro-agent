@@ -12775,7 +12775,6 @@ END_HYPOTHESIS_OPTION"""
                         "mcp_servers": {},
                         "workflow": {
                             "preset": "simple",
-                            "simple_thinking_brief_enabled": False,
                             "writable_files": ["target.py"],
                         },
                     },
@@ -12808,6 +12807,74 @@ END_HYPOTHESIS_OPTION"""
                 self.assertNotIn("Controller-owned SPEC synthesis constraints", content)
                 self.assertNotIn("SPEC hypothesis", content)
                 self.assertNotIn("Run-local spec:", content)
+
+        asyncio.run(run_case())
+
+    def test_simple_thinking_brief_not_injected_outside_simple(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            brief_path = repo / ".local_micro_agent" / "simple_thinking_brief.md"
+            brief_path.parent.mkdir()
+            brief_path.write_text("- stale brief\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "preset": "minimal",
+                        "simple_thinking_brief_enabled": False,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["simple_thinking_brief"] = "- stale scratch"
+
+            self.assertEqual(agent._format_simple_thinking_brief_context(), "")
+
+    def test_empty_simple_thinking_brief_clears_stale_file(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                brief_path = repo / ".local_micro_agent" / "simple_thinking_brief.md"
+                brief_path.parent.mkdir()
+                brief_path.write_text("- stale brief\n")
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": ModelResponse("", reasoning=""),
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "default": "reasoner-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "preset": "simple",
+                            "seed_files": ["target.py"],
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+
+                await agent.mcp.start()
+                try:
+                    await agent.read()
+                finally:
+                    await agent.mcp.close()
+
+                self.assertFalse(brief_path.exists())
+                self.assertNotIn("simple_thinking_brief", agent.state.scratch)
+                meta_path = repo / ".local_micro_agent" / "simple_thinking_brief_meta.json"
+                self.assertEqual(json.loads(meta_path.read_text())["status"], "empty")
+                self.assertEqual(agent._format_simple_thinking_brief_context(), "")
 
         asyncio.run(run_case())
 
