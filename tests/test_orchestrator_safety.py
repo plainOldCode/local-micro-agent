@@ -10934,6 +10934,48 @@ END_HYPOTHESIS_OPTION"""
             self.assertIn("VLIW slot-packer", options["accepted"][0]["hypothesis"])
             self.assertIn("Accepted SPEC hypothesis options", context)
 
+    def test_spec_hypothesis_brief_rejects_structural_action_as_local_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def build(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_hypothesis_brief_enabled": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            agent._spec_grounding_facts_context()
+            brief = self._valid_hypothesis_brief(
+                hypothesis_id="hyp-pack-local",
+                region="target.py::build",
+                kind="local_edit",
+                domain_terms=(
+                    "group instructions into bundles and change scheduling order "
+                    "inside build"
+                ),
+            )
+
+            agent._spec_hypothesis_options_context(brief)
+
+            options = json.loads(
+                (repo / ".local_micro_agent" / "spec_hypothesis_options.json").read_text()
+            )
+            self.assertEqual(options["accepted_count"], 0)
+            self.assertIn(
+                "structural_hypothesis_boundary_kind_mismatch",
+                options["rejected"][0]["issues"],
+            )
+
     def test_spec_hypothesis_brief_rejects_freeform_tasks(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -11838,6 +11880,74 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
+    def test_spec_quality_soft_fallback_blocks_unknown_hypothesis_id(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                manager = _RoleModelManager(
+                    {
+                        "reasoner": ModelResponse(
+                            "",
+                            usage={"reasoning_only_response": True},
+                            reasoning=self._valid_hypothesis_brief(),
+                        ),
+                        "spec_synth": self._valid_hypothesis_spec(
+                            spec_id="unknown-id-soft-fallback",
+                            hypothesis_id="hyp-invented",
+                        ),
+                    }
+                )
+                agent = MicroAgent(
+                    {
+                        "models": {
+                            "reasoner": "reasoner-model",
+                            "spec_synth": "spec-model",
+                            "default": "spec-model",
+                        },
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "spec_mode": True,
+                            "run_spec_enabled": True,
+                            "run_spec_after_read": True,
+                            "run_spec_path": ".local_micro_agent/run_spec.json",
+                            "spec_two_call_synthesis": True,
+                            "spec_thinking_brief_enabled": True,
+                            "spec_hypothesis_brief_enabled": True,
+                            "spec_finalize_model_role": "spec_synth",
+                            "spec_quality_gate": True,
+                            "spec_quality_rewrite_attempts": 0,
+                            "spec_gate_soft_fallback": True,
+                            "spec_grounding_gate": True,
+                            "writable_files": ["target.py"],
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent._maybe_refresh_run_spec(force=True)
+
+                self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
+                report = json.loads(
+                    (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
+                )
+                self.assertIn("hypothesis_id_unknown", report["issue_codes"])
+                progress_path = repo / ".local_micro_agent" / "spec_progress.jsonl"
+                progress = progress_path.read_text() if progress_path.exists() else ""
+                self.assertNotIn("quality_soft_fallback", progress)
+                self.assertIn(
+                    "soft fallback blocked",
+                    "\n".join(agent.state.notes),
+                )
+
+        asyncio.run(run_case())
+
     def test_spec_synth_call_budget_bounds_quality_rewrites(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -12244,6 +12354,28 @@ END_HYPOTHESIS_OPTION"""
 
             self.assertIn("describe the smaller guarded probe itself", feedback)
             self.assertIn("not only how to revert", feedback)
+
+    def test_spec_quality_feedback_explains_hypothesis_id_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "hypothesis_id_unknown",
+                        "task_id": "task-001",
+                        "detail": "unknown hypothesis id hyp-invented",
+                    }
+                ],
+            }
+
+            feedback = agent._spec_quality_feedback_context(report)
+
+            self.assertIn("Copy one accepted hypothesis_id exactly", feedback)
+            self.assertIn("do not invent", feedback)
 
     def test_shrink_probe_plan_rejects_rollback_only_single_phrases(self) -> None:
         self.assertFalse(MicroAgent._plan_mentions_shrink_or_probe("Revert the single patch."))

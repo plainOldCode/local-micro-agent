@@ -346,6 +346,12 @@ class TodoLifecycleMixin:
             return False
         if not isinstance(spec.get("task_graph"), list) or not spec.get("task_graph"):
             return False
+        if self._spec_quality_report_has_hard_hypothesis_issues(quality_report):
+            self.state.notes.append(
+                "Run spec soft fallback blocked: hypothesis provenance issues "
+                "must be fixed before CODE"
+            )
+            return False
         spec["quality_gate_advisory"] = {
             "status": "soft_fallback",
             "reason": "quality_gate_exhausted_before_code",
@@ -1150,6 +1156,19 @@ class TodoLifecycleMixin:
         boundary_kind = str(boundary.get("kind") or "").strip().lower()
         if not boundary_kind:
             issues.append("missing_change_boundary_kind")
+        structural_kinds = {
+            "structural",
+            "structural_probe",
+            "structural_expand",
+            "dataflow",
+            "schema",
+        }
+        if (
+            boundary_kind
+            and boundary_kind not in structural_kinds
+            and self._spec_hypothesis_option_has_obvious_structural_action(option)
+        ):
+            issues.append("structural_hypothesis_boundary_kind_mismatch")
         if not str(boundary.get("minimality_claim") or "").strip():
             issues.append("missing_minimality_claim")
         evidence = option.get("causal_evidence")
@@ -1193,6 +1212,43 @@ class TodoLifecycleMixin:
             ):
                 issues.append("missing_why_not_smaller")
         return list(dict.fromkeys(issues))
+
+    @staticmethod
+    def _spec_hypothesis_option_has_obvious_structural_action(
+        option: dict[str, Any],
+    ) -> bool:
+        boundary = option.get("change_boundary")
+        boundary = boundary if isinstance(boundary, dict) else {}
+        expected = option.get("expected_signal")
+        expected = expected if isinstance(expected, dict) else {}
+        fallback = option.get("fallback")
+        fallback = fallback if isinstance(fallback, dict) else {}
+        text = " ".join(
+            str(value or "")
+            for value in (
+                option.get("hypothesis"),
+                boundary.get("minimality_claim"),
+                expected.get("success_condition"),
+                option.get("why_not_smaller"),
+                fallback.get("on_failure"),
+            )
+        ).lower()
+        patterns = (
+            r"\b(rewrite|replace|refactor|restructure)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
+            r"\b(entire|whole|all)\b.*\b(function|class|method|module|loop|pipeline|algorithm|hot path)\b",
+            r"\breorder(?:ing)?\b",
+            r"\breschedul(?:e|ing)\b",
+            r"\bparallel(?:ize|ise|ization|isation)\b",
+            r"\bconcurrent\b",
+            r"\b(batch|bundle|group|merge|split|pack)\b.*\b(operation|instruction|task|item|loop|work|state|request|event|slot|cycle|bundle)s?\b",
+            r"\b(schedule|reschedule)\b.*\b(operation|instruction|task|work|event|side[- ]?effect|slot|cycle)s?\b",
+            r"\bstate\s+(lifecycle|machine|transition|ordering)\b",
+            r"\bmove\b.*\b(state|effect|write|read|operation|logic)\b",
+            r"\b(change|alter|replace)\b.*\b(data\s*flow|control\s*flow|loop|order|ordering|state)\b",
+            r"\b(change|alter|replace|update|remove|add)\b.*\b(signature|call\s*site|callsite|api|argument|parameter|schema|contract)\b",
+            r"\b(signature|call\s*site|callsite|api|argument|parameter|schema|contract)\b.*\b(change|alter|replace|update|remove|add)\b",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
 
     def _accepted_spec_hypothesis_options(self) -> dict[str, dict[str, Any]]:
         if not self._spec_hypothesis_brief_enabled():
@@ -1668,6 +1724,21 @@ class TodoLifecycleMixin:
             if isinstance(issue, dict) and str(issue.get("code") or "").strip():
                 codes.append(str(issue["code"]))
         return list(dict.fromkeys(codes))
+
+    @classmethod
+    def _spec_quality_report_has_hard_hypothesis_issues(
+        cls,
+        report: dict[str, Any],
+    ) -> bool:
+        hard_codes = {
+            "hypothesis_option_missing",
+            "hypothesis_id_missing",
+            "hypothesis_id_unknown",
+            "hypothesis_boundary_mismatch",
+            "hypothesis_boundary_structural_task_mismatch",
+            "hypothesis_boundary_shrink_plan_missing",
+        }
+        return any(code in hard_codes for code in cls._spec_quality_issue_codes(report))
 
     def _spec_quality_report(
         self,
@@ -2280,6 +2351,13 @@ class TodoLifecycleMixin:
                 "Free-form prose ideas and rejected options are not runnable; the "
                 "finalizer must not create implementation tasks until an option is "
                 "accepted."
+            )
+        if "hypothesis_id_unknown" in issue_codes:
+            guidance.append(
+                "The finalizer used a hypothesis_id that was not accepted by the "
+                "controller. Copy one accepted hypothesis_id exactly from the "
+                "Accepted SPEC hypothesis options section; do not invent, rename, "
+                "or synthesize hypothesis ids."
             )
         if any(
             code.startswith("design_contract_rollback_or_shrink_plan")
