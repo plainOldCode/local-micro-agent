@@ -9118,7 +9118,18 @@ class TodoLifecycleMixin:
             return ""
         if self._todo_attempt_budget_exhausted(active_todo):
             return ""
-        return json.dumps(active_todo, ensure_ascii=False, indent=2)
+        payload = json.dumps(active_todo, ensure_ascii=False, indent=2)
+        if active_todo.get("tactic_stage") == "structural_probe":
+            return (
+                "Structural_probe CODE scope guidance:\n"
+                "- Do not target or replace a whole def, async def, or class block.\n"
+                "- Choose one smaller internal block, branch, or statement group inside "
+                "the active target_region.\n"
+                "- Keep the previous path as fallback, or add one guarded reversible "
+                "behavior only.\n\n"
+                f"{payload}"
+            )
+        return payload
 
     def _format_todo_observation_chain(self) -> str:
         if not self.config.get("workflow", {}).get(

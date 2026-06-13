@@ -9388,6 +9388,40 @@ Background / non-constraints
             self.assertEqual(agent._active_todo_id(), "task-001")
             self.assertIn("guard parser branch", agent._format_active_todo())
 
+    def test_structural_probe_active_todo_warns_against_whole_block_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_design_contract_gate": True,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["active_todo"] = {
+                "todo_id": "task-structural-001",
+                "spec_task_id": "task-structural-001",
+                "status": "active",
+                "strategy_axis": "structural_refactor",
+                "tactic_stage": "structural_probe",
+                "title": "probe KernelBuilder.build bundle packing",
+                "target_symbols": ["KernelBuilder.build"],
+                "target_regions": ["perf_takehome.py::KernelBuilder.build"],
+                "source": "spec_scheduler",
+            }
+
+            formatted = agent._format_active_todo()
+
+            self.assertIn("Structural_probe CODE scope guidance", formatted)
+            self.assertIn("Do not target or replace a whole def", formatted)
+            self.assertIn("smaller internal block", formatted)
+            self.assertIn("task-structural-001", formatted)
+
     def test_active_todo_change_scope_rejects_wrong_symbol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
