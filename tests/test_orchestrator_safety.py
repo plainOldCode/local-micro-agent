@@ -11174,6 +11174,238 @@ END_HYPOTHESIS_OPTION"""
             self.assertEqual(options["accepted_count"], 0)
             self.assertIn("missing_why_not_smaller", options["rejected"][0]["issues"])
 
+    def test_spec_quality_rejects_structural_hypothesis_as_local_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def build(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "spec_hypothesis_brief_enabled": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-broad-pack",
+                        "change_boundary": {
+                            "regions": ["target.py::build"],
+                            "kind": "structural_probe",
+                        },
+                    }
+                ]
+            }
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-hypothesis-stage-mismatch",
+                    "invariants": ["build return contract stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "hypothesis_id": "hyp-broad-pack",
+                            "title": "pack build work",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["build"],
+                            "target_regions": ["target.py::build"],
+                            "preserved_invariants": ["return value remains unchanged"],
+                            "edit_scope": "Pack independent operations in build.",
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "Pack independent operations",
+                                "explanation": "incorrectly labeled local",
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The original return path is preserved.",
+                            "fallback_plan": "Revert the patch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "hypothesis_boundary_structural_task_mismatch",
+                report["issue_codes"],
+            )
+
+    def test_spec_quality_allows_explicit_single_region_shrink_from_structural_hypothesis(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def build(value):\n    return value\n\n"
+                "def helper(value):\n    return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "spec_hypothesis_brief_enabled": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-wide-pack",
+                        "change_boundary": {
+                            "regions": ["target.py::build", "target.py::helper"],
+                            "kind": "structural_probe",
+                        },
+                    }
+                ]
+            }
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-hypothesis-local-shrink",
+                    "invariants": ["build return contract stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "hypothesis_id": "hyp-wide-pack",
+                            "title": "single guarded build probe",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["build"],
+                            "target_regions": ["target.py::build"],
+                            "preserved_invariants": ["return value remains unchanged"],
+                            "edit_scope": (
+                                "Add one single guarded branch inside build as the "
+                                "smaller probe."
+                            ),
+                            "risk_level": "local",
+                            "tactic_stage": "local_edit",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "one single guarded branch",
+                                "explanation": "explicit narrowed local probe",
+                            },
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The original return path is preserved.",
+                            "fallback_plan": "Keep the old path as fallback.",
+                            "rollback_or_shrink_plan": (
+                                "Shrink to this single guarded branch; revert if it fails."
+                            ),
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            self.assertEqual(report["status"], "pass")
+
+    def test_spec_quality_rejects_multi_region_hypothesis_without_shrink_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text(
+                "def build(value):\n    return value\n\n"
+                "def helper(value):\n    return value\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_quality_gate": True,
+                        "spec_hypothesis_brief_enabled": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {
+                        "hypothesis_id": "hyp-wide-pack",
+                        "change_boundary": {
+                            "regions": ["target.py::build", "target.py::helper"],
+                            "kind": "structural_probe",
+                        },
+                    }
+                ]
+            }
+            spec = agent._normalize_run_spec(
+                {
+                    "version": 2,
+                    "spec_id": "quality-hypothesis-shrink-missing",
+                    "invariants": ["build return contract stays unchanged"],
+                    "task_graph": [
+                        {
+                            "task_id": "task-001",
+                            "hypothesis_id": "hyp-wide-pack",
+                            "title": "build probe",
+                            "strategy_axis": "general_edit",
+                            "expected_signal": "pytest stays green",
+                            "deliverables": ["target.py"],
+                            "target_symbols": ["build"],
+                            "target_regions": ["target.py::build"],
+                            "preserved_invariants": ["return value remains unchanged"],
+                            "edit_scope": "Change build implementation.",
+                            "risk_level": "structural",
+                            "tactic_stage": "structural_probe",
+                            "risk_evidence": {
+                                "field": "edit_scope",
+                                "quote": "Change build implementation",
+                                "explanation": "structural implementation change",
+                            },
+                            "probe_plan": "Change build implementation.",
+                            "invariant_evidence": ["The old return behavior is preserved."],
+                            "validator": {
+                                "kind": "command",
+                                "failure_condition": "pytest fails",
+                            },
+                            "correctness_rationale": "The original return path is preserved.",
+                            "fallback_plan": "Revert the patch.",
+                            "rollback_or_shrink_plan": "Revert the patch.",
+                            "acceptance": {"kind": "command", "commands": ["python -m pytest"]},
+                        }
+                    ],
+                }
+            )
+
+            report = agent._spec_quality_report(spec)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "hypothesis_boundary_shrink_plan_missing",
+                report["issue_codes"],
+            )
+
     def test_spec_hypothesis_brief_rejects_unresolved_symbol_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

@@ -1814,7 +1814,95 @@ class TodoLifecycleMixin:
                         ),
                     )
                 )
+            boundary_kind = str(boundary.get("kind") or "").strip().lower()
+            task_risk = str(task.get("risk_level") or "").strip().lower()
+            task_stage = str(task.get("tactic_stage") or "").strip().lower()
+            structural_boundary = boundary_kind in {
+                "structural",
+                "structural_probe",
+                "structural_expand",
+                "dataflow",
+                "schema",
+                "unknown",
+                "other",
+            }
+            describes_shrink = self._spec_task_describes_hypothesis_shrink(task)
+            if (
+                structural_boundary
+                and (task_risk != "structural" or task_stage != "structural_probe")
+                and not (
+                    task_risk == "local"
+                    and task_stage == "local_edit"
+                    and len(task_regions) == 1
+                    and task_regions
+                    and task_regions[0] in option_regions
+                    and describes_shrink
+                )
+            ):
+                issues.append(
+                    self._spec_quality_issue(
+                        "hypothesis_boundary_structural_task_mismatch",
+                        task_id,
+                        (
+                            f"hypothesis {hypothesis_id} boundary kind={boundary_kind} "
+                            f"but task risk_level={task_risk or 'missing'} "
+                            f"tactic_stage={task_stage or 'missing'}"
+                        ),
+                        (
+                            "Keep structural hypothesis tasks as "
+                            "risk_level=structural/tactic_stage=structural_probe "
+                            "with a probe contract, or generate a new accepted "
+                            "smaller local hypothesis option before emitting a "
+                            "local task."
+                        ),
+                    )
+                )
+            if (
+                len(option_regions) > 1
+                and task_regions
+                and set(task_regions).issubset(option_regions)
+                and set(task_regions) != option_regions
+                and not describes_shrink
+            ):
+                issues.append(
+                    self._spec_quality_issue(
+                        "hypothesis_boundary_shrink_plan_missing",
+                        task_id,
+                        (
+                            f"task narrows hypothesis {hypothesis_id} from "
+                            f"{sorted(option_regions)} to {task_regions} without "
+                            "describing the smaller guarded probe"
+                        ),
+                        (
+                            "When narrowing a multi-region hypothesis into one "
+                            "runnable task, describe the smaller guarded probe in "
+                            "probe_plan or rollback_or_shrink_plan. Revert-only "
+                            "text is not enough."
+                        ),
+                    )
+                )
         return issues
+
+    @classmethod
+    def _spec_task_describes_hypothesis_shrink(cls, task: dict[str, Any]) -> bool:
+        text = " ".join(
+            str(task.get(key) or "")
+            for key in (
+                "edit_scope",
+                "probe_plan",
+                "fallback_plan",
+                "rollback_or_shrink_plan",
+            )
+        )
+        if cls._plan_mentions_shrink_or_probe(text):
+            return True
+        return bool(
+            re.search(
+                r"\b(smaller|narrow(?:er)?|shrink|reduc(?:e|ed)|single)\b.*"
+                r"\b(region|branch|path|probe|guard(?:ed)?)\b",
+                text.lower(),
+            )
+        )
 
     def _spec_task_quality_issues(
         self, spec: dict[str, Any], task: dict[str, Any]
