@@ -5015,6 +5015,12 @@ class TodoLifecycleMixin:
     def _spec_design_rewrite_focus(
         self, task: dict[str, Any], issues: list[str], failure_summary: str = ""
     ) -> str:
+        last_observation = (
+            task.get("last_observation") if isinstance(task.get("last_observation"), dict) else {}
+        )
+        drift_related = str(last_observation.get("failure_class") or "") == "active_task_drift" or any(
+            "active_task_drift" in str(issue) for issue in issues
+        )
         compact_task = {
             "task_id": task.get("task_id"),
             "title": task.get("title"),
@@ -5029,7 +5035,7 @@ class TodoLifecycleMixin:
             "invariant_evidence": task.get("invariant_evidence"),
             "rollback_or_shrink_plan": task.get("rollback_or_shrink_plan"),
             "issues": issues,
-            "last_observation": task.get("last_observation"),
+            "last_observation": last_observation or task.get("last_observation"),
         }
         parts = [
             "The previous run-local spec was rejected before CODE because one task "
@@ -5058,6 +5064,41 @@ class TodoLifecycleMixin:
             "Rejected task:",
             json.dumps(compact_task, ensure_ascii=False, indent=2),
         ]
+        if drift_related:
+            drift_context = {
+                "failure_class": last_observation.get("failure_class"),
+                "failure_origin": last_observation.get("failure_origin"),
+                "candidate_status": last_observation.get("candidate_status")
+                or last_observation.get("status"),
+                "candidate_id": last_observation.get("candidate_id"),
+                "declared_regions": last_observation.get("drift_declared_regions"),
+                "attempted_regions": last_observation.get("drift_attempted_regions"),
+                "region_pairs": last_observation.get("drift_region_pairs"),
+                "cooldown_key": last_observation.get("drift_cooldown_key"),
+                "semantic_family_key": last_observation.get("semantic_family_key"),
+                "semantic_family_terms": last_observation.get("semantic_family_terms"),
+            }
+            parts.extend(
+                [
+                    "Active-task drift rewrite contract:",
+                    "CODE could not execute the previous active task contract. Do not "
+                    "ask CODE to repair the same candidate shape. Generate a smaller "
+                    "executable contract, choose a bounded context/read task, or retire "
+                    "this direction.",
+                    "Do not regenerate the same target_regions + tactic_stage + "
+                    "validator shape unless the new probe_diff_contract is materially "
+                    "narrower and directly addresses the drift telemetry below.",
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in drift_context.items()
+                            if value not in (None, "", [], {})
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                ]
+            )
         if failure_summary.strip():
             parts.extend(["Latest failure summary:", failure_summary.strip()])
         return "\n\n".join(parts)
@@ -5084,10 +5125,16 @@ class TodoLifecycleMixin:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if record.get("event") not in {"design_rejected", "failed_design"}:
+            if record.get("event") not in {
+                "design_rejected",
+                "failed_design",
+                "drift_recovery",
+            }:
                 continue
             compact = {
                 "event": record.get("event"),
+                "reason": record.get("reason"),
+                "action": record.get("action"),
                 "spec_id": record.get("spec_id"),
                 "task_id": record.get("task_id"),
                 "title": record.get("task_title"),
@@ -5098,6 +5145,11 @@ class TodoLifecycleMixin:
                 "target_regions": record.get("task_target_regions"),
                 "issues": record.get("issues"),
                 "rewrite_attempt": record.get("rewrite_attempt"),
+                "drift_declared_regions": record.get("drift_declared_regions"),
+                "drift_attempted_regions": record.get("drift_attempted_regions"),
+                "drift_region_pairs": record.get("drift_region_pairs"),
+                "drift_cooldown_key": record.get("drift_cooldown_key"),
+                "drift_saturation": record.get("drift_saturation"),
             }
             records.append(
                 {key: value for key, value in compact.items() if value not in (None, "", [], {})}
@@ -5108,12 +5160,16 @@ class TodoLifecycleMixin:
             return ""
         records.reverse()
         return (
-            "Recent rejected design shapes from this run follow. Treat them as "
-            "negative design memory, not as domain tactics or hidden answers. Do "
-            "not regenerate the same shape unless the new task is materially "
-            "narrower, has a clearer validator/failure condition, and addresses "
-            "the listed issues. If no bounded/verifiable implementation unit can "
-            "be formed, emit a context/read task instead of CODE work.\n"
+            "Recent rejected design shapes and active-task drift recoveries from "
+            "this run follow. Treat them as negative design memory, not as domain "
+            "tactics or hidden answers. Do not regenerate the same shape unless "
+            "the new task is materially narrower, has a clearer validator/failure "
+            "condition, and addresses the listed issues or drift telemetry. If "
+            "CODE could not execute an active task contract, generate a smaller "
+            "executable contract, a bounded context/read task, or retire that "
+            "direction instead of repairing the failed candidate shape. If no "
+            "bounded/verifiable implementation unit can be formed, emit a "
+            "context/read task instead of CODE work.\n"
             + json.dumps(records, ensure_ascii=False, indent=2)
         )
 

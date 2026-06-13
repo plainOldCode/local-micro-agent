@@ -7645,6 +7645,83 @@ Background / non-constraints
             self.assertIn("Do not regenerate the same rejected design shape", focus)
             self.assertIn("materially narrower", focus)
 
+    def test_spec_design_rewrite_focus_marks_active_drift_unexecutable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+
+            focus = agent._spec_design_rewrite_focus(
+                {
+                    "task_id": "task-001",
+                    "title": "Pack structural slots",
+                    "target_regions": ["target.py::Builder.build"],
+                    "tactic_stage": "structural_probe",
+                    "validator": {"kind": "metric"},
+                    "last_observation": {
+                        "failure_class": "active_task_drift",
+                        "failure_origin": "pre_apply_contract",
+                        "candidate_status": "rejected_todo_scope_drift",
+                        "candidate_id": "loop-001-single",
+                        "drift_declared_regions": ["target.py::Builder.build"],
+                        "drift_attempted_regions": ["target.py::Builder.build"],
+                        "drift_cooldown_key": "abc:structural_probe:wide_probe",
+                        "semantic_family_key": "family123",
+                    },
+                },
+                ["repeated active_task_drift"],
+            )
+
+            self.assertIn("CODE could not execute the previous active task contract", focus)
+            self.assertIn("Generate a smaller executable contract", focus)
+            self.assertIn("Do not ask CODE to repair the same candidate shape", focus)
+            self.assertIn("drift_declared_regions", focus)
+            self.assertIn("family123", focus)
+
+    def test_spec_design_failure_memory_includes_drift_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".local_micro_agent"
+            artifact_dir.mkdir()
+            (artifact_dir / "spec_progress.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event": "drift_recovery",
+                        "reason": "repeated_active_task_drift",
+                        "action": "rewrite",
+                        "task_id": "task-001",
+                        "task_title": "Pack structural slots",
+                        "task_tactic_stage": "structural_probe",
+                        "task_target_regions": ["target.py::Builder.build"],
+                        "drift_declared_regions": ["target.py::Builder.build"],
+                        "drift_attempted_regions": ["target.py::Builder.build"],
+                        "drift_cooldown_key": "abc:structural_probe:wide_probe",
+                    }
+                )
+                + "\n"
+            )
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_mode": True,
+                        "spec_progress_path": ".local_micro_agent/spec_progress.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            context = agent._spec_design_failure_memory_context()
+
+            self.assertIn("active-task drift recoveries", context)
+            self.assertIn("CODE could not execute an active task contract", context)
+            self.assertIn("drift_recovery", context)
+            self.assertIn("repeated_active_task_drift", context)
+            self.assertIn("abc:structural_probe:wide_probe", context)
+
     def test_spec_terminal_state_records_lineage_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
