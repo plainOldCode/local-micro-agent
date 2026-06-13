@@ -1,0 +1,379 @@
+{
+  "version": 1,
+  "todos": [
+    {
+      "todo_id": "task-001",
+      "spec_task_id": "task-001",
+      "status": "failed",
+      "strategy_axis": "local_edit",
+      "family_key": "kernel_builder_build",
+      "title": "Probe: Pack consecutive ALU slots in KernelBuilder.build",
+      "context": "CYCLES < 147734",
+      "micro_goal": "Implement the scheduled design contract within this scope: Modify build() to group consecutive 'alu' slots into instruction bundles of size up to SLOT_LIMITS['alu']. All other engine slots remain single-bundle.",
+      "implementation_hint": "design_contract_soft_fallback: this task exhausted design rewrites before any CODE attempt. Execute once under advisory warning; all CODE/apply/test gates still apply.",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "CYCLES < 147734",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Modify build() to group consecutive 'alu' slots into instruction bundles",
+        "explanation": "Changes instruction bundling structure, which directly impacts cycle count and simulator execution path."
+      },
+      "probe_plan": "Implement a simple accumulator loop in build(). When an 'alu' slot is seen, add to a list. When a non-'alu' slot or end of list is reached, emit the list as a bundle if non-empty, then emit the current slot. Print bundle sizes for verification.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "do_kernel_test",
+          "KernelBuilder.__init__"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.__init__",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build_hash",
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_observation"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 25,
+        "max_changed_functions": 1,
+        "observation": "Verify that instruction bundles are correctly formed and that the benchmark still runs and prints CYCLES."
+      },
+      "invariant_evidence": [
+        "Packing ALU slots does not change execution semantics, only reduces instruction fetch overhead by utilizing VLIW parallelism.",
+        "SLOT_LIMITS dict is imported from problem.py and respected.",
+        "Debug/pause instructions retain their original positions relative to other instructions."
+      ],
+      "target_symbols": [
+        "KernelBuilder",
+        "build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "preserved_invariants": [
+        "Instruction ordering and engine sequence are preserved.",
+        "Debug and pause instructions retain exact relative positions.",
+        "SLOT_LIMITS for non-ALU engines are not exceeded."
+      ],
+      "edit_scope": "Modify build() to group consecutive 'alu' slots into instruction bundles of size up to SLOT_LIMITS['alu']. All other engine slots remain single-bundle.",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "Exit non-zero, missing CYCLES line, or CYCLES >= 147734"
+      },
+      "correctness_rationale": "Packing ALU slots does not change execution semantics, only reduces instruction fetch overhead by utilizing VLIW parallelism.",
+      "fallback_plan": "If packing ALU slots violates SLOT_LIMITS or breaks correctness, shrink to a guarded probe that only packs 'alu' slots up to SLOT_LIMITS['alu'], leaving other engines as single-slot bundles. If this also fails, revert completely to the original implementation.",
+      "rollback_or_shrink_plan": "Revert to original build() implementation immediately if CYCLES does not decrease or if assertions fail. Shrink to one guarded branch in the target region; keep the old path as fallback; revert if the guarded probe fails.",
+      "attempts": 1,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T01:25:03+0900",
+      "created_loop": 0,
+      "last_attempt": {
+        "ts": "2026-06-12T01:25:45+0900",
+        "loop": 0,
+        "todo_id": "task-001",
+        "candidate_id": "loop-000-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": 147734,
+        "failed": true,
+        "strategy_axis": "local_edit",
+        "strategy_axes": [
+          "local_edit",
+          "performance"
+        ],
+        "tactic_stage": "structural_probe",
+        "stage_result": "contract_mismatch",
+        "reason": "Probe: Pack consecutive ALU slots in KernelBuilder.build",
+        "spec_task_id": "task-001",
+        "failure_class": "contract_mismatch",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=local_edit; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Run spec quality gate rejected finalizer output: design_contract_edit_scope_too_broad, design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe; Run spec...",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Recover by following the visible active contract, or produce structured evidence for a controller-level relaxation.",
+        "failure_origin": "design_contract",
+        "issue_scope": "design_shape",
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      }
+    },
+    {
+      "todo_id": "task-002",
+      "spec_task_id": "task-002",
+      "status": "validated",
+      "strategy_axis": "local_edit",
+      "family_key": "kernel_builder_build_kernel",
+      "title": "Optimize idx update logic in build_kernel",
+      "context": "CYCLES < 147734",
+      "micro_goal": "Implement the scheduled design contract within this scope: Replace the 5-instruction idx update sequence with a 4-instruction sequence: compute tmp3 = (val%2) + 1, then use mul and add as before.",
+      "implementation_hint": "",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "CYCLES < 147734",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Replace the 5-instruction idx update sequence with a 4-instruction sequence: compute tmp3 = (val%2) + 1, then use mul and add as before.",
+        "explanation": "This is a narrow local edit replacing specific instruction sequences with an equivalent mathematical expression, not changing control flow or data structures."
+      },
+      "probe_plan": "In KernelBuilder.build_kernel, replace the block:\n  body.append((\"alu\", (\"%\", tmp1, tmp_val, two_const)))\n  body.append((\"alu\", (\"==\", tmp1, tmp1, zero_const)))\n  body.append((\"flow\", (\"select\", tmp3, tmp1, one_const, two_const)))\n  body.append((\"alu\", (\"*\", tmp_idx, tmp_idx, two_const)))\n  body.append((\"alu\", (\"+\", tmp_idx, tmp_idx, tmp3)))\nwith:\n  body.append((\"alu\", (\"%\", tmp1, tmp_val, two_const)))\n  body.append((\"alu\", (\"+\", tmp3, tmp1, one_const)))\n  body.append((\"alu\", (\"*\", tmp_idx, tmp_idx, two_const)))\n  body.append((\"alu\", (\"+\", tmp_idx, tmp_idx, tmp3)))",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build_kernel"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "do_kernel_test"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.__init__",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::KernelBuilder.build_hash",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 10,
+        "max_changed_functions": 1,
+        "observation": "Verify that CYCLES decreases and tests pass. The instruction stream must be semantically identical."
+      },
+      "invariant_evidence": [
+        "The mathematical equivalence 2*idx + (1 if val%2==0 else 2) == 2*idx + 1 + (val%2) holds for integers.",
+        "No state is mutated, only registers are updated."
+      ],
+      "target_symbols": [
+        "KernelBuilder",
+        "build_kernel"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "preserved_invariants": [
+        "idx update logic must produce identical results",
+        "debug/pause alignment must be preserved",
+        "all other instructions unchanged"
+      ],
+      "edit_scope": "Replace the 5-instruction idx update sequence with a 4-instruction sequence: compute tmp3 = (val%2) + 1, then use mul and add as before.",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES >= 147734 or exit code != 0 or metric not parseable"
+      },
+      "correctness_rationale": "The transformation replaces 5 instructions with 4 equivalent instructions. The new sequence computes tmp3 = (val%2) + 1, which equals (1 if val%2==0 else 2). This preserves the exact same computation for idx update.",
+      "fallback_plan": "Revert to the original 5-instruction sequence if correctness fails or no improvement is observed.",
+      "rollback_or_shrink_plan": "Remove the new instructions and restore the old ones by reverting the specific lines in build_kernel.",
+      "attempts": 1,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T01:51:06+0900",
+      "created_loop": 17,
+      "last_attempt": {
+        "ts": "2026-06-12T01:52:24+0900",
+        "loop": 17,
+        "todo_id": "task-002",
+        "candidate_id": "loop-017-single",
+        "status": "improved",
+        "metric": 143638,
+        "failed": false,
+        "strategy_axis": "local_edit",
+        "strategy_axes": [
+          "local_edit",
+          "performance"
+        ],
+        "tactic_stage": "local_edit",
+        "stage_result": "improved",
+        "reason": "Optimize idx update logic in build_kernel",
+        "spec_task_id": "task-002",
+        "failure_class": "improved",
+        "summary": "improved: status=improved; applied=1; metric=143638; axis=local_edit; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-002; Persisted spec grounding facts: /User...",
+        "next_actions": [
+          "Use the structured failure fields before choosing the next edit."
+        ],
+        "recovery_hint": "Persist the validated pattern and explore follow-ups from the measured gain.",
+        "failure_origin": "candidate_validation",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      }
+    },
+    {
+      "todo_id": "task-003",
+      "spec_task_id": "task-003",
+      "status": "failed",
+      "strategy_axis": "local_edit",
+      "family_key": "kernel_builder_build_kernel",
+      "title": "Probe: Optimize build_kernel loop to reduce attribute lookups",
+      "context": "CYCLES < 147734",
+      "micro_goal": "Implement the scheduled design contract within this scope: In KernelBuilder.build_kernel, cache frequently accessed attributes (e.g., self.scratch, self.add) in local variables to reduce attribute lookup overhead.",
+      "implementation_hint": "portfolio_preserved_after_targeted_rewrite: sibling task was kept by the controller because this rewrite targeted a different task. portfolio_preserved_after_targeted_rewrite: sibling task was kept by the controller because this rewrite targeted a different task. portfolio_preserved_after_targeted_rewrite: sibling task was kept by the controller because this rewrite targeted a different task.",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "CYCLES < 147734",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "cache frequently accessed attributes (e.g., self.scratch, self.add) in local variables to reduce attribute lookup overhead",
+        "explanation": "This is a narrow local edit that introduces local variables, not changing the overall control flow or data structure."
+      },
+      "probe_plan": "Add local variable assignments at the start of build_kernel for self.scratch and self.add, and use these local variables in the loop.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build_kernel"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "do_kernel_test"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.__init__",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 20,
+        "max_changed_functions": 1,
+        "observation": "Verify that the benchmark still runs and prints CYCLES."
+      },
+      "invariant_evidence": [
+        "The change only affects how attributes are accessed, not the values or logic."
+      ],
+      "target_symbols": [
+        "KernelBuilder",
+        "build_kernel"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "preserved_invariants": [
+        "Instruction order must be preserved",
+        "Scratch allocation order must be preserved"
+      ],
+      "edit_scope": "In KernelBuilder.build_kernel, cache frequently accessed attributes (e.g., self.scratch, self.add) in local variables to reduce attribute lookup overhead.",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES is not printed or is >= 147734 or exit code is non-zero"
+      },
+      "correctness_rationale": "The change only affects attribute lookup, not the logic or data flow.",
+      "fallback_plan": "If the probe fails, revert the changes to build_kernel.",
+      "rollback_or_shrink_plan": "Revert the changes to KernelBuilder.build_kernel to the original implementation.",
+      "attempts": 1,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T01:34:25+0900",
+      "created_loop": 8,
+      "last_attempt": {
+        "ts": "2026-06-12T01:35:46+0900",
+        "loop": 8,
+        "todo_id": "task-003",
+        "candidate_id": "loop-008-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": 147734,
+        "failed": true,
+        "strategy_axis": "local_edit",
+        "strategy_axes": [
+          "correctness",
+          "local_edit",
+          "performance",
+          "state_management"
+        ],
+        "tactic_stage": "local_edit",
+        "stage_result": "contract_mismatch",
+        "reason": "Probe: Optimize build_kernel loop to reduce attribute lookups",
+        "spec_task_id": "task-003",
+        "failure_class": "contract_mismatch",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=local_edit; local_edit task must emit one change for the active target; Retargeted replacement target to exact current source whitespace in perf_takehome.py; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapsho...",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Recover by following the visible active contract, or produce structured evidence for a controller-level relaxation.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      }
+    }
+  ],
+  "updated_at": "2026-06-12T01:52:24+0900",
+  "active_todo_id": null
+}

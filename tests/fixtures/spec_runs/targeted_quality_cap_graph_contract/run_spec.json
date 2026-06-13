@@ -1,0 +1,424 @@
+{
+  "version": 2,
+  "spec_id": "optimize-kernel-builder-scheduling",
+  "objective": "Reduce CYCLES in perf_takehome.py by optimizing KernelBuilder.build to pack instructions into VLIW slots and reduce loop overhead, while preserving correctness.",
+  "invariants": [
+    "Must preserve exact output of reference_kernel2 for all rounds/batches",
+    "Must not change N_CORES (keep 1)",
+    "Must not modify problem.py or tests/",
+    "Must respect SLOT_LIMITS for all generated instructions",
+    "Must maintain pause/debug alignment with reference_kernel2 yields"
+  ],
+  "known_facts": [
+    "Baseline CYCLES is 147734",
+    "Only perf_takehome.py is writable",
+    "KernelBuilder.build currently creates one instruction bundle per slot, leading to high cycle counts due to lack of parallelism",
+    "SLOT_LIMITS allows up to 12 ALU, 2 LOAD, 2 STORE, 1 FLOW, 64 DEBUG slots per cycle",
+    "The kernel loop processes batch_size items for rounds times",
+    "Each iteration involves: load indices, load values, hash computation (multiple ALU ops), index update logic, store results"
+  ],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "replaces_task_id": "",
+      "title": "Optimize KernelBuilder.build to pack instructions into VLIW slots",
+      "strategy_axis": "vliw_packing",
+      "family_key": "kernel_builder_optimization",
+      "expected_signal": "CYCLES count decreases while maintaining correctness",
+      "status": "deferred_design_invalid",
+      "attempts": 0,
+      "last_observation": "",
+      "decision_hint": "targeted_rewrite_quality_rejected: targeted SPEC rewrite kept failing the quality gate; stop spending SPEC budget on the same rewrite shape and continue with sibling, backtrack, or graph reseed.",
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "edit_scope too broad"
+        ],
+        "rewrite_attempt_key": "task-001",
+        "rewrite_attempts": 1,
+        "rewrite_attempts_max": 2,
+        "checked_at": "2026-06-12T19:29:19+0900",
+        "reason": "quality_gate_rejected",
+        "quality_issue_codes": [
+          "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+          "target_region_count"
+        ],
+        "quality_attempt": 1
+      },
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py",
+        "problem.py"
+      ],
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "preserved_invariants": [
+        "Instruction order within logical groups must be preserved for correctness",
+        "SLOT_LIMITS must not be exceeded",
+        "Debug/pause instructions must remain aligned with reference yields"
+      ],
+      "edit_scope": "Rewrite KernelBuilder.build to accept a list of (engine, slot) tuples and pack them into instruction bundles respecting SLOT_LIMITS",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Rewrite KernelBuilder.build to accept a list of (engine, slot) tuples and pack them into instruction bundles respecting SLOT_LIMITS",
+        "explanation": "This changes the fundamental structure of how instructions are emitted, potentially affecting ordering and slot limits"
+      },
+      "probe_plan": "Implement a simple VLIW packer that groups ALU operations together, LOAD/STORE operations together, and keeps DEBUG/PAUSE in their own bundles. Start with a conservative packing strategy that only packs independent ALU ops.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "Tree",
+          "Input"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::do_kernel_test",
+          "perf_takehome.py::Tests"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "observation": "The new build method must produce instruction bundles that are valid VLIW instructions and result in the same computational output"
+      },
+      "invariant_evidence": [
+        "The reference_kernel2 yields match pause points, so debug/pause alignment is critical",
+        "SLOT_LIMITS are strict constraints that must be respected",
+        "The hash function order matters for correctness"
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES count increases or assertion failures in submission_tests.py"
+      },
+      "correctness_rationale": "By preserving the logical order of operations within each batch item and only reordering independent operations, we maintain computational equivalence. The VLIW packing is transparent to the simulator as long as slot limits are respected.",
+      "fallback_plan": "If VLIW packing causes issues, revert to single-slot-per-instruction but optimize by reducing redundant scratch allocations or pre-computing constants more aggressively.",
+      "rollback_or_shrink_plan": "Shrink to only packing ALU operations within the same logical step, keeping LOAD/STORE separate. If that fails, revert to original behavior with minimal constant optimization.",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0
+    },
+    {
+      "task_id": "task-002",
+      "replaces_task_id": "",
+      "title": "Optimize scratch allocation and constant management in KernelBuilder",
+      "strategy_axis": "scratch_optimization",
+      "family_key": "kernel_builder_optimization",
+      "expected_signal": "Reduced scratch usage and potentially fewer instructions due to better constant reuse",
+      "status": "deferred_design_invalid",
+      "attempts": 0,
+      "last_observation": {
+        "loop": 0,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 2,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Defer this design-invalid task while the controller tries a sibling graph or reseed with a materially narrower replacement.",
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract",
+          "targeted SPEC rewrite collapsed portfolio below 2 runnable tasks"
+        ],
+        "checked_at": "2026-06-12T19:33:30+0900"
+      },
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py",
+        "problem.py"
+      ],
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.alloc_scratch",
+        "perf_takehome.py::KernelBuilder.scratch_const"
+      ],
+      "preserved_invariants": [
+        "Scratch addresses must not collide",
+        "Constant values must be correctly mapped to scratch addresses"
+      ],
+      "edit_scope": "Improve scratch allocation strategy and constant caching to reduce redundant allocations",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "title",
+        "quote": "Optimize scratch allocation and constant management in KernelBuilder",
+        "explanation": "This is a localized optimization to helper methods without changing control flow"
+      },
+      "probe_plan": "Enhance scratch_const to better cache constants and alloc_scratch to reuse addresses when possible.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 30,
+        "max_changed_functions": 2,
+        "observation": "Scratch usage should be more efficient without changing the generated instruction semantics"
+      },
+      "invariant_evidence": [
+        "Scratch space is limited to 1536 words, so efficient allocation is important",
+        "Constant caching prevents redundant load instructions"
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES count increases or assertion failures in submission_tests.py"
+      },
+      "correctness_rationale": "This optimization only affects how scratch space is managed and constants are cached, not the actual computation. As long as addresses don't collide and constants are correctly mapped, correctness is preserved.",
+      "fallback_plan": "If optimization causes issues, revert to original allocation strategy.",
+      "rollback_or_shrink_plan": "Revert scratch_const and alloc_scratch to original implementations if any issues arise.",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0
+    },
+    {
+      "task_id": "task-003",
+      "replaces_task_id": "",
+      "title": "Reduce loop overhead by unrolling or optimizing inner loop structure",
+      "strategy_axis": "loop_optimization",
+      "family_key": "kernel_builder_optimization",
+      "expected_signal": "Reduced CYCLES due to fewer instruction bundles per batch item",
+      "status": "deferred_design_invalid",
+      "attempts": 0,
+      "last_observation": {
+        "loop": 1,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 2,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Defer this design-invalid task while the controller tries a sibling graph or reseed with a materially narrower replacement.",
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract"
+        ],
+        "checked_at": "2026-06-12T19:37:49+0900"
+      },
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py",
+        "problem.py"
+      ],
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "preserved_invariants": [
+        "All batch items must be processed for all rounds",
+        "Index and value updates must match reference implementation"
+      ],
+      "edit_scope": "Optimize the inner loop structure in build_kernel to reduce instruction bundle count per iteration",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Optimize the inner loop structure in build_kernel to reduce instruction bundle count per iteration",
+        "explanation": "This changes the control flow structure of kernel generation, potentially affecting correctness if not carefully implemented"
+      },
+      "probe_plan": "Implement a simple loop unrolling or instruction merging strategy that reduces the number of bundles generated per batch item.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "Tree",
+          "Input"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 50,
+        "max_changed_functions": 1,
+        "observation": "The generated instruction sequence should produce the same results but with fewer bundles"
+      },
+      "invariant_evidence": [
+        "The reference_kernel2 processes each batch item sequentially for each round",
+        "Index and value updates must match exactly"
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES count increases or assertion failures in submission_tests.py"
+      },
+      "correctness_rationale": "By optimizing the loop structure while maintaining the same logical operations, we can reduce overhead without changing computational results.",
+      "fallback_plan": "If loop optimization causes issues, revert to original loop structure but keep VLIW packing from task-001.",
+      "rollback_or_shrink_plan": "Shrink to only optimizing constant loading and scratch allocation, reverting any loop structure changes if they cause issues.",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0
+    }
+  ],
+  "decision_rules": [
+    "If CYCLES increases, revert the most recent structural change first",
+    "If submission_tests.py fails, immediately rollback to the last known correct state",
+    "Prioritize VLIW packing (task-001) as it has the highest potential impact",
+    "If task-001 fails, try task-002 (scratch optimization) as it's less risky",
+    "Never modify problem.py or tests/ files under any circumstances"
+  ],
+  "updated_at": "2026-06-12T19:53:46+0900",
+  "progress": {
+    "total": 3,
+    "closed": 0,
+    "deferred": 3,
+    "failed": 0
+  },
+  "search": {
+    "graph_id": "graph-0003",
+    "created_loop": 0,
+    "created_at": "2026-06-12T19:24:06+0900",
+    "origin": "spec_synth",
+    "last_seen_loop": 2,
+    "spec_synth_calls_used_at_selection": 3,
+    "spec_synth_calls_used": 19,
+    "reseed_attempts": 2,
+    "reseed_attempts_max": 2,
+    "cooldown_keys": [
+      "4a609a5f:structural_probe:design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+      "438b9d22:local_edit:04dd4c2d3bda958f",
+      "438b9d22:local_edit:portfolio_collapsed_below_min_runnable",
+      "ffafc8c9:structural_probe:5012c131592b2e2e",
+      "ffafc8c9:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta"
+    ]
+  },
+  "last_stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted"
+}

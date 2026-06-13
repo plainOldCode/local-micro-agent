@@ -1,0 +1,374 @@
+{
+  "ts": "2026-06-12T01:52:24+0900",
+  "state": "failed",
+  "stop_reason": "spec_design_contract_incomplete",
+  "code_test_loop_count": 18,
+  "fsm_step_count": 73,
+  "max_code_test_loops": 100,
+  "zero_code_attempt": false,
+  "spec_synth_call_count": 20,
+  "spec_synth_call_budget": 24,
+  "spec_synth_budget_exhausted": false,
+  "spec_synth_model_profile": {
+    "model_call_count": 20,
+    "elapsed_ms": 1493138.5,
+    "call_site_counts": {
+      "run_spec": 3,
+      "spec_idea_rewrite": 6,
+      "spec_synth": 11
+    }
+  },
+  "spec_id": "perf-takehome-idx-opt-v2",
+  "active_task_id": "task-002",
+  "progress": {
+    "total": 3,
+    "closed": 1,
+    "deferred": 0,
+    "failed": 2
+  },
+  "pending_spec_rewrite_reason": null,
+  "tasks": [
+    {
+      "task_id": "task-001",
+      "status": "failed_design",
+      "title": "Probe: Pack consecutive ALU slots in KernelBuilder.build",
+      "attempts": 3,
+      "attempts_used": 3,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "target_symbols": [
+        "KernelBuilder",
+        "build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "do_kernel_test",
+          "KernelBuilder.__init__"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.__init__",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build_hash",
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_observation"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 25,
+        "max_changed_functions": 1,
+        "observation": "Verify that instruction bundles are correctly formed and that the benchmark still runs and prints CYCLES."
+      },
+      "last_observation": {
+        "loop": 2,
+        "failed": true,
+        "budget_counted": true,
+        "summary": "Metric output was not parseable.",
+        "requires_improvement": true,
+        "failure_class": "invariant_broken",
+        "stage_result": "probe_needs_guard_or_scope",
+        "recovery_hint": "Recover by naming the broken invariant and making the next structural probe behavior-preserving by default.",
+        "failure_origin": "candidate_validation",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      },
+      "design_contract": {
+        "status": "failed_design",
+        "issues": [
+          "edit_scope too broad"
+        ],
+        "rewrite_attempt_key": "task-001",
+        "rewrite_attempts": 3,
+        "rewrite_attempts_max": 2,
+        "checked_at": "2026-06-12T01:39:11+0900"
+      },
+      "decision_hint": "design_contract_exhausted: this task could not be rewritten into a bounded executable unit. Do not schedule it again unless a future SPEC rewrite supplies a materially narrower target, invariant, validator, and risk contract."
+    },
+    {
+      "task_id": "task-002",
+      "status": "closed",
+      "title": "Optimize idx update logic in build_kernel",
+      "attempts": 1,
+      "attempts_used": 1,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "target_symbols": [
+        "KernelBuilder",
+        "build_kernel"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build_kernel"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "do_kernel_test"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.__init__",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::KernelBuilder.build_hash",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 10,
+        "max_changed_functions": 1,
+        "observation": "Verify that CYCLES decreases and tests pass. The instruction stream must be semantically identical."
+      },
+      "last_observation": {
+        "loop": 17,
+        "failed": false,
+        "budget_counted": true,
+        "summary": "Metric candidate=143638 baseline=147734 improved=True.",
+        "requires_improvement": true,
+        "metric": 143638,
+        "baseline": 147734,
+        "improved": true,
+        "failure_class": "improved",
+        "stage_result": "improved",
+        "recovery_hint": "Persist the validated pattern and explore follow-ups from the measured gain.",
+        "failure_origin": "candidate_validation",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      }
+    },
+    {
+      "task_id": "task-003",
+      "status": "failed_design",
+      "title": "Probe: Optimize build_kernel loop to reduce attribute lookups",
+      "attempts": 3,
+      "attempts_used": 3,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "target_symbols": [
+        "KernelBuilder",
+        "build_kernel"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder",
+          "build_kernel"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "do_kernel_test"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.__init__",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 20,
+        "max_changed_functions": 1,
+        "observation": "Verify that the benchmark still runs and prints CYCLES."
+      },
+      "last_observation": {
+        "loop": 10,
+        "failed": true,
+        "budget_counted": true,
+        "summary": "Metric output was not parseable.",
+        "requires_improvement": true,
+        "failure_class": "correctness_failure",
+        "stage_result": "correctness_failure",
+        "recovery_hint": "Recover from the concrete failing assertion/command before optimizing further.",
+        "failure_origin": "candidate_validation",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      },
+      "design_contract": {
+        "status": "failed_design",
+        "issues": [
+          "targeted SPEC rewrite produced no schedulable task"
+        ],
+        "checked_at": "2026-06-12T01:39:11+0900"
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Keep sibling tasks and retry only with a materially narrower replacement."
+    }
+  ],
+  "spec_progress_counts": {
+    "quality_rejected": 10,
+    "quality_soft_fallback": 3,
+    "design_rejected": 4,
+    "design_soft_fallback": 2,
+    "scheduled": 8,
+    "retry": 10,
+    "deferred": 2,
+    "needs_design": 4,
+    "rewrite_merged": 3,
+    "graph_rewrite_rejected": 1,
+    "failed_design": 1,
+    "failed": 1,
+    "portfolio_reopened": 1,
+    "closed": 1,
+    "blocked": 1
+  },
+  "candidate_status_counts": {
+    "rejected_todo_scope_drift": 4,
+    "rejected": 13,
+    "improved": 1
+  },
+  "candidate_failure_class_counts": {
+    "contract_mismatch": 4,
+    "invariant_broken": 2,
+    "correctness_failure": 10,
+    "no_improvement": 1,
+    "improved": 1
+  },
+  "last_spec_progress_event": {
+    "active_task_id": "task-002",
+    "blocked_tasks": [],
+    "design_failed_tasks": [
+      "task-001",
+      "task-003"
+    ],
+    "event": "blocked",
+    "failed_prerequisites": [],
+    "fsm_step": 73,
+    "loop": 18,
+    "progress": {
+      "closed": 1,
+      "deferred": 0,
+      "failed": 2,
+      "total": 3
+    },
+    "remaining_loops": 82,
+    "runnable_tasks_at_exit": 0,
+    "spec_id": "perf-takehome-idx-opt-v2",
+    "state": "schedule",
+    "stop_reason": "spec_design_contract_incomplete",
+    "ts": "2026-06-12T01:52:24+0900"
+  },
+  "last_candidate_event": {
+    "applied": 1,
+    "candidate_id": "loop-017-single",
+    "changes": [
+      {
+        "line_range": {
+          "end_line": 158,
+          "start_line": 154
+        },
+        "mode": "replacement",
+        "path": "perf_takehome.py",
+        "reason": "Task task-002: Replace the 5-instruction idx update sequence with a 4-instruction sequence. The original logic `2*idx + (1 if val%2==0 else 2)` is mathematically equivalent to `2*idx + 1 + (val%2)`. This eliminates the `==` comparison and `select` branch, reducing instruction count and removing a conditional branch, which should reduce CYCLES.",
+        "target_region": "perf_takehome.py::KernelBuilder.build_kernel"
+      }
+    ],
+    "failed": false,
+    "failure_class": "improved",
+    "failure_origin": "candidate_validation",
+    "family_aliases": [],
+    "fingerprint": "d743079b843a5e0f",
+    "issue_scope": "candidate_delta",
+    "last_correct_patch_path": ".local_micro_agent/last_correct.patch",
+    "last_correct_state_path": ".local_micro_agent/last_correct_state.json",
+    "loop": 17,
+    "memory_use": "avoid_shape",
+    "metric": 143638,
+    "next_actions": [
+      "Use the structured failure fields before choosing the next edit."
+    ],
+    "reason": "Optimize idx update logic in build_kernel",
+    "recovery_hint": "Persist the validated pattern and explore follow-ups from the measured gain.",
+    "region_keys": [
+      "perf_takehome.py::build_kernel::local_edit",
+      "perf_takehome.py::build_kernel::performance"
+    ],
+    "repair_task_eligible": false,
+    "repo_valid_after_restore": true,
+    "spec_task_id": "task-002",
+    "stage_result": "improved",
+    "status": "improved",
+    "strategy_axes": [
+      "local_edit",
+      "performance"
+    ],
+    "strategy_axis": "local_edit",
+    "summary": "improved: status=improved; applied=1; metric=143638; axis=local_edit; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Metric not found with regex: CYCLES:\\s*(\\d+); Restored writable files after rejected candidate; Restored spec task boundary snapshot: task-002; Persisted spec grounding facts: /User...",
+    "tactic_stage": "local_edit",
+    "todo_id": "task-002",
+    "ts": "2026-06-12T01:52:24+0900"
+  }
+}

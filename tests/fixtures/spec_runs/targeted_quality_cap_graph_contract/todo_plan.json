@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "todos": [
+    {
+      "todo_id": "task-002",
+      "spec_task_id": "task-002",
+      "status": "superseded",
+      "strategy_axis": "scratch_optimization",
+      "family_key": "kernel_builder_optimization",
+      "title": "Optimize scratch allocation and constant management in KernelBuilder",
+      "context": "Reduced scratch usage and potentially fewer instructions due to better constant reuse",
+      "micro_goal": "Implement the scheduled design contract within this scope: Improve scratch allocation strategy and constant caching to reduce redundant allocations",
+      "implementation_hint": "",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "Reduced scratch usage and potentially fewer instructions due to better constant reuse",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "title",
+        "quote": "Optimize scratch allocation and constant management in KernelBuilder",
+        "explanation": "This is a localized optimization to helper methods without changing control flow"
+      },
+      "probe_plan": "Enhance scratch_const to better cache constants and alloc_scratch to reuse addresses when possible.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 30,
+        "max_changed_functions": 2,
+        "observation": "Scratch usage should be more efficient without changing the generated instruction semantics"
+      },
+      "invariant_evidence": [
+        "Scratch space is limited to 1536 words, so efficient allocation is important",
+        "Constant caching prevents redundant load instructions"
+      ],
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.alloc_scratch",
+        "perf_takehome.py::KernelBuilder.scratch_const"
+      ],
+      "preserved_invariants": [
+        "Scratch addresses must not collide",
+        "Constant values must be correctly mapped to scratch addresses"
+      ],
+      "edit_scope": "Improve scratch allocation strategy and constant caching to reduce redundant allocations",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES count increases or assertion failures in submission_tests.py"
+      },
+      "correctness_rationale": "This optimization only affects how scratch space is managed and constants are cached, not the actual computation. As long as addresses don't collide and constants are correctly mapped, correctness is preserved.",
+      "fallback_plan": "If optimization causes issues, revert to original allocation strategy.",
+      "rollback_or_shrink_plan": "Revert scratch_const and alloc_scratch to original implementations if any issues arise.",
+      "attempts": 0,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T19:29:19+0900",
+      "created_loop": 0,
+      "last_non_budget_attempt": {
+        "ts": "2026-06-12T19:30:03+0900",
+        "loop": 0,
+        "todo_id": "task-002",
+        "candidate_id": "loop-000-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": 147734,
+        "failed": true,
+        "strategy_axis": "scratch_optimization",
+        "strategy_axes": [
+          "performance",
+          "scratch_optimization",
+          "state_management"
+        ],
+        "tactic_stage": "local_edit",
+        "stage_result": "contract_mismatch",
+        "reason": "Optimize scratch allocation and constant management in KernelBuilder",
+        "spec_task_id": "task-002",
+        "budget_counted": false,
+        "failure_class": "active_task_drift",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=scratch_optimization; local_edit task must emit one change for the active target; Run spec quality gate rejected finalizer output: vague_edit_scope, design_contract_edit_scope_too_broad, design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe, target_region_count; Run spec JSO...",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "fingerprint": "04dd4c2d3bda958f",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "changes": [
+          {
+            "path": "perf_takehome.py",
+            "reason": "task-002: Optimize scratch allocation and constant management. The current scratch_const method is already quite efficient, but we can add a fast path that avoids redundant lookups or allocations if we track used constants more aggressively. However, looking at the code, the main inefficiency is actually in the loop where i_const is allocated every iteration. We can optimize by pre-allocating constants for the bat...",
+            "mode": "replacement",
+            "target_region": "perf_takehome.py::KernelBuilder.scratch_const",
+            "line_range": {
+              "start_line": 70,
+              "end_line": 75
+            }
+          },
+          {
+            "path": "perf_takehome.py",
+            "reason": "task-002: Optimize scratch allocation by pre-allocating constants for batch indices. This avoids repeated calls to scratch_const for the same index i across different rounds, reducing scratch space usage and potentially improving cache locality.",
+            "mode": "replacement",
+            "target_region": "perf_takehome.py::KernelBuilder.build_kernel",
+            "line_range": {
+              "start_line": 134,
+              "end_line": 136
+            }
+          }
+        ],
+        "drift_declared_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "drift_declared_symbols": [
+          "KernelBuilder"
+        ],
+        "drift_attempted_regions": [
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "drift_region_pairs": [
+          {
+            "declared": "perf_takehome.py::KernelBuilder.alloc_scratch",
+            "attempted": "perf_takehome.py::KernelBuilder.scratch_const"
+          },
+          {
+            "declared": "perf_takehome.py::KernelBuilder.alloc_scratch",
+            "attempted": "perf_takehome.py::KernelBuilder.build_kernel"
+          },
+          {
+            "declared": "perf_takehome.py::KernelBuilder.scratch_const",
+            "attempted": "perf_takehome.py::KernelBuilder.scratch_const"
+          },
+          {
+            "declared": "perf_takehome.py::KernelBuilder.scratch_const",
+            "attempted": "perf_takehome.py::KernelBuilder.build_kernel"
+          }
+        ],
+        "drift_target_region_hash": "438b9d22",
+        "drift_cooldown_key": "438b9d22:local_edit:04dd4c2d3bda958f"
+      },
+      "non_budget_attempts": 1,
+      "superseded_at": "2026-06-12T19:33:30+0900"
+    },
+    {
+      "todo_id": "task-003",
+      "spec_task_id": "task-003",
+      "status": "active",
+      "strategy_axis": "loop_optimization",
+      "family_key": "kernel_builder_optimization",
+      "title": "Reduce loop overhead by unrolling or optimizing inner loop structure",
+      "context": "Reduced CYCLES due to fewer instruction bundles per batch item",
+      "micro_goal": "Implement the scheduled design contract within this scope: Optimize the inner loop structure in build_kernel to reduce instruction bundle count per iteration",
+      "implementation_hint": "",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "Reduced CYCLES due to fewer instruction bundles per batch item",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Optimize the inner loop structure in build_kernel to reduce instruction bundle count per iteration",
+        "explanation": "This changes the control flow structure of kernel generation, potentially affecting correctness if not carefully implemented"
+      },
+      "probe_plan": "Implement a simple loop unrolling or instruction merging strategy that reduces the number of bundles generated per batch item.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "Tree",
+          "Input"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 50,
+        "max_changed_functions": 1,
+        "observation": "The generated instruction sequence should produce the same results but with fewer bundles"
+      },
+      "invariant_evidence": [
+        "The reference_kernel2 processes each batch item sequentially for each round",
+        "Index and value updates must match exactly"
+      ],
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "preserved_invariants": [
+        "All batch items must be processed for all rounds",
+        "Index and value updates must match reference implementation"
+      ],
+      "edit_scope": "Optimize the inner loop structure in build_kernel to reduce instruction bundle count per iteration",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES count increases or assertion failures in submission_tests.py"
+      },
+      "correctness_rationale": "By optimizing the loop structure while maintaining the same logical operations, we can reduce overhead without changing computational results.",
+      "fallback_plan": "If loop optimization causes issues, revert to original loop structure but keep VLIW packing from task-001.",
+      "rollback_or_shrink_plan": "Shrink to only optimizing constant loading and scratch allocation, reverting any loop structure changes if they cause issues.",
+      "attempts": 0,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T19:33:30+0900",
+      "created_loop": 1,
+      "last_non_budget_attempt": {
+        "ts": "2026-06-12T19:34:11+0900",
+        "loop": 1,
+        "todo_id": "task-003",
+        "candidate_id": "loop-001-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": 147734,
+        "failed": true,
+        "strategy_axis": "loop_optimization",
+        "strategy_axes": [
+          "loop_optimization",
+          "performance"
+        ],
+        "tactic_stage": "structural_probe",
+        "stage_result": "contract_mismatch",
+        "reason": "Reduce loop overhead by unrolling or optimizing inner loop structure",
+        "spec_task_id": "task-003",
+        "budget_counted": false,
+        "failure_class": "active_task_drift",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=loop_optimization; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Restored spec task boundary snapshot: task-002; Persisted spec grounding facts: <source-run>",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "fingerprint": "5012c131592b2e2e",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "changes": [
+          {
+            "path": "perf_takehome.py",
+            "reason": "task-003: Optimize KernelBuilder.build to pack instructions into VLIW slots. The original build() method created one instruction bundle per slot, leading to high cycle counts. By packing multiple slots of the same engine into a single bundle (respecting SLOT_LIMITS), we reduce the number of instruction bundles, which directly reduces cycles since each bundle takes at least one cycle. This is a conservative optimiz...",
+            "mode": "replacement",
+            "target_region": "perf_takehome.py::KernelBuilder.build",
+            "line_range": {
+              "start_line": 51,
+              "end_line": 56
+            }
+          }
+        ],
+        "drift_declared_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "drift_declared_symbols": [
+          "KernelBuilder"
+        ],
+        "drift_attempted_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "drift_region_pairs": [
+          {
+            "declared": "perf_takehome.py::KernelBuilder.build_kernel",
+            "attempted": "perf_takehome.py::KernelBuilder.build"
+          }
+        ],
+        "drift_target_region_hash": "ffafc8c9",
+        "drift_cooldown_key": "ffafc8c9:structural_probe:5012c131592b2e2e"
+      },
+      "non_budget_attempts": 1
+    }
+  ],
+  "updated_at": "2026-06-12T19:34:11+0900",
+  "active_todo_id": "task-003"
+}

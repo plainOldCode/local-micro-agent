@@ -44,6 +44,77 @@ from local_micro_agent.validators import JsonValidationError
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+SPEC_RUN_FIXTURE_EXPECTATIONS = {
+    "design_contract_incomplete_issues12_13": {
+        "stop_reason": "spec_design_contract_incomplete",
+        "code_test_loop_count": 18,
+        "candidate_failure_class_counts": {
+            "contract_mismatch": 4,
+            "invariant_broken": 2,
+            "correctness_failure": 10,
+            "no_improvement": 1,
+            "improved": 1,
+        },
+    },
+    "portfolio_exhaustion_active_drift": {
+        "stop_reason": "no_recovery_possible",
+        "code_test_loop_count": 7,
+        "active_task_drift_count": 7,
+        "candidate_failure_class_counts": {"active_task_drift": 7},
+    },
+    "spec_search_frontier_rich": {
+        "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+        "code_test_loop_count": 37,
+        "active_task_drift_count": 23,
+        "candidate_failure_class_counts": {
+            "active_task_drift": 23,
+            "correctness_failure": 10,
+            "patch_miss": 4,
+        },
+        "graph_candidate_counts": {"rejected_quality": 12, "selected": 4},
+    },
+    "targeted_quality_cap_graph_contract": {
+        "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+        "code_test_loop_count": 2,
+        "active_task_drift_count": 2,
+        "candidate_failure_class_counts": {"active_task_drift": 2},
+        "graph_candidate_counts": {
+            "rejected_quality": 11,
+            "selected_soft_fallback": 1,
+            "rejected_graph_contract": 2,
+        },
+    },
+    "metric_plateau_graph_contract": {
+        "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+        "code_test_loop_count": 1,
+        "active_task_drift_count": 1,
+        "metric_neutral_plateau_count": 1,
+        "candidate_failure_class_counts": {"active_task_drift": 1},
+        "graph_candidate_counts": {
+            "rejected_quality": 11,
+            "selected_soft_fallback": 1,
+            "rejected_graph_contract": 1,
+        },
+    },
+    "mvp9_d15_boundary_feedback_r2": {
+        "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+        "code_test_loop_count": 3,
+        "active_task_drift_count": 3,
+        "candidate_failure_class_counts": {"active_task_drift": 3},
+        "graph_candidate_counts": {
+            "selected": 3,
+            "rejected_graph_contract": 3,
+            "rejected_quality": 1,
+        },
+    },
+    "mvp9_dprime_quality_gate_zero_code": {
+        "stop_reason": "spec_quality_gate_failed",
+        "code_test_loop_count": 0,
+        "zero_code_attempt": True,
+        "candidate_failure_class_counts": {},
+        "graph_candidate_counts": {"rejected_quality": 3},
+    },
+}
 
 
 def _copy_spec_run_fixture(repo: Path, name: str) -> Path:
@@ -57,8 +128,11 @@ def _copy_spec_run_fixture(repo: Path, name: str) -> Path:
         "spec_graph_candidates.jsonl",
         "run_spec.json",
         "todo_plan.json",
+        "spec_quality_report.json",
     ):
-        shutil.copyfile(source / filename, artifact_dir / filename)
+        path = source / filename
+        if path.exists():
+            shutil.copyfile(path, artifact_dir / filename)
     return artifact_dir
 
 
@@ -6169,6 +6243,25 @@ Background / non-constraints
             )
             self.assertEqual(terminal["targeted_rewrite_rejected_duplicate_drift"], 0)
             self.assertEqual(terminal["spec_budget_saved_by_drift_backoff"], 0)
+
+    def test_spec_run_fixtures_lock_expected_terminal_shapes(self) -> None:
+        for name, expected in SPEC_RUN_FIXTURE_EXPECTATIONS.items():
+            with self.subTest(fixture=name):
+                fixture = FIXTURE_ROOT / "spec_runs" / name / "terminal_state.json"
+                terminal = json.loads(fixture.read_text())
+                self.assertEqual(terminal["state"], "failed")
+                for key, value in expected.items():
+                    self.assertEqual(terminal.get(key), value)
+
+    def test_spec_run_fixtures_do_not_embed_source_run_paths_in_json(self) -> None:
+        source_path = "/Users/m2max/tmp/local-micro-agent-homework-runs"
+        for name in SPEC_RUN_FIXTURE_EXPECTATIONS:
+            fixture_dir = FIXTURE_ROOT / "spec_runs" / name
+            for path in fixture_dir.iterdir():
+                if path.suffix not in {".json", ".jsonl"}:
+                    continue
+                with self.subTest(fixture=name, file=path.name):
+                    self.assertNotIn(source_path, path.read_text())
 
     def test_fixture_d15_terminal_shape_documents_structural_probe_narrowing_failure(
         self,

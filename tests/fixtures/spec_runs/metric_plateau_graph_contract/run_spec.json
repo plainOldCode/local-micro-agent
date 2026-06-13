@@ -1,0 +1,263 @@
+{
+  "version": 2,
+  "spec_id": "perf-takehome-probe",
+  "objective": "Optimize perf_takehome.py to reduce CYCLES below baseline while preserving correctness.",
+  "invariants": [
+    "Must preserve exact output of reference_kernel2",
+    "Must not modify problem.py or tests/",
+    "Must keep N_CORES=1 and multicore disabled",
+    "Must respect SLOT_LIMITS for all generated instructions",
+    "Must maintain pause/debug alignment with reference kernel"
+  ],
+  "known_facts": [
+    "Baseline CYCLES is 147734",
+    "Only perf_takehome.py is writable",
+    "KernelBuilder.build_kernel generates the instruction stream",
+    "Machine.run executes the instructions and counts cycles",
+    "HASH_STAGES defines the hash function stages",
+    "SLOT_LIMITS restricts parallelism per engine type"
+  ],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "replaces_task_id": "",
+      "title": "Profile baseline to identify hot path",
+      "strategy_axis": "profiling",
+      "family_key": "diagnostic",
+      "expected_signal": "CYCLES count and cProfile output identifying hottest functions",
+      "status": "deferred_design_invalid",
+      "attempts": 0,
+      "last_observation": "",
+      "decision_hint": "targeted_rewrite_quality_rejected: targeted SPEC rewrite kept failing the quality gate; stop spending SPEC budget on the same rewrite shape and continue with sibling, backtrack, or graph reseed.",
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "unresolvable_probe_region:perf_takehome.py::Machine"
+        ],
+        "rewrite_attempt_key": "task-001",
+        "rewrite_attempts": 1,
+        "rewrite_attempts_max": 2,
+        "checked_at": "2026-06-12T22:12:02+0900",
+        "reason": "quality_gate_rejected",
+        "quality_issue_codes": [
+          "design_contract_unresolvable_probe_region",
+          "vague_edit_scope"
+        ],
+        "quality_attempt": 1
+      },
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py"
+      ],
+      "target_symbols": [
+        "do_kernel_test"
+      ],
+      "target_regions": [
+        "perf_takehome.py::do_kernel_test"
+      ],
+      "preserved_invariants": [
+        "Must not change logic, only add profiling code temporarily"
+      ],
+      "edit_scope": "Add cProfile to do_kernel_test and print stats",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Add cProfile to do_kernel_test and print stats",
+        "explanation": "This is a narrow local edit that adds instrumentation without changing logic"
+      },
+      "probe_plan": "Add cProfile import and context manager around machine.run() in do_kernel_test",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "target_symbols": [
+          "do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder",
+          "perf_takehome.py::Machine"
+        ],
+        "allowed_change_kinds": [
+          "add_observation"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 1,
+        "max_changed_lines": 10,
+        "max_changed_functions": 1,
+        "observation": "cProfile output showing function call times"
+      },
+      "invariant_evidence": [
+        "Profiling code does not alter execution flow or results"
+      ],
+      "validator": {
+        "kind": "command",
+        "failure_condition": "Exit code non-zero or no CYCLES line printed"
+      },
+      "correctness_rationale": "Profiling is observational and does not change program behavior",
+      "fallback_plan": "Remove profiling code and proceed to next task",
+      "rollback_or_shrink_plan": "Revert the cProfile addition",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0
+    },
+    {
+      "task_id": "task-002",
+      "replaces_task_id": "",
+      "title": "Optimize KernelBuilder.build_kernel instruction generation",
+      "strategy_axis": "instruction_generation_optimization",
+      "family_key": "kernel_builder",
+      "expected_signal": "Reduced CYCLES count while maintaining correctness",
+      "status": "deferred_contract_drift",
+      "attempts": 0,
+      "last_observation": {
+        "loop": 0,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "stage_result": "probe_needs_guard_or_scope",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 2,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "decision_hint": "targeted_rewrite_rejected_preserve_siblings: targeted SPEC rewrite failed target-local graph/material checks. Defer only this target and continue with preserved sibling or backtrack frontier.",
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py",
+        "problem.py"
+      ],
+      "target_symbols": [
+        "KernelBuilder.build_kernel"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "preserved_invariants": [
+        "Must generate same instruction stream as reference",
+        "Must respect SLOT_LIMITS",
+        "Must maintain pause/debug alignment"
+      ],
+      "edit_scope": "Optimize instruction generation in build_kernel to reduce redundant operations",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Optimize instruction generation in build_kernel to reduce redundant operations",
+        "explanation": "Changing instruction generation affects the core execution path and must be carefully validated"
+      },
+      "probe_plan": "First, add a guard to compare generated instructions with reference before applying optimization",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder.build_kernel"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::Machine",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_hash",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "observation": "Instruction stream comparison with reference kernel output"
+      },
+      "invariant_evidence": [
+        "Generated instructions must match reference_kernel2 output exactly"
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES count increases or assertion failures in correctness tests"
+      },
+      "correctness_rationale": "Optimizations preserve instruction semantics while reducing redundant operations",
+      "fallback_plan": "Revert to original build_kernel implementation if correctness fails",
+      "rollback_or_shrink_plan": "Shrink to single optimized loop iteration with guard comparison",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0
+    }
+  ],
+  "decision_rules": [
+    "If task-001 profiling shows no hot spots, skip to task-002",
+    "If task-002 fails correctness, revert and try smaller optimization probes",
+    "Always verify CYCLES output after each change"
+  ],
+  "updated_at": "2026-06-12T22:34:25+0900",
+  "progress": {
+    "total": 2,
+    "closed": 0,
+    "deferred": 2,
+    "failed": 0
+  },
+  "search": {
+    "graph_id": "graph-0003",
+    "created_loop": 0,
+    "created_at": "2026-06-12T22:05:39+0900",
+    "origin": "spec_synth",
+    "last_seen_loop": 1,
+    "spec_synth_calls_used_at_selection": 3,
+    "spec_synth_calls_used": 18,
+    "reseed_attempts": 2,
+    "reseed_attempts_max": 2,
+    "cooldown_keys": [
+      "487fb529:local_edit:design_contract_unresolvable_probe_region",
+      "ffafc8c9:structural_probe:metric_neutral_plateau_86fb80b4dc0b452a",
+      "ffafc8c9:structural_probe:86fb80b4dc0b452a",
+      "ffafc8c9:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta"
+    ]
+  },
+  "last_stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted"
+}

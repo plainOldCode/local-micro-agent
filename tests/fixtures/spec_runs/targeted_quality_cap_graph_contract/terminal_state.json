@@ -1,0 +1,532 @@
+{
+  "ts": "2026-06-12T19:53:46+0900",
+  "state": "failed",
+  "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+  "code_test_loop_count": 2,
+  "fsm_step_count": 23,
+  "max_code_test_loops": 20,
+  "zero_code_attempt": false,
+  "spec_synth_call_count": 19,
+  "spec_synth_calls_used": 19,
+  "spec_synth_call_budget": 24,
+  "spec_synth_budget_exhausted": false,
+  "spec_synth_model_profile": {
+    "model_call_count": 3,
+    "elapsed_ms": 173124.49,
+    "call_site_counts": {
+      "spec_synth": 3
+    }
+  },
+  "spec_id": "optimize-kernel-builder-scheduling",
+  "selected_graph_id": "graph-0003",
+  "graph_reseed_attempts": 2,
+  "graph_reseed_attempts_max": 2,
+  "cooldown_keys": [
+    "4a609a5f:structural_probe:design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+    "438b9d22:local_edit:04dd4c2d3bda958f",
+    "438b9d22:local_edit:portfolio_collapsed_below_min_runnable",
+    "ffafc8c9:structural_probe:5012c131592b2e2e",
+    "ffafc8c9:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta"
+  ],
+  "active_task_id": null,
+  "progress": {
+    "total": 3,
+    "closed": 0,
+    "deferred": 3,
+    "failed": 0
+  },
+  "pending_spec_rewrite_reason": null,
+  "tasks": [
+    {
+      "task_id": "task-001",
+      "status": "deferred_design_invalid",
+      "title": "Optimize KernelBuilder.build to pack instructions into VLIW slots",
+      "attempts": 0,
+      "attempts_used": 0,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "Tree",
+          "Input"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::do_kernel_test",
+          "perf_takehome.py::Tests"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "observation": "The new build method must produce instruction bundles that are valid VLIW instructions and result in the same computational output"
+      },
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "edit_scope too broad"
+        ],
+        "rewrite_attempt_key": "task-001",
+        "rewrite_attempts": 1,
+        "rewrite_attempts_max": 2,
+        "checked_at": "2026-06-12T19:29:19+0900",
+        "reason": "quality_gate_rejected",
+        "quality_issue_codes": [
+          "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+          "target_region_count"
+        ],
+        "quality_attempt": 1
+      },
+      "decision_hint": "targeted_rewrite_quality_rejected: targeted SPEC rewrite kept failing the quality gate; stop spending SPEC budget on the same rewrite shape and continue with sibling, backtrack, or graph reseed."
+    },
+    {
+      "task_id": "task-002",
+      "status": "deferred_design_invalid",
+      "title": "Optimize scratch allocation and constant management in KernelBuilder",
+      "attempts": 0,
+      "attempts_used": 0,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.alloc_scratch",
+        "perf_takehome.py::KernelBuilder.scratch_const"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info",
+          "perf_takehome.py::KernelBuilder.build_hash"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 30,
+        "max_changed_functions": 2,
+        "observation": "Scratch usage should be more efficient without changing the generated instruction semantics"
+      },
+      "last_observation": {
+        "loop": 0,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 2,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract",
+          "targeted SPEC rewrite collapsed portfolio below 2 runnable tasks"
+        ],
+        "checked_at": "2026-06-12T19:33:30+0900"
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Defer this design-invalid task while the controller tries a sibling graph or reseed with a materially narrower replacement."
+    },
+    {
+      "task_id": "task-003",
+      "status": "deferred_design_invalid",
+      "title": "Reduce loop overhead by unrolling or optimizing inner loop structure",
+      "attempts": 0,
+      "attempts_used": 0,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "target_symbols": [
+        "KernelBuilder"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build_kernel"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel"
+        ],
+        "target_symbols": [
+          "KernelBuilder"
+        ],
+        "forbidden_symbols": [
+          "Machine",
+          "reference_kernel2",
+          "Tree",
+          "Input"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build",
+          "perf_takehome.py::do_kernel_test"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.debug_info",
+          "perf_takehome.py::KernelBuilder.alloc_scratch",
+          "perf_takehome.py::KernelBuilder.scratch_const"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 50,
+        "max_changed_functions": 1,
+        "observation": "The generated instruction sequence should produce the same results but with fewer bundles"
+      },
+      "last_observation": {
+        "loop": 1,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric candidate=147734 baseline=147734 improved=False. Treat this as an inert/no-signal edit; ensure the changed code path is actually executed.",
+        "requires_improvement": true,
+        "metric": 147734,
+        "baseline": 147734,
+        "improved": false,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 2,
+        "active_task_drift_same_fingerprint_streak": 2
+      },
+      "design_contract": {
+        "status": "deferred_design_invalid",
+        "issues": [
+          "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract"
+        ],
+        "checked_at": "2026-06-12T19:37:49+0900"
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Defer this design-invalid task while the controller tries a sibling graph or reseed with a materially narrower replacement."
+    }
+  ],
+  "spec_progress_counts": {
+    "quality_rejected": 11,
+    "quality_soft_fallback": 1,
+    "design_rejected": 2,
+    "scheduled": 2,
+    "drift_recovery": 2,
+    "graph_rewrite_rejected": 2,
+    "graph_reseed_requested": 2,
+    "blocked": 1
+  },
+  "candidate_status_counts": {
+    "rejected_todo_scope_drift": 2
+  },
+  "candidate_failure_class_counts": {
+    "active_task_drift": 2
+  },
+  "failure_signature_counts": {
+    "design_rewrite_invalid": 3,
+    "active_task_drift": 2
+  },
+  "failure_signature_issue_counts": {
+    "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe": 1,
+    "04dd4c2d3bda958f": 1,
+    "portfolio_collapsed_below_min_runnable": 1,
+    "5012c131592b2e2e": 1,
+    "targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta": 1
+  },
+  "graph_candidate_counts": {
+    "rejected_quality": 11,
+    "selected_soft_fallback": 1,
+    "rejected_graph_contract": 2
+  },
+  "graph_candidate_event_counts": {
+    "candidate_rejected": 13,
+    "candidate_selected": 1
+  },
+  "last_spec_progress_event": {
+    "active_task_id": null,
+    "blocked_tasks": [],
+    "design_failed_tasks": [
+      "task-001",
+      "task-002",
+      "task-003"
+    ],
+    "drift_deferred_tasks": [],
+    "event": "blocked",
+    "failed_prerequisites": [],
+    "fsm_step": 23,
+    "graph_reseed_attempts": 2,
+    "graph_reseed_attempts_max": 2,
+    "graph_reseed_exhausted": true,
+    "loop": 2,
+    "portfolio_exhausted_tasks": [],
+    "progress": {
+      "closed": 0,
+      "deferred": 3,
+      "failed": 0,
+      "total": 3
+    },
+    "remaining_loops": 18,
+    "runnable_tasks_at_exit": 0,
+    "spec_id": "optimize-kernel-builder-scheduling",
+    "state": "schedule",
+    "stop_reason": "search_frontier_exhausted_after_graph_reseed_exhausted",
+    "ts": "2026-06-12T19:53:46+0900"
+  },
+  "last_candidate_event": {
+    "applied": 0,
+    "budget_counted": false,
+    "candidate_id": "loop-001-single",
+    "changes": [
+      {
+        "line_range": {
+          "end_line": 56,
+          "start_line": 51
+        },
+        "mode": "replacement",
+        "path": "perf_takehome.py",
+        "reason": "task-003: Optimize KernelBuilder.build to pack instructions into VLIW slots. The original build() method created one instruction bundle per slot, leading to high cycle counts. By packing multiple slots of the same engine into a single bundle (respecting SLOT_LIMITS), we reduce the number of instruction bundles, which directly reduces cycles since each bundle takes at least one cycle. This is a conservative optimiz...",
+        "target_region": "perf_takehome.py::KernelBuilder.build"
+      }
+    ],
+    "drift_attempted_regions": [
+      "perf_takehome.py::KernelBuilder.build"
+    ],
+    "drift_cooldown_key": "ffafc8c9:structural_probe:5012c131592b2e2e",
+    "drift_declared_regions": [
+      "perf_takehome.py::KernelBuilder.build_kernel"
+    ],
+    "drift_declared_symbols": [
+      "KernelBuilder"
+    ],
+    "drift_region_pairs": [
+      {
+        "attempted": "perf_takehome.py::KernelBuilder.build",
+        "declared": "perf_takehome.py::KernelBuilder.build_kernel"
+      }
+    ],
+    "drift_target_region_hash": "ffafc8c9",
+    "failed": true,
+    "failure_class": "active_task_drift",
+    "failure_memory_next_rule": "avoid_or_repair_with_new_evidence",
+    "failure_memory_path": ".local_micro_agent/failure_memory.jsonl",
+    "failure_origin": "pre_apply_contract",
+    "family_aliases": [],
+    "fingerprint": "5012c131592b2e2e",
+    "issue_scope": "candidate_delta",
+    "loop": 1,
+    "memory_use": "avoid_shape",
+    "metric": 147734,
+    "next_actions": [
+      "Read the active todo contract and produce a candidate that satisfies it.",
+      "If the contract blocks valid work, surface that as evidence for relaxation."
+    ],
+    "reason": "Reduce loop overhead by unrolling or optimizing inner loop structure",
+    "recovery_hint": "Retry the same active task using only its declared contract.",
+    "region_keys": [
+      "perf_takehome.py::build::loop_optimization",
+      "perf_takehome.py::build::performance"
+    ],
+    "repair_task_eligible": false,
+    "repo_valid_after_restore": true,
+    "spec_task_id": "task-003",
+    "stage_result": "contract_mismatch",
+    "status": "rejected_todo_scope_drift",
+    "strategy_axes": [
+      "loop_optimization",
+      "performance"
+    ],
+    "strategy_axis": "loop_optimization",
+    "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=147734; axis=loop_optimization; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Restored spec task boundary snapshot: task-002; Persisted spec grounding facts: <source-run>",
+    "tactic_stage": "structural_probe",
+    "todo_id": "task-003",
+    "ts": "2026-06-12T19:34:11+0900"
+  },
+  "last_failure_signature": {
+    "cooldown_key": "ffafc8c9:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta",
+    "created_loop": 2,
+    "episode_fingerprint": "graph-0003:graph_rewrite:task-003:structural_probe:targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta:ffafc8c9",
+    "failure_class": "design_rewrite_invalid",
+    "fsm_step": 18,
+    "graph_id": "graph-0003",
+    "issue_code": "targeted_spec_rewrite_repeated_active_task_drift_material_axes_target_regions_ta",
+    "issue_scope": "spec_graph",
+    "issues": [
+      "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract"
+    ],
+    "phase": "graph_rewrite",
+    "schema": "failure_signature.v1",
+    "spec_id": "optimize-kernel-builder-scheduling",
+    "status": "graph_rewrite_rejected",
+    "summary": "targeted SPEC rewrite repeated active-task drift material axes (target_regions, tactic_stage, validator.kind, deliverables) without a structurally different contract",
+    "tactic_stage": "structural_probe",
+    "target_region_hash": "ffafc8c9",
+    "target_regions": [
+      "perf_takehome.py::KernelBuilder.build_kernel"
+    ],
+    "target_symbols": [
+      "KernelBuilder"
+    ],
+    "target_task_id": "task-003",
+    "task_id": "task-003",
+    "ts": "2026-06-12T19:37:49+0900"
+  },
+  "last_graph_candidate_event": {
+    "event": "candidate_rejected",
+    "fsm_step": 22,
+    "graph_id": "graph-0013",
+    "graph_signature": [
+      "perf_takehome.py::KernelBuilder.build:structural_probe"
+    ],
+    "issue_codes": [
+      "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe"
+    ],
+    "loop": 2,
+    "origin": "reseed_after_graph_frontier_exhausted",
+    "parent_graph_id": "graph-0003",
+    "schema": "spec_graph_candidate.v1",
+    "score": {
+      "cooldown_hits": 1,
+      "design_issues": 1,
+      "drift_saturation_hits": 0,
+      "duplicate_hits": 1,
+      "quality_issues": 1,
+      "runnable_tasks": 1
+    },
+    "spec_id": "pack-vliw-bundles",
+    "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0013.json",
+    "spec_synth_call_budget": 24,
+    "spec_synth_calls_used": 19,
+    "status": "rejected_quality",
+    "ts": "2026-06-12T19:53:46+0900"
+  },
+  "active_task_drift_count": 2,
+  "max_active_task_drift_streak": 1,
+  "drift_recovery_count": 2,
+  "drift_deferred_task_ids": [],
+  "active_task_drift_attempted_region_counts": {
+    "perf_takehome.py::KernelBuilder.build": 1,
+    "perf_takehome.py::KernelBuilder.build_kernel": 1,
+    "perf_takehome.py::KernelBuilder.scratch_const": 1
+  },
+  "active_task_drift_region_pair_counts": {
+    "perf_takehome.py::KernelBuilder.alloc_scratch -> perf_takehome.py::KernelBuilder.build_kernel": 1,
+    "perf_takehome.py::KernelBuilder.alloc_scratch -> perf_takehome.py::KernelBuilder.scratch_const": 1,
+    "perf_takehome.py::KernelBuilder.build_kernel -> perf_takehome.py::KernelBuilder.build": 1,
+    "perf_takehome.py::KernelBuilder.scratch_const -> perf_takehome.py::KernelBuilder.build_kernel": 1,
+    "perf_takehome.py::KernelBuilder.scratch_const -> perf_takehome.py::KernelBuilder.scratch_const": 1
+  },
+  "drift_cooldown_key_counts": {
+    "438b9d22:local_edit:04dd4c2d3bda958f": 1,
+    "ffafc8c9:structural_probe:5012c131592b2e2e": 1
+  },
+  "drift_saturation_threshold": 3,
+  "same_region_drift_saturation_count": 0,
+  "same_region_drift_saturated_keys": {},
+  "targeted_rewrite_rejected_duplicate_drift": 0,
+  "spec_budget_saved_by_drift_backoff": 0,
+  "portfolio_reopened_count": 0,
+  "portfolio_exhausted_count": 0,
+  "portfolio_exhausted_task_ids": [],
+  "max_portfolio_recovery_rounds": 2,
+  "trajectory_quality": {
+    "label": "chaotic_retry",
+    "spec_aligned_success_count": 0,
+    "improved_count": 0,
+    "scope_drift_count": 2,
+    "budget_free_contract_rejection_count": 2,
+    "improved_candidate_id": null,
+    "improved_candidate_spec_task_id": null,
+    "improved_candidate_matches_probe_plan": false
+  },
+  "spec_quality_report": {
+    "version": 1,
+    "generated_at": "2026-06-12T19:53:46+0900",
+    "status": "fail",
+    "attempt": 2,
+    "spec_id": "pack-vliw-bundles",
+    "issues": [
+      {
+        "code": "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+        "severity": "error",
+        "task_id": "task-001",
+        "detail": "structural edit_scope too broad; start with one reversible probe",
+        "rewrite_hint": "Narrow the task to one reversible operation in one target region. Split multi-step rewrites into independent probe tasks."
+      }
+    ],
+    "issue_codes": [
+      "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe"
+    ]
+  }
+}

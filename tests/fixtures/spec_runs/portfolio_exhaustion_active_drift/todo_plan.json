@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "todos": [
+    {
+      "todo_id": "task-001",
+      "spec_task_id": "task-001",
+      "status": "superseded",
+      "strategy_axis": "verification",
+      "family_key": "baseline",
+      "title": "Establish baseline correctness and metric",
+      "context": "CYCLES: 147734 (or close), exit 0, all tests pass",
+      "micro_goal": "Implement the scheduled design contract within this scope: Run existing code to record baseline CYCLES and verify tests pass",
+      "implementation_hint": "repeated_active_task_drift_requires_contract_rewrite: CODE kept violating or over-broadening this active task contract. Rewrite the task as a smaller executable probe, or retire it in favor of a different runnable task.",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "CYCLES: 147734 (or close), exit 0, all tests pass",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Run existing code to record baseline CYCLES and verify tests pass",
+        "explanation": "This task involves no code changes, only execution and verification, so it is purely local with no structural risk."
+      },
+      "probe_plan": "",
+      "probe_diff_contract": {},
+      "invariant_evidence": [
+        "Existing tests pass",
+        "Baseline metric is recorded"
+      ],
+      "target_symbols": [
+        "do_kernel_test"
+      ],
+      "target_regions": [
+        "perf_takehome.py::do_kernel_test"
+      ],
+      "preserved_invariants": [
+        "Current baseline metric value",
+        "Test correctness"
+      ],
+      "edit_scope": "Run existing code to record baseline CYCLES and verify tests pass",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "Exit code != 0 OR CYCLES line not found OR test failure"
+      },
+      "correctness_rationale": "No code changes are made; only measurement and verification.",
+      "fallback_plan": "Abandon if baseline cannot be established (e.g., syntax error in existing code).",
+      "rollback_or_shrink_plan": "N/A - no changes made.",
+      "attempts": 0,
+      "budget": {
+        "attempts_max": 1,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T12:41:07+0900",
+      "created_loop": 3,
+      "last_non_budget_attempt": {
+        "ts": "2026-06-12T12:41:35+0900",
+        "loop": 3,
+        "todo_id": "task-001",
+        "candidate_id": "loop-003-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": null,
+        "failed": true,
+        "strategy_axis": "verification",
+        "strategy_axes": [
+          "correctness",
+          "verification"
+        ],
+        "tactic_stage": "local_edit",
+        "stage_result": "contract_mismatch",
+        "reason": "Establish baseline correctness and metric",
+        "spec_task_id": "task-001",
+        "budget_counted": false,
+        "failure_class": "active_task_drift",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=None; axis=verification; change for perf_takehome.py does not target active todo task-001 symbols do_kernel_test; Persisted spec grounding facts: <source-run>",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "fingerprint": "19d7618b1598bf64",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      },
+      "non_budget_attempts": 4,
+      "superseded_at": "2026-06-12T12:41:35+0900"
+    },
+    {
+      "todo_id": "task-002",
+      "spec_task_id": "task-002",
+      "status": "active",
+      "strategy_axis": "local_edit",
+      "family_key": "build_optimization",
+      "title": "Optimize KernelBuilder.build to pack slots into VLIW bundles",
+      "context": "CYCLES < 147734",
+      "micro_goal": "Implement the scheduled design contract within this scope: Modify build() to group slots into instruction bundles respecting SLOT_LIMITS instead of one bundle per slot.",
+      "implementation_hint": "",
+      "allowed_files": [
+        "perf_takehome.py"
+      ],
+      "expected_signal": "CYCLES < 147734",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Modify build() to group slots into instruction bundles respecting SLOT_LIMITS instead of one bundle per slot.",
+        "explanation": "Changing how instructions are bundled affects the control flow of the simulator (how many cycles each instruction takes), which is a structural change to execution."
+      },
+      "probe_plan": "Implement a guarded version of build() that packs slots into bundles but keeps the original behavior if SLOT_LIMITS are exceeded or if correctness fails. Start with a simple packing strategy.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder.build"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "observation": "CYCLES count from do_kernel_test and test pass rate"
+      },
+      "invariant_evidence": [
+        "SLOT_LIMITS are respected by the new packing logic",
+        "Instruction order is preserved within each engine",
+        "Debug/pause instructions remain in their original positions relative to other instructions"
+      ],
+      "target_symbols": [
+        "KernelBuilder.build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "preserved_invariants": [
+        "Instruction count per engine must not exceed SLOT_LIMITS",
+        "Order of instructions must remain identical for correctness",
+        "Debug/pause alignment must be preserved"
+      ],
+      "edit_scope": "Modify build() to group slots into instruction bundles respecting SLOT_LIMITS instead of one bundle per slot.",
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES >= 147734 OR test failure OR SLOT_LIMITS violation detected"
+      },
+      "correctness_rationale": "By preserving instruction order and respecting slot limits, the semantic behavior of the kernel remains identical. The only change is execution parallelism within cycles.",
+      "fallback_plan": "If packing fails to reduce cycles or breaks correctness, revert to original build() implementation.",
+      "rollback_or_shrink_plan": "Shrink to a simpler packing strategy (e.g., pack only ALU instructions) or revert entirely if the probe fails.",
+      "attempts": 0,
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "source": "spec_scheduler",
+      "created_at": "2026-06-12T12:41:35+0900",
+      "created_loop": 4,
+      "last_non_budget_attempt": {
+        "ts": "2026-06-12T12:43:39+0900",
+        "loop": 6,
+        "todo_id": "task-002",
+        "candidate_id": "loop-006-single",
+        "status": "rejected_todo_scope_drift",
+        "metric": null,
+        "failed": true,
+        "strategy_axis": "local_edit",
+        "strategy_axes": [
+          "local_edit",
+          "performance"
+        ],
+        "tactic_stage": "structural_probe",
+        "stage_result": "contract_mismatch",
+        "reason": "Optimize KernelBuilder.build to pack slots into VLIW bundles",
+        "spec_task_id": "task-002",
+        "budget_counted": false,
+        "failure_class": "active_task_drift",
+        "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=None; axis=local_edit; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Captured spec task boundary snapshot: task-002; Single CODE candidate rejected before apply: structural_probe change is too broad; use a smaller reversible probe inside the ac...",
+        "next_actions": [
+          "Read the active todo contract and produce a candidate that satisfies it.",
+          "If the contract blocks valid work, surface that as evidence for relaxation."
+        ],
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "fingerprint": "47a32c61e6bbfbe7",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape"
+      },
+      "non_budget_attempts": 3
+    }
+  ],
+  "updated_at": "2026-06-12T12:43:39+0900",
+  "active_todo_id": "task-002"
+}

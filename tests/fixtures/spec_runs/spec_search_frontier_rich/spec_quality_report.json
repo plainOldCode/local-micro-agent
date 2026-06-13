@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-12T15:34:15+0900",
+  "status": "fail",
+  "attempt": 0,
+  "spec_id": "perf-opt-scratch-const",
+  "issues": [
+    {
+      "code": "design_contract_edit_scope_too_broad",
+      "severity": "error",
+      "task_id": "task-004",
+      "detail": "edit_scope too broad",
+      "rewrite_hint": "Narrow the task to one reversible operation in one target region. Split multi-step rewrites into independent probe tasks."
+    },
+    {
+      "code": "design_contract_local_risk_level_contradicts_structural_action_in_task_scope",
+      "severity": "error",
+      "task_id": "task-004",
+      "detail": "local risk_level contradicts structural action in task scope",
+      "rewrite_hint": "Reclassify the task as risk_level=structural with tactic_stage=structural_probe, or reduce the edit_scope to a single local edit that does not change signatures, callsites, data flow, ordering, or side effects."
+    }
+  ],
+  "issue_codes": [
+    "design_contract_edit_scope_too_broad",
+    "design_contract_local_risk_level_contradicts_structural_action_in_task_scope"
+  ]
+}

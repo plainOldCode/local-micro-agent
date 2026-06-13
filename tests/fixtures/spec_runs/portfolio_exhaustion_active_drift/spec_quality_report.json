@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-12T12:46:00+0900",
+  "status": "fail",
+  "attempt": 0,
+  "spec_id": "perf-opt-vliw-pack",
+  "issues": [
+    {
+      "code": "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+      "severity": "error",
+      "task_id": "task-002",
+      "detail": "structural edit_scope too broad; start with one reversible probe",
+      "rewrite_hint": "Narrow the task to one reversible operation in one target region. Split multi-step rewrites into independent probe tasks."
+    },
+    {
+      "code": "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+      "severity": "error",
+      "task_id": "task-002",
+      "detail": "rollback_or_shrink_plan must describe a smaller/guarded probe",
+      "rewrite_hint": "Describe a smaller guarded probe, not only a revert. Bad: 'Revert the patch.' Good: 'Shrink to one guarded branch in the target region; keep the old path as fallback; revert if the guarded probe fails.'"
+    }
+  ],
+  "issue_codes": [
+    "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+    "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe"
+  ]
+}

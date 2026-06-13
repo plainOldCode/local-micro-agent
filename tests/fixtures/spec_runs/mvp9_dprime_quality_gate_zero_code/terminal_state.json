@@ -1,0 +1,184 @@
+{
+  "ts": "2026-06-13T12:36:46+0900",
+  "state": "failed",
+  "stop_reason": "spec_quality_gate_failed",
+  "code_test_loop_count": 0,
+  "fsm_step_count": 5,
+  "max_code_test_loops": 20,
+  "zero_code_attempt": true,
+  "spec_synth_call_count": 4,
+  "spec_synth_calls_used": 4,
+  "spec_synth_call_budget": 24,
+  "spec_synth_budget_exhausted": false,
+  "spec_synth_model_profile": {
+    "model_call_count": 3,
+    "elapsed_ms": 161646.315,
+    "call_site_counts": {
+      "spec_synth": 3
+    }
+  },
+  "spec_id": "optimize-kernel-builder-loop",
+  "selected_graph_id": "optimize-kernel-builder-loop",
+  "graph_reseed_attempts": 0,
+  "graph_reseed_attempts_max": 0,
+  "cooldown_keys": [],
+  "active_task_id": null,
+  "progress": {
+    "total": 0,
+    "closed": 0,
+    "deferred": 0,
+    "failed": 0
+  },
+  "pending_spec_rewrite_reason": null,
+  "tasks": [],
+  "spec_progress_counts": {
+    "quality_rejected": 3
+  },
+  "candidate_status_counts": {},
+  "candidate_failure_class_counts": {},
+  "failure_signature_counts": {},
+  "failure_signature_issue_counts": {},
+  "graph_candidate_counts": {
+    "rejected_quality": 3
+  },
+  "graph_candidate_event_counts": {
+    "candidate_rejected": 3
+  },
+  "last_spec_progress_event": {
+    "active_task_id": null,
+    "event": "quality_rejected",
+    "fsm_step": 4,
+    "loop": 0,
+    "progress": {
+      "closed": 0,
+      "deferred": 0,
+      "failed": 0,
+      "total": 3
+    },
+    "quality_attempt": 2,
+    "quality_issue_codes": [
+      "design_contract_unresolvable_probe_region",
+      "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+      "hypothesis_option_missing"
+    ],
+    "spec_id": "optimize-kernel-builder-loop",
+    "state": "spec_synth",
+    "ts": "2026-06-13T12:36:46+0900"
+  },
+  "last_candidate_event": null,
+  "last_failure_signature": null,
+  "last_graph_candidate_event": {
+    "event": "candidate_rejected",
+    "fsm_step": 4,
+    "graph_id": "graph-0003",
+    "graph_signature": [
+      "perf_takehome.py::KernelBuilder.build_kernel:local_edit",
+      "perf_takehome.py::KernelBuilder.build_kernel:structural_probe",
+      "perf_takehome.py::KernelBuilder.scratch_const:local_edit"
+    ],
+    "issue_codes": [
+      "design_contract_unresolvable_probe_region",
+      "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+      "hypothesis_option_missing"
+    ],
+    "loop": 0,
+    "origin": "spec_synth",
+    "parent_graph_id": "",
+    "schema": "spec_graph_candidate.v1",
+    "score": {
+      "cooldown_hits": 0,
+      "design_issues": 2,
+      "drift_saturation_hits": 0,
+      "duplicate_hits": 2,
+      "plateau_cooldown_hits": 0,
+      "quality_issues": 5,
+      "runnable_tasks": 3
+    },
+    "spec_id": "optimize-kernel-builder-loop",
+    "spec_sidecar_path": ".local_micro_agent/spec_graph_candidates/graph-0003.json",
+    "spec_synth_call_budget": 24,
+    "spec_synth_calls_used": 4,
+    "status": "rejected_quality",
+    "ts": "2026-06-13T12:36:46+0900"
+  },
+  "active_task_drift_count": 0,
+  "max_active_task_drift_streak": 0,
+  "drift_recovery_count": 0,
+  "drift_deferred_task_ids": [],
+  "active_task_drift_attempted_region_counts": {},
+  "active_task_drift_region_pair_counts": {},
+  "drift_cooldown_key_counts": {},
+  "drift_saturation_threshold": 3,
+  "same_region_drift_saturation_count": 0,
+  "same_region_drift_saturated_keys": {},
+  "targeted_rewrite_rejected_duplicate_drift": 0,
+  "spec_budget_saved_by_drift_backoff": 0,
+  "portfolio_reopened_count": 0,
+  "portfolio_exhausted_count": 0,
+  "portfolio_exhausted_task_ids": [],
+  "max_portfolio_recovery_rounds": 2,
+  "targeted_rewrite_target_local_rejection_count": 0,
+  "targeted_rewrite_preserved_sibling_task_ids": [],
+  "targeted_rewrite_ignored_non_target_task_ids": [],
+  "trajectory_quality": {
+    "label": "no_success",
+    "spec_aligned_success_count": 0,
+    "improved_count": 0,
+    "scope_drift_count": 0,
+    "budget_free_contract_rejection_count": 0,
+    "improved_candidate_id": null,
+    "improved_candidate_spec_task_id": null,
+    "improved_candidate_matches_probe_plan": false
+  },
+  "spec_quality_report": {
+    "version": 1,
+    "generated_at": "2026-06-13T12:36:46+0900",
+    "status": "fail",
+    "attempt": 2,
+    "spec_id": "optimize-kernel-builder-loop",
+    "issues": [
+      {
+        "code": "design_contract_unresolvable_probe_region",
+        "severity": "error",
+        "task_id": "task-003",
+        "detail": "unresolvable_probe_region:perf_takehome.py::Machine.step",
+        "rewrite_hint": "Rewrite the runnable task so it satisfies the deterministic design contract before run_spec persistence."
+      },
+      {
+        "code": "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+        "severity": "error",
+        "task_id": "task-003",
+        "detail": "rollback_or_shrink_plan must describe a smaller/guarded probe",
+        "rewrite_hint": "Describe a smaller guarded probe, not only a revert. Bad: 'Revert the patch.' Good: 'Shrink to one guarded branch in the target region; keep the old path as fallback; revert if the guarded probe fails.'"
+      },
+      {
+        "code": "hypothesis_option_missing",
+        "severity": "error",
+        "task_id": "task-001",
+        "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+        "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+      },
+      {
+        "code": "hypothesis_option_missing",
+        "severity": "error",
+        "task_id": "task-002",
+        "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+        "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+      },
+      {
+        "code": "hypothesis_option_missing",
+        "severity": "error",
+        "task_id": "task-003",
+        "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+        "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+      }
+    ],
+    "issue_codes": [
+      "design_contract_unresolvable_probe_region",
+      "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+      "hypothesis_option_missing",
+      "hypothesis_option_missing",
+      "hypothesis_option_missing"
+    ]
+  }
+}

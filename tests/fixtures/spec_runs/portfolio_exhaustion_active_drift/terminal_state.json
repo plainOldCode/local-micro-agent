@@ -1,0 +1,298 @@
+{
+  "ts": "2026-06-12T12:46:39+0900",
+  "state": "failed",
+  "stop_reason": "no_recovery_possible",
+  "code_test_loop_count": 7,
+  "fsm_step_count": 30,
+  "max_code_test_loops": 100,
+  "zero_code_attempt": false,
+  "spec_synth_call_count": 10,
+  "spec_synth_call_budget": 24,
+  "spec_synth_budget_exhausted": false,
+  "spec_synth_model_profile": {
+    "model_call_count": 10,
+    "elapsed_ms": 723708.185,
+    "call_site_counts": {
+      "spec_idea": 1,
+      "spec_synth": 7,
+      "spec_idea_rewrite": 2
+    }
+  },
+  "spec_id": "perf-takehome-local-probe",
+  "active_task_id": null,
+  "progress": {
+    "total": 2,
+    "closed": 0,
+    "deferred": 1,
+    "failed": 1
+  },
+  "pending_spec_rewrite_reason": null,
+  "tasks": [
+    {
+      "task_id": "task-001",
+      "status": "deferred_contract_drift",
+      "title": "Establish baseline correctness and metric",
+      "attempts": 0,
+      "attempts_used": 0,
+      "attempts_max": 1,
+      "recovery_rounds": 0,
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "target_symbols": [
+        "do_kernel_test"
+      ],
+      "target_regions": [
+        "perf_takehome.py::do_kernel_test"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::do_kernel_test",
+          "do_kernel_test"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::do_kernel_test",
+          "do_kernel_test"
+        ],
+        "target_symbols": [
+          "do_kernel_test"
+        ]
+      },
+      "last_observation": {
+        "loop": 3,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric output was not parseable.",
+        "requires_improvement": true,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 4,
+        "active_task_drift_same_fingerprint_streak": 1
+      },
+      "decision_hint": "contract_drift_streak_deferred: active-task drift repeated after the contract rewrite budget was exhausted. Keep this task out of CODE and schedule a different runnable task."
+    },
+    {
+      "task_id": "task-002",
+      "status": "failed_design",
+      "title": "Optimize KernelBuilder.build to pack slots into VLIW bundles",
+      "attempts": 0,
+      "attempts_used": 0,
+      "attempts_max": 3,
+      "recovery_rounds": 0,
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "target_symbols": [
+        "KernelBuilder.build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder.build"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "observation": "CYCLES count from do_kernel_test and test pass rate"
+      },
+      "last_observation": {
+        "loop": 6,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric output was not parseable.",
+        "requires_improvement": true,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 3,
+        "active_task_drift_same_fingerprint_streak": 1
+      },
+      "design_contract": {
+        "status": "failed_design",
+        "issues": [
+          "targeted SPEC rewrite left only one broad structural task"
+        ],
+        "checked_at": "2026-06-12T12:46:39+0900"
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Keep sibling tasks and retry only with a materially narrower replacement."
+    }
+  ],
+  "spec_progress_counts": {
+    "quality_rejected": 5,
+    "scheduled": 3,
+    "retry": 4,
+    "drift_recovery": 3,
+    "graph_rewrite_rejected": 1,
+    "blocked": 1
+  },
+  "candidate_status_counts": {
+    "rejected_todo_scope_drift": 7
+  },
+  "candidate_failure_class_counts": {
+    "active_task_drift": 7
+  },
+  "last_spec_progress_event": {
+    "active_task_id": null,
+    "blocked_tasks": [],
+    "design_failed_tasks": [
+      "task-002"
+    ],
+    "drift_deferred_tasks": [
+      "task-001"
+    ],
+    "event": "blocked",
+    "failed_prerequisites": [],
+    "fsm_step": 30,
+    "loop": 7,
+    "portfolio_exhausted_tasks": [],
+    "progress": {
+      "closed": 0,
+      "deferred": 1,
+      "failed": 1,
+      "total": 2
+    },
+    "remaining_loops": 93,
+    "runnable_tasks_at_exit": 0,
+    "spec_id": "perf-takehome-local-probe",
+    "state": "schedule",
+    "stop_reason": "no_recovery_possible",
+    "ts": "2026-06-12T12:46:39+0900"
+  },
+  "last_candidate_event": {
+    "applied": 0,
+    "budget_counted": false,
+    "candidate_id": "loop-006-single",
+    "changes": [
+      {
+        "line_range": {
+          "end_line": 56,
+          "start_line": 51
+        },
+        "mode": "replacement",
+        "path": "perf_takehome.py",
+        "reason": "The original build() method created one instruction bundle per slot, meaning each slot took a separate cycle. By grouping slots by engine and packing them into bundles up to SLOT_LIMITS, we allow parallel execution of independent engine operations within the same cycle, reducing total cycles. This is a safe optimization as it preserves instruction order within each engine and respects SLOT_LIMITS.",
+        "target_region": "perf_takehome.py::KernelBuilder.build"
+      }
+    ],
+    "failed": true,
+    "failure_class": "active_task_drift",
+    "failure_memory_next_rule": "avoid_or_repair_with_new_evidence",
+    "failure_memory_path": ".local_micro_agent/failure_memory.jsonl",
+    "failure_origin": "pre_apply_contract",
+    "family_aliases": [],
+    "fingerprint": "47a32c61e6bbfbe7",
+    "issue_scope": "candidate_delta",
+    "loop": 6,
+    "memory_use": "avoid_shape",
+    "metric": null,
+    "next_actions": [
+      "Read the active todo contract and produce a candidate that satisfies it.",
+      "If the contract blocks valid work, surface that as evidence for relaxation."
+    ],
+    "reason": "Optimize KernelBuilder.build to pack slots into VLIW bundles",
+    "recovery_hint": "Retry the same active task using only its declared contract.",
+    "region_keys": [
+      "perf_takehome.py::build::local_edit",
+      "perf_takehome.py::build::performance"
+    ],
+    "repair_task_eligible": false,
+    "repo_valid_after_restore": true,
+    "spec_task_id": "task-002",
+    "stage_result": "contract_mismatch",
+    "status": "rejected_todo_scope_drift",
+    "strategy_axes": [
+      "local_edit",
+      "performance"
+    ],
+    "strategy_axis": "local_edit",
+    "summary": "contract_mismatch: status=rejected_todo_scope_drift; applied=0; metric=None; axis=local_edit; structural_probe change is too broad; use a smaller reversible probe inside the active target region; Captured spec task boundary snapshot: task-002; Single CODE candidate rejected before apply: structural_probe change is too broad; use a smaller reversible probe inside the ac...",
+    "tactic_stage": "structural_probe",
+    "todo_id": "task-002",
+    "ts": "2026-06-12T12:43:39+0900"
+  },
+  "active_task_drift_count": 7,
+  "max_active_task_drift_streak": 4,
+  "drift_recovery_count": 3,
+  "drift_deferred_task_ids": [
+    "task-001"
+  ],
+  "portfolio_reopened_count": 0,
+  "portfolio_exhausted_count": 0,
+  "portfolio_exhausted_task_ids": [],
+  "max_portfolio_recovery_rounds": 2,
+  "trajectory_quality": {
+    "label": "chaotic_retry",
+    "spec_aligned_success_count": 0,
+    "improved_count": 0,
+    "scope_drift_count": 7,
+    "budget_free_contract_rejection_count": 7,
+    "improved_candidate_id": null,
+    "improved_candidate_spec_task_id": null,
+    "improved_candidate_matches_probe_plan": false
+  },
+  "spec_quality_report": {
+    "version": 1,
+    "generated_at": "2026-06-12T12:46:00+0900",
+    "status": "fail",
+    "attempt": 0,
+    "spec_id": "perf-opt-vliw-pack",
+    "issues": [
+      {
+        "code": "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+        "severity": "error",
+        "task_id": "task-002",
+        "detail": "structural edit_scope too broad; start with one reversible probe",
+        "rewrite_hint": "Narrow the task to one reversible operation in one target region. Split multi-step rewrites into independent probe tasks."
+      },
+      {
+        "code": "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+        "severity": "error",
+        "task_id": "task-002",
+        "detail": "rollback_or_shrink_plan must describe a smaller/guarded probe",
+        "rewrite_hint": "Describe a smaller guarded probe, not only a revert. Bad: 'Revert the patch.' Good: 'Shrink to one guarded branch in the target region; keep the old path as fallback; revert if the guarded probe fails.'"
+      }
+    ],
+    "issue_codes": [
+      "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+      "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe"
+    ]
+  }
+}

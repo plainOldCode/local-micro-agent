@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-13T12:36:46+0900",
+  "status": "fail",
+  "attempt": 2,
+  "spec_id": "optimize-kernel-builder-loop",
+  "issues": [
+    {
+      "code": "design_contract_unresolvable_probe_region",
+      "severity": "error",
+      "task_id": "task-003",
+      "detail": "unresolvable_probe_region:perf_takehome.py::Machine.step",
+      "rewrite_hint": "Rewrite the runnable task so it satisfies the deterministic design contract before run_spec persistence."
+    },
+    {
+      "code": "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+      "severity": "error",
+      "task_id": "task-003",
+      "detail": "rollback_or_shrink_plan must describe a smaller/guarded probe",
+      "rewrite_hint": "Describe a smaller guarded probe, not only a revert. Bad: 'Revert the patch.' Good: 'Shrink to one guarded branch in the target region; keep the old path as fallback; revert if the guarded probe fails.'"
+    },
+    {
+      "code": "hypothesis_option_missing",
+      "severity": "error",
+      "task_id": "task-001",
+      "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+      "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+    },
+    {
+      "code": "hypothesis_option_missing",
+      "severity": "error",
+      "task_id": "task-002",
+      "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+      "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+    },
+    {
+      "code": "hypothesis_option_missing",
+      "severity": "error",
+      "task_id": "task-003",
+      "detail": "no accepted SPEC hypothesis option is available for this runnable task",
+      "rewrite_hint": "Do not synthesize runnable tasks from free-form thinking brief prose. Produce a typed hypothesis option that passes controller validation, then copy its hypothesis_id into the task."
+    }
+  ],
+  "issue_codes": [
+    "design_contract_unresolvable_probe_region",
+    "design_contract_rollback_or_shrink_plan_must_describe_a_smaller_guarded_probe",
+    "hypothesis_option_missing",
+    "hypothesis_option_missing",
+    "hypothesis_option_missing"
+  ]
+}

@@ -1,0 +1,253 @@
+{
+  "version": 2,
+  "spec_id": "perf-takehome-local-probe",
+  "objective": "Establish a correct baseline and perform one small local optimization probe on KernelBuilder.build to reduce instruction count without changing control flow or correctness.",
+  "invariants": [
+    "Must preserve exact instruction sequence for correctness (debug/pause alignment)",
+    "Must respect SLOT_LIMITS",
+    "Must not modify problem.py, tests/, or benchmark constants",
+    "Must keep N_CORES=1 and multicore disabled",
+    "Must produce parseable CYCLES line"
+  ],
+  "known_facts": [
+    "perf_takehome.py is the only writable file",
+    "allowed_target_regions include perf_takehome.py::KernelBuilder.build and perf_takehome.py::KernelBuilder.build_kernel",
+    "Baseline metric is 147734 CYCLES",
+    "HASH_STAGES is imported from problem.py and defines 6 hash stages",
+    "build() currently creates one instruction bundle per slot, which is inefficient for VLIW"
+  ],
+  "task_graph": [
+    {
+      "task_id": "task-001",
+      "replaces_task_id": "",
+      "title": "Establish baseline correctness and metric",
+      "strategy_axis": "verification",
+      "family_key": "baseline",
+      "expected_signal": "CYCLES: 147734 (or close), exit 0, all tests pass",
+      "status": "deferred_contract_drift",
+      "attempts": 0,
+      "last_observation": {
+        "loop": 3,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric output was not parseable.",
+        "requires_improvement": true,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 4,
+        "active_task_drift_same_fingerprint_streak": 1
+      },
+      "decision_hint": "contract_drift_streak_deferred: active-task drift repeated after the contract rewrite budget was exhausted. Keep this task out of CODE and schedule a different runnable task.",
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py"
+      ],
+      "target_symbols": [
+        "do_kernel_test"
+      ],
+      "target_regions": [
+        "perf_takehome.py::do_kernel_test"
+      ],
+      "preserved_invariants": [
+        "Current baseline metric value",
+        "Test correctness"
+      ],
+      "edit_scope": "Run existing code to record baseline CYCLES and verify tests pass",
+      "risk_level": "local",
+      "tactic_stage": "local_edit",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Run existing code to record baseline CYCLES and verify tests pass",
+        "explanation": "This task involves no code changes, only execution and verification, so it is purely local with no structural risk."
+      },
+      "probe_plan": "",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::do_kernel_test",
+          "do_kernel_test"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::do_kernel_test",
+          "do_kernel_test"
+        ],
+        "target_symbols": [
+          "do_kernel_test"
+        ]
+      },
+      "invariant_evidence": [
+        "Existing tests pass",
+        "Baseline metric is recorded"
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "Exit code != 0 OR CYCLES line not found OR test failure"
+      },
+      "correctness_rationale": "No code changes are made; only measurement and verification.",
+      "fallback_plan": "Abandon if baseline cannot be established (e.g., syntax error in existing code).",
+      "rollback_or_shrink_plan": "N/A - no changes made.",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 1,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0
+    },
+    {
+      "task_id": "task-002",
+      "replaces_task_id": "",
+      "title": "Optimize KernelBuilder.build to pack slots into VLIW bundles",
+      "strategy_axis": "local_edit",
+      "family_key": "build_optimization",
+      "expected_signal": "CYCLES < 147734",
+      "status": "failed_design",
+      "attempts": 0,
+      "last_observation": {
+        "loop": 6,
+        "failed": true,
+        "budget_counted": false,
+        "summary": "Metric output was not parseable.",
+        "requires_improvement": true,
+        "failure_class": "active_task_drift",
+        "stage_result": "contract_mismatch",
+        "recovery_hint": "Retry the same active task using only its declared contract.",
+        "failure_origin": "pre_apply_contract",
+        "issue_scope": "candidate_delta",
+        "repo_valid_after_restore": true,
+        "repair_task_eligible": false,
+        "memory_use": "avoid_shape",
+        "active_task_drift_streak": 3,
+        "active_task_drift_same_fingerprint_streak": 1
+      },
+      "decision_hint": "graph_rewrite_rejected: SPEC rewrite would collapse or delete the runnable portfolio. Keep sibling tasks and retry only with a materially narrower replacement.",
+      "depends_on": [],
+      "deliverables": [
+        "perf_takehome.py"
+      ],
+      "read_hints": [
+        "perf_takehome.py",
+        "problem.py"
+      ],
+      "target_symbols": [
+        "KernelBuilder.build"
+      ],
+      "target_regions": [
+        "perf_takehome.py::KernelBuilder.build"
+      ],
+      "preserved_invariants": [
+        "Instruction count per engine must not exceed SLOT_LIMITS",
+        "Order of instructions must remain identical for correctness",
+        "Debug/pause alignment must be preserved"
+      ],
+      "edit_scope": "Modify build() to group slots into instruction bundles respecting SLOT_LIMITS instead of one bundle per slot.",
+      "risk_level": "structural",
+      "tactic_stage": "structural_probe",
+      "risk_evidence": {
+        "field": "edit_scope",
+        "quote": "Modify build() to group slots into instruction bundles respecting SLOT_LIMITS instead of one bundle per slot.",
+        "explanation": "Changing how instructions are bundled affects the control flow of the simulator (how many cycles each instruction takes), which is a structural change to execution."
+      },
+      "probe_plan": "Implement a guarded version of build() that packs slots into bundles but keeps the original behavior if SLOT_LIMITS are exceeded or if correctness fails. Start with a simple packing strategy.",
+      "probe_diff_contract": {
+        "allowed_files": [
+          "perf_takehome.py"
+        ],
+        "allowed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "expected_changed_regions": [
+          "perf_takehome.py::KernelBuilder.build"
+        ],
+        "target_symbols": [
+          "KernelBuilder.build"
+        ],
+        "forbidden_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch"
+        ],
+        "required_unchanged_regions": [
+          "perf_takehome.py::KernelBuilder.build_kernel",
+          "perf_takehome.py::KernelBuilder.add",
+          "perf_takehome.py::KernelBuilder.alloc_scratch"
+        ],
+        "allowed_change_kinds": [
+          "local_refactor",
+          "add_guard"
+        ],
+        "max_files_changed": 1,
+        "max_hunks": 2,
+        "max_changed_lines": 40,
+        "max_changed_functions": 1,
+        "observation": "CYCLES count from do_kernel_test and test pass rate"
+      },
+      "invariant_evidence": [
+        "SLOT_LIMITS are respected by the new packing logic",
+        "Instruction order is preserved within each engine",
+        "Debug/pause instructions remain in their original positions relative to other instructions"
+      ],
+      "validator": {
+        "kind": "metric",
+        "failure_condition": "CYCLES >= 147734 OR test failure OR SLOT_LIMITS violation detected"
+      },
+      "correctness_rationale": "By preserving instruction order and respecting slot limits, the semantic behavior of the kernel remains identical. The only change is execution parallelism within cycles.",
+      "fallback_plan": "If packing fails to reduce cycles or breaks correctness, revert to original build() implementation.",
+      "rollback_or_shrink_plan": "Shrink to a simpler packing strategy (e.g., pack only ALU instructions) or revert entirely if the probe fails.",
+      "acceptance": {
+        "kind": "metric",
+        "commands": []
+      },
+      "budget": {
+        "attempts_max": 3,
+        "attempts_used": 0
+      },
+      "closed_at": null,
+      "recovery_rounds": 0,
+      "attempts_total": 0,
+      "design_contract": {
+        "status": "failed_design",
+        "issues": [
+          "targeted SPEC rewrite left only one broad structural task"
+        ],
+        "checked_at": "2026-06-12T12:46:39+0900"
+      }
+    }
+  ],
+  "decision_rules": [
+    "If task-002 fails to reduce CYCLES or breaks correctness, revert the change and try a smaller probe (e.g., only pack ALU instructions).",
+    "If baseline metric cannot be established in task-001, abort the spec.",
+    "Do not modify any files other than perf_takehome.py."
+  ],
+  "updated_at": "2026-06-12T12:46:39+0900",
+  "progress": {
+    "total": 2,
+    "closed": 0,
+    "deferred": 1,
+    "failed": 1
+  },
+  "active_task_id": null,
+  "last_design_contract_issues": {
+    "task_id": "task-002",
+    "issues": [
+      "targeted SPEC rewrite left only one broad structural task"
+    ],
+    "graph_rewrite_rejected": true
+  },
+  "last_stop_reason": "no_recovery_possible"
+}

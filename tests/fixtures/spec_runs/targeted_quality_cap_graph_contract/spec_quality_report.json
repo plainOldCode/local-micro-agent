@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-12T19:53:46+0900",
+  "status": "fail",
+  "attempt": 2,
+  "spec_id": "pack-vliw-bundles",
+  "issues": [
+    {
+      "code": "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe",
+      "severity": "error",
+      "task_id": "task-001",
+      "detail": "structural edit_scope too broad; start with one reversible probe",
+      "rewrite_hint": "Narrow the task to one reversible operation in one target region. Split multi-step rewrites into independent probe tasks."
+    }
+  ],
+  "issue_codes": [
+    "design_contract_structural_edit_scope_too_broad_start_with_one_reversible_probe"
+  ]
+}
