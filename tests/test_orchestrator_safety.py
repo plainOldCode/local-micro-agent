@@ -11944,7 +11944,7 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
-    def test_spec_hypothesis_brief_repair_failure_stays_hard_blocked(self) -> None:
+    def test_spec_hypothesis_brief_repair_failure_skips_finalizer(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 repo = Path(tmp)
@@ -11995,12 +11995,17 @@ END_HYPOTHESIS_OPTION"""
 
                 self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
                 self.assertEqual(len(manager.seen["reasoner"]), 2)
+                self.assertEqual(len(manager.seen.get("spec_synth", [])), 0)
                 report = json.loads(
                     (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
                 )
-                self.assertIn("hypothesis_option_missing", report["issue_codes"])
+                self.assertEqual(
+                    report["issue_codes"],
+                    ["spec_hypothesis_option_gate_failed"],
+                )
                 progress_path = repo / ".local_micro_agent" / "spec_progress.jsonl"
                 progress = progress_path.read_text() if progress_path.exists() else ""
+                self.assertIn("hypothesis_option_gate_failed", progress)
                 self.assertNotIn("quality_soft_fallback", progress)
 
         asyncio.run(run_case())
@@ -12245,7 +12250,7 @@ END_HYPOTHESIS_OPTION"""
             self.assertIn("VLIW slot-packer", options["accepted"][0]["hypothesis"])
             self.assertIn("Accepted SPEC hypothesis options", context)
 
-    def test_spec_hypothesis_brief_rejects_structural_action_as_local_edit(self) -> None:
+    def test_spec_hypothesis_brief_auto_repairs_structural_action_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / "target.py").write_text("def build(value):\n    return value\n")
@@ -12276,16 +12281,75 @@ END_HYPOTHESIS_OPTION"""
                 ),
             )
 
+            context = agent._spec_hypothesis_options_context(brief)
+
+            options = json.loads(
+                (repo / ".local_micro_agent" / "spec_hypothesis_options.json").read_text()
+            )
+            self.assertEqual(options["accepted_count"], 1)
+            self.assertEqual(options["rejected_count"], 0)
+            accepted = options["accepted"][0]
+            self.assertEqual(accepted["change_boundary"]["kind"], "structural_probe")
+            self.assertEqual(
+                accepted["auto_repaired_issues"],
+                ["structural_hypothesis_boundary_kind_mismatch"],
+            )
+            self.assertEqual(
+                accepted["controller_repair"],
+                {
+                    "source": "deterministic_post_validation_repair",
+                    "issue": "structural_hypothesis_boundary_kind_mismatch",
+                    "from_kind": "local_edit",
+                    "to_kind": "structural_probe",
+                },
+            )
+            self.assertIn("controller_repair", context)
+            self.assertIn("structural_probe", context)
+
+    def test_spec_hypothesis_brief_auto_repair_does_not_mask_other_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "target.py").write_text("def build(value):\n    return value\n")
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "spec_hypothesis_brief_enabled": True,
+                        "spec_grounding_gate": True,
+                        "writable_files": ["target.py"],
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            agent.state.file_context = [
+                FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+            ]
+            agent._spec_grounding_facts_context()
+            brief = self._valid_hypothesis_brief(
+                hypothesis_id="hyp-pack-local",
+                region="target.py::build",
+                kind="local_edit",
+                why_not_smaller="",
+                domain_terms=(
+                    "group instructions into bundles and change scheduling order "
+                    "inside build"
+                ),
+            )
+
             agent._spec_hypothesis_options_context(brief)
 
             options = json.loads(
                 (repo / ".local_micro_agent" / "spec_hypothesis_options.json").read_text()
             )
             self.assertEqual(options["accepted_count"], 0)
+            self.assertEqual(options["rejected_count"], 1)
             self.assertIn(
                 "structural_hypothesis_boundary_kind_mismatch",
                 options["rejected"][0]["issues"],
             )
+            self.assertIn("missing_why_not_smaller", options["rejected"][0]["issues"])
 
     def test_spec_hypothesis_brief_rejects_freeform_tasks(self) -> None:
         async def run_case() -> None:
@@ -12348,7 +12412,11 @@ END_HYPOTHESIS_OPTION"""
                 report = json.loads(
                     (repo / ".local_micro_agent" / "spec_quality_report.json").read_text()
                 )
-                self.assertIn("hypothesis_option_missing", report["issue_codes"])
+                self.assertEqual(
+                    report["issue_codes"],
+                    ["spec_hypothesis_option_gate_failed"],
+                )
+                self.assertEqual(len(manager.seen.get("spec_synth", [])), 0)
 
         asyncio.run(run_case())
 

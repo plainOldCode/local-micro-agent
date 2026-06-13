@@ -152,6 +152,13 @@ class TodoLifecycleMixin:
             quality_attempts = self._spec_quality_rewrite_attempts(
                 targeted_rewrite=targeted_rewrite
             )
+            if self._spec_hypothesis_option_gate_blocked():
+                self._persist_spec_hypothesis_option_gate_failure()
+                self.state.scratch.pop("spec_rewrite_focus", None)
+                self.state.scratch.pop("spec_rewrite_target_task_id", None)
+                self.state.scratch.pop("spec_graph_generation_origin", None)
+                self.state.scratch.pop("spec_graph_parent_graph_id", None)
+                return
             quality_feedback = ""
             for quality_attempt in range(quality_attempts + 1):
                 prompt_focus = "\n\n".join(
@@ -1205,6 +1212,7 @@ class TodoLifecycleMixin:
             ],
         }
         if accepted:
+            self.state.scratch.pop("spec_hypothesis_option_gate_blocked", None)
             return (
                 "Accepted SPEC hypothesis options follow. The no-think "
                 "finalizer may create runnable implementation tasks only from "
@@ -1213,6 +1221,7 @@ class TodoLifecycleMixin:
                 "change_boundary.regions.\n"
                 + json.dumps(compact, ensure_ascii=False, indent=2)
             )
+        self.state.scratch["spec_hypothesis_option_gate_blocked"] = payload
         return (
             "No SPEC hypothesis option passed controller validation. The "
             "no-think finalizer must not create runnable implementation tasks "
@@ -1239,6 +1248,7 @@ class TodoLifecycleMixin:
         rejections_path = self._spec_hypothesis_option_rejections_path()
         rejections_path.parent.mkdir(parents=True, exist_ok=True)
         rejections_path.write_text("")
+        self.state.scratch.pop("spec_hypothesis_option_gate_blocked", None)
 
     def _normalize_spec_hypothesis_options(self, brief: str) -> dict[str, Any]:
         workflow = self.config.get("workflow", {})
@@ -1250,6 +1260,13 @@ class TodoLifecycleMixin:
             option = self._parse_spec_hypothesis_option(raw_id, body)
             issues = self._validate_spec_hypothesis_option(option)
             if issues:
+                repaired = self._maybe_auto_repair_spec_hypothesis_option(
+                    option,
+                    issues,
+                )
+                if repaired is not None:
+                    accepted.append(repaired)
+                    continue
                 rejected.append(
                     {
                         "hypothesis_id": option.get("hypothesis_id"),
@@ -1276,6 +1293,105 @@ class TodoLifecycleMixin:
             "accepted_count": len(accepted),
             "rejected_count": len(rejected),
         }
+
+    def _maybe_auto_repair_spec_hypothesis_option(
+        self,
+        option: dict[str, Any],
+        issues: list[str],
+    ) -> dict[str, Any] | None:
+        issue_set = set(str(issue) for issue in issues)
+        repair_issue = "structural_hypothesis_boundary_kind_mismatch"
+        if repair_issue not in issue_set:
+            return None
+        remaining = [issue for issue in issues if str(issue) != repair_issue]
+        if remaining:
+            return None
+        boundary = option.get("change_boundary")
+        if not isinstance(boundary, dict):
+            return None
+        boundary_kind = str(boundary.get("kind") or "").strip().lower()
+        if boundary_kind != "local_edit":
+            return None
+        repaired = copy.deepcopy(option)
+        repaired_boundary = repaired.setdefault("change_boundary", {})
+        if not isinstance(repaired_boundary, dict):
+            return None
+        repaired_boundary["kind"] = "structural_probe"
+        repaired["controller_repair"] = {
+            "source": "deterministic_post_validation_repair",
+            "issue": repair_issue,
+            "from_kind": "local_edit",
+            "to_kind": "structural_probe",
+        }
+        repaired["auto_repaired_issues"] = [repair_issue]
+        if self._validate_spec_hypothesis_option(repaired):
+            return None
+        return repaired
+
+    def _spec_hypothesis_option_gate_blocked(self) -> bool:
+        if not self._spec_hypothesis_brief_enabled():
+            return False
+        payload = self.state.scratch.get("spec_hypothesis_option_gate_blocked")
+        if not isinstance(payload, dict):
+            return False
+        try:
+            accepted_count = int(payload.get("accepted_count") or 0)
+        except (TypeError, ValueError):
+            accepted_count = 0
+        return accepted_count == 0
+
+    def _persist_spec_hypothesis_option_gate_failure(self) -> None:
+        payload = self.state.scratch.get("spec_hypothesis_option_gate_blocked")
+        payload = payload if isinstance(payload, dict) else {}
+        rejected = payload.get("rejected") if isinstance(payload.get("rejected"), list) else []
+        issue_codes = []
+        for record in rejected:
+            if not isinstance(record, dict):
+                continue
+            for issue in record.get("issues", []):
+                text = str(issue or "").strip()
+                if text:
+                    issue_codes.append(text)
+        report = {
+            "version": 1,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "status": "fail",
+            "attempt": 0,
+            "spec_id": "",
+            "issues": [
+                {
+                    "code": "spec_hypothesis_option_gate_failed",
+                    "severity": "error",
+                    "task_id": "",
+                    "detail": "no accepted SPEC hypothesis option is available after bounded repair",
+                    "rejected_issue_codes": list(dict.fromkeys(issue_codes)),
+                    "rewrite_hint": (
+                        "Repair SPEC_THINK_BRIEF typed hypothesis options before "
+                        "calling the no-think finalizer. Do not synthesize runnable "
+                        "tasks from rejected or free-form hypothesis prose."
+                    ),
+                }
+            ],
+            "issue_codes": ["spec_hypothesis_option_gate_failed"],
+        }
+        self._persist_spec_quality_report(report)
+        spec = {
+            "version": 2,
+            "spec_id": "spec_hypothesis_option_gate_failed",
+            "task_graph": [],
+        }
+        self._append_spec_progress_event(
+            "hypothesis_option_gate_failed",
+            spec,
+            extra={
+                "accepted_count": 0,
+                "rejected_count": len(rejected),
+                "rejected_issue_codes": list(dict.fromkeys(issue_codes)),
+            },
+        )
+        self.state.notes.append(
+            "Spec hypothesis option gate blocked finalizer: no accepted options after repair"
+        )
 
     @staticmethod
     def _extract_spec_hypothesis_option_blocks(brief: str) -> list[tuple[str, str]]:
@@ -2046,6 +2162,7 @@ class TodoLifecycleMixin:
         report: dict[str, Any],
     ) -> bool:
         hard_codes = {
+            "spec_hypothesis_option_gate_failed",
             "hypothesis_option_missing",
             "hypothesis_id_missing",
             "hypothesis_id_unknown",
