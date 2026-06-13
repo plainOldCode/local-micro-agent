@@ -13251,6 +13251,95 @@ END_HYPOTHESIS_OPTION"""
             self.assertIn("Copy one accepted hypothesis_id exactly", feedback)
             self.assertIn("do not invent", feedback)
 
+    def test_spec_quality_feedback_lists_allowed_hypothesis_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            agent.state.scratch["spec_hypothesis_options"] = {
+                "accepted": [
+                    {"hypothesis_id": "hyp-build-inner"},
+                    {"hypothesis_id": "hyp-hash-local"},
+                ],
+                "rejected": [],
+            }
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "hypothesis_id_unknown",
+                        "task_id": "task-001",
+                        "detail": "unknown hypothesis id hyp-invented",
+                    }
+                ],
+            }
+
+            feedback = agent._spec_quality_feedback_context(report)
+
+            self.assertIn("Allowed accepted hypothesis_id values", feedback)
+            self.assertIn("hyp-build-inner", feedback)
+            self.assertIn("hyp-hash-local", feedback)
+
+    def test_spec_quality_feedback_explains_target_region_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            report = {
+                "status": "fail",
+                "issues": [
+                    {
+                        "code": "target_region_count",
+                        "task_id": "task-001",
+                        "detail": "task has two target regions",
+                    }
+                ],
+            }
+
+            feedback = agent._spec_quality_feedback_context(report)
+
+            self.assertIn("exactly one runnable task", feedback)
+            self.assertIn("exactly one target_region", feedback)
+            self.assertIn("change_boundary.regions", feedback)
+
+    def test_structural_probe_drift_rewrite_summary_keeps_hypothesis_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = MicroAgent(
+                {"models": {}, "providers": {}, "mcp_servers": {}, "workflow": {}},
+                AgentState(repo_root=Path(tmp), user_request="test"),
+            )
+            agent.state.scratch["run_spec"] = {
+                "spec_id": "spec",
+                "task_graph": [
+                    {
+                        "id": "task-001",
+                        "hypothesis_id": "hyp-build-inner",
+                        "target_regions": ["perf_takehome.py::KernelBuilder.build"],
+                    }
+                ],
+            }
+            latest = {
+                "loop": 0,
+                "status": "rejected_todo_scope_drift",
+                "tactic_stage": "structural_probe",
+                "failure_detail": (
+                    "structural_probe change is too broad; use a smaller "
+                    "reversible probe inside the active target region"
+                ),
+            }
+
+            summary = agent._active_task_drift_rewrite_summary("task-001", latest)
+
+            self.assertIn("keep hypothesis_id=hyp-build-inner exactly", summary)
+            self.assertIn(
+                "keep exactly one target_region=perf_takehome.py::KernelBuilder.build",
+                summary,
+            )
+            self.assertIn("inner statement, branch, or loop body", summary)
+            self.assertIn("do not target text that starts with def", summary)
+
     def test_shrink_probe_plan_rejects_rollback_only_single_phrases(self) -> None:
         self.assertFalse(MicroAgent._plan_mentions_shrink_or_probe("Revert the single patch."))
         self.assertFalse(

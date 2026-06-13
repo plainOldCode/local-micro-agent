@@ -2665,6 +2665,30 @@ class TodoLifecycleMixin:
                 "Accepted SPEC hypothesis options section; do not invent, rename, "
                 "or synthesize hypothesis ids."
             )
+            accepted_ids = []
+            options = self.state.scratch.get("spec_hypothesis_options")
+            if not isinstance(options, dict):
+                options = {}
+            accepted = options.get("accepted") if isinstance(options.get("accepted"), list) else []
+            for option in accepted:
+                if not isinstance(option, dict):
+                    continue
+                hypothesis_id = str(option.get("hypothesis_id") or "").strip()
+                if hypothesis_id:
+                    accepted_ids.append(hypothesis_id)
+            if accepted_ids:
+                guidance.append(
+                    "Allowed accepted hypothesis_id values: "
+                    + ", ".join(accepted_ids)
+                    + ". Use one of these exact strings."
+                )
+        if "target_region_count" in issue_codes:
+            guidance.append(
+                "For target_region_count failures, emit exactly one runnable task "
+                "with exactly one target_region copied from the accepted option's "
+                "change_boundary.regions. Do not split one structural probe across "
+                "multiple runnable target_regions."
+            )
         if any(
             code.startswith("design_contract_rollback_or_shrink_plan")
             or "rollback_or_shrink_plan" in code
@@ -8014,6 +8038,56 @@ class TodoLifecycleMixin:
                 600,
             ),
         ]
+        latest_detail = str(
+            latest.get("no_change_reason")
+            or latest.get("failure_detail")
+            or latest.get("summary")
+            or ""
+        )
+        if (
+            "structural_probe change is too broad" in latest_detail
+            or str(latest.get("tactic_stage") or "") == "structural_probe"
+        ):
+            task_snapshot = {}
+            spec = self._current_run_spec_snapshot()
+            tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+            if not tasks:
+                raw_spec = self.state.scratch.get("run_spec")
+                spec = raw_spec if isinstance(raw_spec, dict) else {}
+            tasks = spec.get("task_graph") if isinstance(spec.get("task_graph"), list) else []
+            for task in tasks:
+                if isinstance(task, dict) and str(task.get("id") or "") == task_id:
+                    task_snapshot = task
+                    break
+            if not task_snapshot:
+                raw_spec = self.state.scratch.get("run_spec")
+                raw_tasks = (
+                    raw_spec.get("task_graph")
+                    if isinstance(raw_spec, dict) and isinstance(raw_spec.get("task_graph"), list)
+                    else []
+                )
+                for task in raw_tasks:
+                    if isinstance(task, dict) and str(task.get("id") or "") == task_id:
+                        task_snapshot = task
+                        break
+            hypothesis_id = str(task_snapshot.get("hypothesis_id") or "").strip()
+            target_regions = self._string_list_from_any(task_snapshot.get("target_regions"))
+            if hypothesis_id or target_regions:
+                detail_bits = []
+                if hypothesis_id:
+                    detail_bits.append(f"keep hypothesis_id={hypothesis_id} exactly")
+                if target_regions:
+                    detail_bits.append(
+                        "keep exactly one target_region="
+                        + target_regions[0]
+                    )
+                lines.append(
+                    "Structural_probe broad-change recovery: "
+                    + "; ".join(detail_bits)
+                    + ". Shrink the contract to an inner statement, branch, or "
+                    "loop body inside that region; do not target text that starts "
+                    "with def, async def, or class."
+                )
         if attempts:
             lines.append("Recent drift attempts:")
             for attempt in attempts:
