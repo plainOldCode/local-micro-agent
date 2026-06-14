@@ -84,6 +84,7 @@ _SIMPLE: dict[str, Any] = {
     "deterministic_test_decision": True,
     "retry_rejected_candidates": True,
     "repair_target_not_found": True,
+    "code_output_format": "xml",
     "reflect_before_retry": False,
     "brainstorm_after_rejections": 0,
     "candidate_queue": False,

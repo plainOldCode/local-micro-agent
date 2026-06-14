@@ -17849,6 +17849,100 @@ value = 'fast'
             self.assertEqual(record["repair_parent_patch_miss_kind"], "target_not_found")
             self.assertEqual(record["repair_parent_patch_miss_path"], "target.py")
 
+    def test_simple_preset_uses_xml_code_and_patch_miss_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'old'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "preset": "simple",
+                    "simple_thinking_brief_enabled": False,
+                    "writable_files": ["target.py"],
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "t=Path('target.py').read_text(); "
+                            "print('cycles: 80' if 'fast' in t else 'cycles: 120')\""
+                        )
+                    ],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 100,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.planned_files = ["target.py"]
+            agent = MicroAgent(config, state)
+            agent.models = _SequenceModelManager(
+                [
+                    """
+<candidates>
+<candidate id="stale">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Try the same small edit with stale source.</reason>
+<change>
+<path>target.py</path>
+<search>
+value = 'missing'
+</search>
+<replace>
+value = 'fast'
+</replace>
+</change>
+</candidate>
+</candidates>
+""",
+                    """
+<candidates>
+<candidate id="fixed">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Repair stale search using current source.</reason>
+<change>
+<path>target.py</path>
+<search>
+value = 'old'
+</search>
+<replace>
+value = 'fast'
+</replace>
+</change>
+</candidate>
+</candidates>
+""",
+                ]
+            )
+
+            async def code_and_test() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                    await agent.test()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_and_test())
+
+            self.assertEqual(agent.config["workflow"]["code_output_format"], "xml")
+            self.assertEqual(target.read_text(), "value = 'fast'\n")
+            self.assertIn(
+                "Single CODE candidate target-not-found repair generated",
+                "\n".join(state.notes),
+            )
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["status"], "improved")
+            self.assertEqual(record["repair_parent_id"], "single")
+            self.assertTrue(record["repair_attempted"])
+            self.assertEqual(record["repair_status"], "applied")
+
     def test_apply_replacement_retargeted_noop_is_not_counted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

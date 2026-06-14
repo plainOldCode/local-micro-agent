@@ -83,7 +83,7 @@ one of five vetted bundles from `src/local_micro_agent/presets.py`:
 | Preset | For | Enables |
 |---|---|---|
 | `minimal` | conservative fix-the-tests loop | deterministic test decisions, retries, target-not-found repair; all exploration machinery off |
-| `simple` | mini-swe/Pi-style classic loop | classic `READ -> CODE -> TEST`, narrow deterministic CODE/TEST mechanics, optional advisory thinking brief; no run-spec graph, scheduler, structural lifecycle, or candidate queue |
+| `simple` | mini-swe/Pi-style classic loop | classic `READ -> CODE -> TEST`, XML-like raw search/replace output, target-not-found repair, narrow deterministic CODE/TEST mechanics, optional advisory thinking brief; no run-spec graph, scheduler, structural lifecycle, or candidate queue |
 | `search` | long-running metric search | conditional reflect, brainstorm after repeated rejections, novelty/axis/region gates, adaptive gate controller, candidate history + artifacts, continue-after-improvement, profiling |
 | `structural` | multi-step refactors | `search` + run-spec task graph, semantic analysis, structural scaffold/probe/expand lifecycle, structural checkpoints |
 | `spec` | build a spec through a task graph | `structural` + strict spec-mode scheduling: task-scoped READ, synthesized acceptance, dependency gates, recovery rounds, progress/report artifacts, grounded/design/quality/probe gates |
@@ -597,6 +597,9 @@ even when the model's declared `path` was stale or misleading.
 
 **Output format.** For models that struggle to JSON-escape multi-line code,
 `code_output_format="xml"` switches CODE to raw `<search>`/`<replace>` blocks.
+The `simple` preset uses this by default so classic single-candidate runs share
+the same raw-block repair path as broader search/spec work without enabling
+run-spec scheduling or gates.
 `log_raw_model_outputs=true` saves malformed outputs for diagnosis.
 
 ## Telemetry

@@ -48,6 +48,7 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertFalse(workflow["candidate_novelty_gate"])
         self.assertTrue(workflow["deterministic_test_decision"])
         self.assertTrue(workflow["repair_target_not_found"])
+        self.assertEqual(workflow["code_output_format"], "xml")
         self.assertTrue(workflow["simple_report_enabled"])
         self.assertEqual(workflow["simple_report_path"], ".local_micro_agent/simple_report.md")
         self.assertTrue(workflow["simple_thinking_brief_enabled"])
