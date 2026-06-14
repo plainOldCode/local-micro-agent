@@ -13137,6 +13137,217 @@ END_HYPOTHESIS_OPTION"""
 
         asyncio.run(run_case())
 
+    def test_simple_plateau_guard_injected_before_simple_report(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "target.py").write_text("def parse_item(value):\n    return value\n")
+                history = repo / ".local_micro_agent" / "candidates.jsonl"
+                history.parent.mkdir()
+                records = [
+                    {
+                        "candidate_id": f"loop-{idx}",
+                        "loop": idx,
+                        "status": "rejected",
+                        "failure_class": "no_improvement",
+                        "fingerprint": "same-shape",
+                        "metric": 10,
+                        "strategy_axes": ["data_flow"],
+                        "region_keys": ["target.py::parse_item::data_flow"],
+                        "changes": [
+                            {
+                                "path": "target.py",
+                                "target_region": "target.py::parse_item",
+                                "mode": "replacement",
+                                "reason": "Metric-neutral parser rewrite",
+                            }
+                        ],
+                    }
+                    for idx in range(2)
+                ]
+                history.write_text("\n".join(json.dumps(record) for record in records))
+                manager = _RoleModelManager({"coder": '{"changes":[]}'})
+                agent = MicroAgent(
+                    {
+                        "models": {"coder": "coder-model", "default": "coder-model"},
+                        "providers": {},
+                        "mcp_servers": {},
+                        "workflow": {
+                            "preset": "simple",
+                            "writable_files": ["target.py"],
+                            "simple_report_char_limit": 800,
+                            "simple_no_improvement_novelty_guard": True,
+                            "simple_no_improvement_repeat_limit": 2,
+                        },
+                    },
+                    AgentState(repo_root=repo, user_request="test"),
+                )
+                agent.models = manager
+                agent.state.plan_markdown = "Plan"
+                agent.state.file_context = [
+                    FileSnapshot(path="target.py", content=(repo / "target.py").read_text())
+                ]
+
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                finally:
+                    await agent.mcp.close()
+
+                content = "\n\n".join(
+                    message["content"]
+                    for message in manager.seen["coder"][0]
+                    if message.get("role") == "user"
+                )
+                self.assertLess(
+                    content.index("Simple no-improvement novelty guard follows"),
+                    content.index("Simple report follows"),
+                )
+                self.assertIn("do not repeat the listed metric-neutral edit shape", content)
+                self.assertIn("materially different metric-bearing hypothesis", content)
+
+        asyncio.run(run_case())
+
+    def test_simple_plateau_guard_context_after_repeated_no_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history = repo / ".local_micro_agent" / "candidates.jsonl"
+            history.parent.mkdir()
+            records = [
+                {
+                    "candidate_id": f"loop-{idx}",
+                    "loop": idx,
+                    "status": "rejected",
+                    "failure_class": "no_improvement",
+                    "fingerprint": "same-shape",
+                    "metric": 147734,
+                    "baseline": 147734,
+                    "strategy_axes": ["data_flow"],
+                    "region_keys": ["perf_takehome.py::build::data_flow"],
+                    "changes": [
+                        {
+                            "path": "perf_takehome.py",
+                            "target_region": "perf_takehome.py::KernelBuilder.build",
+                            "mode": "replacement",
+                            "reason": "Broad conservative VLIW packer",
+                        }
+                    ],
+                }
+                for idx in range(2)
+            ]
+            history.write_text("\n".join(json.dumps(record) for record in records))
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "preset": "simple",
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "simple_no_improvement_novelty_guard": True,
+                        "simple_no_improvement_repeat_limit": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            context = agent._format_simple_plateau_guard_context()
+
+            self.assertIn("Simple no-improvement novelty guard is active", context)
+            self.assertIn("do not submit another candidate", context.lower())
+            self.assertIn("change at least one of edit site", context)
+            self.assertIn("perf_takehome.py::build::data_flow", context)
+
+    def test_simple_plateau_guard_disabled_has_no_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history = repo / ".local_micro_agent" / "candidates.jsonl"
+            history.parent.mkdir()
+            record = {
+                "candidate_id": "loop-0",
+                "loop": 0,
+                "status": "rejected",
+                "failure_class": "no_improvement",
+                "fingerprint": "same-shape",
+                "metric": 10,
+                "region_keys": ["target.py::parse_item::data_flow"],
+                "changes": [{"path": "target.py", "mode": "replacement"}],
+            }
+            history.write_text("\n".join(json.dumps(record) for _ in range(2)))
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "preset": "simple",
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+
+            self.assertEqual(agent._format_simple_plateau_guard_context(), "")
+
+    def test_simple_plateau_record_annotation_counts_recent_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            history = repo / ".local_micro_agent" / "candidates.jsonl"
+            history.parent.mkdir()
+            agent = MicroAgent(
+                {
+                    "models": {},
+                    "providers": {},
+                    "mcp_servers": {},
+                    "workflow": {
+                        "preset": "simple",
+                        "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                        "simple_no_improvement_novelty_guard": True,
+                        "simple_no_improvement_repeat_limit": 2,
+                    },
+                },
+                AgentState(repo_root=repo, user_request="test"),
+            )
+            candidate = CodeCandidate(
+                "repeat",
+                [
+                    CodeChange(
+                        path="target.py",
+                        reason="same inert edit",
+                        target="value = 1\n",
+                        replacement="value = 1\n",
+                    )
+                ],
+                "same inert edit",
+            )
+
+            agent._append_candidate_history(
+                candidate,
+                status="rejected",
+                metric=10,
+                applied=1,
+                failed=True,
+                extra={"failure_class": "no_improvement"},
+            )
+            agent._append_candidate_history(
+                candidate,
+                status="rejected",
+                metric=10,
+                applied=1,
+                failed=True,
+                extra={"failure_class": "no_improvement"},
+            )
+
+            rows = [json.loads(line) for line in history.read_text().splitlines()]
+            self.assertEqual(rows[0]["simple_plateau_count"], 1)
+            self.assertEqual(rows[0]["simple_plateau_guard_action"], "observe")
+            self.assertEqual(rows[1]["simple_plateau_count"], 2)
+            self.assertEqual(rows[1]["simple_plateau_guard_action"], "steer")
+            self.assertEqual(
+                rows[0]["simple_plateau_signature"],
+                rows[1]["simple_plateau_signature"],
+            )
+
     def test_simple_report_malformed_history_clears_stale_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

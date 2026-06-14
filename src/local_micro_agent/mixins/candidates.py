@@ -4,6 +4,7 @@ Extracted from orchestrator.py; mixed into MicroAgent.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -130,6 +131,155 @@ class CandidateRecordsMixin:
             and self._spec_mode_enabled() is False
             and bool(workflow.get("simple_report_enabled"))
         )
+
+    def _simple_no_improvement_guard_enabled(self) -> bool:
+        workflow = self.config.get("workflow", {})
+        return (
+            workflow.get("preset") == "simple"
+            and self._spec_mode_enabled() is False
+            and bool(workflow.get("simple_no_improvement_novelty_guard"))
+        )
+
+    def _simple_no_improvement_window(self) -> int:
+        workflow = self.config.get("workflow", {})
+        return max(1, int(workflow.get("simple_no_improvement_window", 8) or 8))
+
+    def _simple_no_improvement_repeat_limit(self) -> int:
+        workflow = self.config.get("workflow", {})
+        return max(1, int(workflow.get("simple_no_improvement_repeat_limit", 2) or 2))
+
+    def _simple_plateau_signature(self, record: dict[str, Any]) -> str:
+        if not self._simple_report_is_no_improvement(record):
+            return ""
+        regions = record.get("region_keys")
+        if not isinstance(regions, list) or not regions:
+            regions = [
+                str(change.get("target_region") or change.get("path") or "")
+                for change in record.get("changes", [])
+                if isinstance(change, dict)
+            ]
+        axes = record.get("strategy_axes")
+        if not isinstance(axes, list) or not axes:
+            axes = [str(record.get("strategy_axis") or "")]
+        changes = []
+        for change in record.get("changes", [])[:4]:
+            if not isinstance(change, dict):
+                continue
+            changes.append(
+                {
+                    "path": change.get("path", ""),
+                    "mode": change.get("mode", ""),
+                    "target_region": change.get("target_region", ""),
+                    "line_range": change.get("line_range", {}),
+                }
+            )
+        payload = {
+            "regions": sorted(str(item) for item in regions if str(item))[:6],
+            "axes": sorted(str(item) for item in axes if str(item))[:6],
+            "candidate_fingerprint": str(record.get("fingerprint") or ""),
+            "changes": changes,
+            "metric": record.get("metric"),
+            "baseline": record.get("baseline"),
+            "metric_bucket": "metric_neutral",
+        }
+        if not any(payload.values()):
+            return ""
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        region_label = "|".join(payload["regions"])[:120] or "unknown-region"
+        axis_label = "|".join(payload["axes"])[:80] or "unknown-axis"
+        return f"{region_label}::{axis_label}::{digest}"
+
+    def _simple_plateau_count(
+        self, signature: str, records: list[dict[str, Any]]
+    ) -> int:
+        if not signature:
+            return 0
+        return sum(
+            1
+            for record in records
+            if (
+                str(record.get("simple_plateau_signature") or "")
+                or self._simple_plateau_signature(record)
+            )
+            == signature
+        )
+
+    def _annotate_simple_plateau_record(self, record: dict[str, Any]) -> None:
+        if not self._simple_no_improvement_guard_enabled():
+            return
+        signature = self._simple_plateau_signature(record)
+        if not signature:
+            return
+        recent = self._candidate_history_records(
+            limit=self._simple_no_improvement_window()
+        )
+        count = self._simple_plateau_count(signature, recent) + 1
+        repeat_limit = self._simple_no_improvement_repeat_limit()
+        record["simple_plateau_signature"] = signature
+        record["simple_plateau_count"] = count
+        record["simple_plateau_repeat_limit"] = repeat_limit
+        record["simple_plateau_guard_action"] = (
+            "steer" if count >= repeat_limit else "observe"
+        )
+
+    def _format_simple_plateau_guard_context(self) -> str:
+        if not self._simple_no_improvement_guard_enabled():
+            return ""
+        records = self._candidate_history_records(
+            limit=self._simple_no_improvement_window()
+        )
+        if not records:
+            return ""
+        repeat_limit = self._simple_no_improvement_repeat_limit()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            signature = str(record.get("simple_plateau_signature") or "")
+            if not signature:
+                signature = self._simple_plateau_signature(record)
+            if not signature:
+                continue
+            grouped.setdefault(signature, []).append(record)
+        repeated = [
+            (signature, items)
+            for signature, items in grouped.items()
+            if len(items) >= repeat_limit
+        ]
+        if not repeated:
+            return ""
+        lines = [
+            "Simple no-improvement novelty guard is active.",
+            "Do not submit another candidate with the repeated metric-neutral shape(s) below unless you provide a concrete new metric-bearing change.",
+            "Required novelty: change at least one of edit site, strategy axis, emitted bundle schedule, or measured bottleneck hypothesis. If editing the same source region, the replacement must materially change generated instructions or scheduling, not just rephrase the same broad tactic.",
+        ]
+        for signature, items in repeated[-5:]:
+            latest = items[-1]
+            changes = latest.get("changes") if isinstance(latest.get("changes"), list) else []
+            reason = ""
+            if changes and isinstance(changes[0], dict):
+                reason = str(changes[0].get("reason") or "")
+            reason = reason or str(latest.get("reason") or latest.get("summary") or "")
+            metrics = [
+                item.get("metric")
+                for item in items
+                if item.get("metric") not in (None, "", [], {})
+            ]
+            regions = latest.get("region_keys")
+            if not isinstance(regions, list) or not regions:
+                regions = [
+                    change.get("target_region") or change.get("path")
+                    for change in changes
+                    if isinstance(change, dict)
+                ]
+            lines.append(
+                "- "
+                f"signature={self._truncate_text(signature, 180)}; "
+                f"count={len(items)}; "
+                f"regions={self._truncate_text(', '.join(str(item) for item in regions if item), 180) or 'unknown'}; "
+                f"metrics={metrics[-3:]}; "
+                f"latest_reason={self._truncate_text(reason, 220)}"
+            )
+        return "\n".join(lines)
 
     def _clear_simple_report_artifacts(self) -> None:
         self.state.scratch.pop("simple_report", None)
@@ -269,7 +419,7 @@ class CandidateRecordsMixin:
             for record in grouped
             if record.get("metric") not in (None, "", [], {})
         ]
-        return {
+        item = {
             "kind": kind,
             "count": len(grouped),
             "regions": [self._truncate_text(str(item), 120) for item in regions[:6]],
@@ -278,6 +428,15 @@ class CandidateRecordsMixin:
             "latest_candidate_id": latest.get("candidate_id", ""),
             "latest_loop": latest.get("loop"),
         }
+        for key in (
+            "simple_plateau_signature",
+            "simple_plateau_count",
+            "simple_plateau_guard_action",
+        ):
+            value = latest.get(key)
+            if value not in (None, "", [], {}):
+                item[key] = value
+        return item
 
     def _render_simple_report_markdown(
         self,
@@ -303,6 +462,13 @@ class CandidateRecordsMixin:
                     f"{item['reason']} "
                     f"(repeated {item['count']}x in {regions}{metrics})."
                 )
+                if item.get("simple_plateau_guard_action"):
+                    lines.append(
+                        "  Guard: "
+                        f"{item.get('simple_plateau_guard_action')} "
+                        f"after plateau_count={item.get('simple_plateau_count', item['count'])}; "
+                        "change edit site, strategy axis, emitted schedule, or measured bottleneck hypothesis before retrying."
+                    )
         if refresh_guidance:
             lines.extend(["", "Refresh or retarget exact current source:"])
             for item in refresh_guidance[:5]:
@@ -1495,6 +1661,7 @@ class CandidateRecordsMixin:
                 "Retry the same active task using only its declared contract."
             )
             record.update(self._active_task_drift_record_extra(record))
+        self._annotate_simple_plateau_record(record)
         self._bind_metric_acceptance_to_candidate_record(record)
         self.state.scratch["last_candidate_observation"] = dict(record)
         with path.open("a") as handle:
