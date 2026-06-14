@@ -115,7 +115,7 @@
     ],
     "context_symbols": {},
     "test_commands": [
-      "python3 perf_takehome.py"
+      "/opt/homebrew/bin/python3 perf_takehome.py"
     ],
     "metric_regex": "CYCLES:\\s*(\\d+)",
     "metric_goal": "minimize",
