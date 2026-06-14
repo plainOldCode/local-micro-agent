@@ -252,7 +252,7 @@ class MicroAgent(
             return
         selected = str(parts.source or parts.usage.get("thinking_brief_selected_source") or "")
         accept_reasoning = bool(
-            workflow.get("simple_thinking_brief_accept_reasoning_only", True)
+            workflow.get("simple_thinking_brief_accept_reasoning_only", False)
         )
         if selected == "reasoning" and not accept_reasoning:
             brief = ""
@@ -566,17 +566,6 @@ class MicroAgent(
                         "Stagnation brainstorm tactics follow. Prefer one tactic that "
                         "matches the required strategy axis and has not been rejected.\n"
                         f"{tactic_library}"
-                    )
-                simple_plateau_guard = self._format_simple_plateau_guard_context()
-                if simple_plateau_guard:
-                    add_runtime_context(
-                        "Simple no-improvement novelty guard follows. This is a "
-                        "simple-mode loop-control warning derived from recent "
-                        "candidate metrics, not a run_spec or scheduler task. It "
-                        "is a hard steering constraint for the next CODE attempt: "
-                        "do not repeat the listed metric-neutral edit shape; pick "
-                        "a materially different metric-bearing hypothesis.\n"
-                        f"{simple_plateau_guard}"
                     )
                 simple_report = self._format_simple_report_context()
                 if simple_report:

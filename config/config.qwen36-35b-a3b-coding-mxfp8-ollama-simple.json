@@ -142,9 +142,10 @@
     "deterministic_test_decision": true,
     "profile_agent": true,
     "profile_model_stream": true,
+    "simple_report_enabled": true,
     "simple_thinking_brief_enabled": true,
     "simple_thinking_brief_model_role": "reasoner",
-    "simple_thinking_brief_accept_reasoning_only": true,
+    "simple_thinking_brief_accept_reasoning_only": false,
     "simple_thinking_brief_char_limit": 3000,
     "simple_thinking_brief_code_char_limit": 1200
   }

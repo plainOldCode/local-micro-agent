@@ -45,14 +45,22 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertFalse(workflow["structural_state_checkpoint"])
         self.assertFalse(workflow["candidate_queue"])
         self.assertFalse(workflow["adaptive_search_memory"])
-        self.assertFalse(workflow["candidate_novelty_gate"])
+        self.assertTrue(workflow["candidate_novelty_gate"])
         self.assertTrue(workflow["deterministic_test_decision"])
         self.assertTrue(workflow["repair_target_not_found"])
         self.assertEqual(workflow["code_output_format"], "xml")
-        self.assertTrue(workflow["simple_report_enabled"])
-        self.assertEqual(workflow["simple_report_path"], ".local_micro_agent/simple_report.md")
+        self.assertNotIn("simple_report_enabled", workflow)
         self.assertTrue(workflow["simple_thinking_brief_enabled"])
         self.assertEqual(workflow["simple_thinking_brief_model_role"], "reasoner")
+        self.assertFalse(workflow["simple_thinking_brief_accept_reasoning_only"])
+
+    def test_simple_preset_stays_below_search_key_count(self) -> None:
+        simple = apply_workflow_preset({"workflow": {"preset": "simple"}})["workflow"]
+        search = apply_workflow_preset({"workflow": {"preset": "search"}})["workflow"]
+        ignored = {"preset", "preset_defaulted_keys"}
+        simple_keys = set(simple) - ignored
+        search_keys = set(search) - ignored
+        self.assertLessEqual(len(simple_keys), len(search_keys))
 
     def test_simple_report_defaults_do_not_leak_to_other_presets(self) -> None:
         for preset in ("minimal", "search", "structural", "spec"):

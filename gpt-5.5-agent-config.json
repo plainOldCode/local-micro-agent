@@ -131,10 +131,7 @@
     "raw_model_output_dir": ".local_micro_agent/raw_model_outputs",
     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
     "candidate_history_limit": 20,
-    "simple_no_improvement_novelty_guard": true,
-    "simple_no_improvement_repeat_limit": 2,
-    "simple_no_improvement_window": 8,
-    "simple_no_improvement_pre_apply_reject": false,
+    "simple_report_enabled": true,
     "record_candidate_artifacts": true,
     "candidate_artifact_dir": ".local_micro_agent/candidate_artifacts",
     "candidate_artifact_output_limit": 12000,
@@ -156,7 +153,7 @@
     "profile_model_stream": true,
     "simple_thinking_brief_enabled": true,
     "simple_thinking_brief_model_role": "reasoner",
-    "simple_thinking_brief_accept_reasoning_only": true,
+    "simple_thinking_brief_accept_reasoning_only": false,
     "simple_thinking_brief_char_limit": 3000,
     "simple_thinking_brief_code_char_limit": 1200
   }

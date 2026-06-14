@@ -14,6 +14,8 @@ used as a base and selectively overridden.
   after repeated rejections, novelty/axis/region gates, adaptive gate
   controller, candidate history and artifacts, and profiling.
 - `simple`: classic CODE/TEST loop with thin optional thinking steering.
+  Optional reports are opt-in so the default loop stays small; exact
+  duplicate candidate retries use the shared novelty gate.
   It deliberately avoids run-spec graphs, schedulers, structural lifecycle,
   adaptive gates, and candidate queues.
 - `structural`: `search` plus the scaffold/probe/expand machinery for
@@ -88,7 +90,7 @@ _SIMPLE: dict[str, Any] = {
     "reflect_before_retry": False,
     "brainstorm_after_rejections": 0,
     "candidate_queue": False,
-    "candidate_novelty_gate": False,
+    "candidate_novelty_gate": True,
     "adaptive_search_memory": False,
     "adaptive_search_reject_cooled_axes": False,
     "adaptive_search_reject_cooled_regions": False,
@@ -103,19 +105,9 @@ _SIMPLE: dict[str, Any] = {
     "structural_state_checkpoint": False,
     "record_candidate_artifacts": True,
     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-    "simple_report_enabled": True,
-    "simple_report_path": ".local_micro_agent/simple_report.md",
-    "simple_report_json_path": ".local_micro_agent/simple_report.json",
-    "simple_report_history_limit": 20,
-    "simple_report_repeat_threshold": 2,
-    "simple_report_char_limit": 3000,
     "simple_thinking_brief_enabled": True,
     "simple_thinking_brief_model_role": "reasoner",
-    "simple_thinking_brief_accept_reasoning_only": True,
-    "simple_thinking_brief_char_limit": 3000,
-    "simple_thinking_brief_path": ".local_micro_agent/simple_thinking_brief.md",
-    "simple_thinking_brief_meta_path": ".local_micro_agent/simple_thinking_brief_meta.json",
-    "simple_thinking_brief_code_char_limit": 1200,
+    "simple_thinking_brief_accept_reasoning_only": False,
 }
 
 _STRUCTURAL: dict[str, Any] = {
