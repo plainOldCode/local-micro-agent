@@ -835,13 +835,17 @@ class CandidateRecordsMixin:
         workflow = self.config.get("workflow", {})
         if not workflow.get("repair_target_not_found"):
             return None
-        latest_patch_miss_kind = ""
+        patch_miss_kinds: list[str] = []
         events = self.state.scratch.get("patch_miss_events")
-        if isinstance(events, list) and events and isinstance(events[-1], dict):
-            latest_patch_miss_kind = str(events[-1].get("patch_miss_kind", ""))
+        if isinstance(events, list):
+            patch_miss_kinds = [
+                str(event.get("patch_miss_kind", ""))
+                for event in events
+                if isinstance(event, dict)
+            ]
         is_target_miss = "Replacement target not found" in failure_detail
         is_noop_reapply = (
-            latest_patch_miss_kind == "patch_noop"
+            "patch_noop" in patch_miss_kinds
             and (
                 "Replacement is a no-op" in failure_detail
                 or "No code changes were applied" in failure_detail
@@ -856,7 +860,7 @@ class CandidateRecordsMixin:
             failure_detail=failure_detail,
             allowed=allowed,
             repair_kind=(
-                "noop_reapply" if is_noop_reapply and not is_target_miss else "target_miss"
+                "noop_reapply" if is_noop_reapply else "target_miss"
             ),
         )
         try:
