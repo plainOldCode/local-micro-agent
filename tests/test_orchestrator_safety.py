@@ -18009,6 +18009,101 @@ value = 'fast'
             self.assertTrue(record["repair_attempted"])
             self.assertEqual(record["repair_status"], "applied")
 
+    def test_patch_noop_repair_uses_current_source_for_next_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "target.py"
+            target.write_text("value = 'fast'\n")
+            config = {
+                "models": {"default": "static"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "writable_files": ["target.py"],
+                    "test_commands": [
+                        (
+                            "python3 -c \"from pathlib import Path; "
+                            "t=Path('target.py').read_text(); "
+                            "print('cycles: 70' if 'faster' in t else 'cycles: 80')\""
+                        )
+                    ],
+                    "metric_regex": r"cycles: (\d+)",
+                    "baseline_metric": 75,
+                    "accept_if_improved": True,
+                    "candidate_history_path": ".local_micro_agent/candidates.jsonl",
+                    "repair_target_not_found": True,
+                    "code_output_format": "xml",
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="test")
+            state.planned_files = ["target.py"]
+            agent = MicroAgent(config, state)
+            agent.models = _RoleSequenceModelManager(
+                {
+                    "coder": [
+                        """
+<candidates>
+<candidate id="reapply">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Re-apply the existing fast edit.</reason>
+<change>
+<path>target.py</path>
+<search>
+value = 'fast'
+</search>
+<replace>
+value = 'fast'
+</replace>
+</change>
+</candidate>
+</candidates>
+""",
+                        """
+<candidates>
+<candidate id="next">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Use current source and make the next improvement.</reason>
+<change>
+<path>target.py</path>
+<search>
+value = 'fast'
+</search>
+<replace>
+value = 'faster'
+</replace>
+</change>
+</candidate>
+</candidates>
+""",
+                    ]
+                }
+            )
+
+            async def code_and_test() -> None:
+                await agent.mcp.start()
+                try:
+                    await agent.code()
+                    await agent.test()
+                finally:
+                    await agent.mcp.close()
+
+            asyncio.run(code_and_test())
+
+            self.assertEqual(target.read_text(), "value = 'faster'\n")
+            repair_prompt = "\n\n".join(
+                message["content"] for message in agent.models.seen["coder"][1]
+            )
+            self.assertIn("made no effective code change", repair_prompt)
+            self.assertIn("Do not return the same replacement again", repair_prompt)
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["status"], "improved")
+            self.assertEqual(record["repair_parent_id"], "single")
+            self.assertEqual(record["repair_parent_patch_miss_kind"], "patch_noop")
+
     def test_apply_replacement_retargeted_noop_is_not_counted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

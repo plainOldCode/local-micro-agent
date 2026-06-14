@@ -835,7 +835,19 @@ class CandidateRecordsMixin:
         workflow = self.config.get("workflow", {})
         if not workflow.get("repair_target_not_found"):
             return None
-        if "Replacement target not found" not in failure_detail:
+        latest_patch_miss_kind = ""
+        events = self.state.scratch.get("patch_miss_events")
+        if isinstance(events, list) and events and isinstance(events[-1], dict):
+            latest_patch_miss_kind = str(events[-1].get("patch_miss_kind", ""))
+        is_target_miss = "Replacement target not found" in failure_detail
+        is_noop_reapply = (
+            latest_patch_miss_kind == "patch_noop"
+            and (
+                "Replacement is a no-op" in failure_detail
+                or "No code changes were applied" in failure_detail
+            )
+        )
+        if not (is_target_miss or is_noop_reapply):
             return None
         self.state.scratch["patch_miss_repair_attempted"] = True
         self.state.scratch["patch_miss_repair_status"] = "requested"
@@ -843,6 +855,9 @@ class CandidateRecordsMixin:
             candidate,
             failure_detail=failure_detail,
             allowed=allowed,
+            repair_kind=(
+                "noop_reapply" if is_noop_reapply and not is_target_miss else "target_miss"
+            ),
         )
         try:
             decision = await self._target_not_found_repair_call(candidate, messages)
@@ -953,6 +968,7 @@ class CandidateRecordsMixin:
         candidate: CodeCandidate,
         failure_detail: str,
         allowed: set[str],
+        repair_kind: str = "target_miss",
     ) -> list[dict[str, str]]:
         output_format = str(self.config.get("workflow", {}).get("code_output_format", "json"))
         source_context = await self._candidate_repair_source_context(candidate, allowed)
@@ -979,27 +995,46 @@ class CandidateRecordsMixin:
             ],
             "active_todo_id": self._active_todo_id(),
         }
+        if repair_kind == "noop_reapply":
+            failure_summary = (
+                "The previous candidate was rejected because it made no effective "
+                "code change or tried to re-apply an edit that is already present "
+                "in the current source."
+            )
+            repair_instruction = (
+                "Inspect the current source below and return a current-code-based "
+                "next improvement. Do not return the same replacement again. The "
+                "new search/target must match current source exactly, and the "
+                "replacement must differ from that current source."
+            )
+        else:
+            failure_summary = (
+                "The previous candidate was rejected because a search/target block "
+                "did not match the current source."
+            )
+            repair_instruction = (
+                "Change the search/target text to match the current source exactly, "
+                "and keep the replacement focused on the same intended edit."
+            )
         if output_format == "xml":
             system = (
-                "Repair one failed CODE candidate. The previous candidate was rejected "
-                "because a <search> block did not match the current source. Output "
-                "exactly one <candidate> in the same XML-like CODE format, with one "
-                "<change>. Do not invent a new tactic. Preserve the strategy_axis and "
-                "todo context. The new <search> block must be copied verbatim from the "
-                "current source below and must match exactly. Preserve or add line/anchor "
-                "location hints when the output format supports them; line numbers are "
-                "hints only and must not appear inside <search> or <replace>."
+                f"Repair one failed CODE candidate. {failure_summary} Output exactly "
+                "one <candidate> in the same XML-like CODE format, with one <change>. "
+                "Preserve the strategy_axis and todo context. The new <search> block "
+                "must be copied verbatim from the current source below and must match "
+                "exactly. Preserve or add line/anchor location hints when the output "
+                "format supports them; line numbers are hints only and must not appear "
+                f"inside <search> or <replace>. {repair_instruction}"
             )
         else:
             system = (
-                "Repair one failed CODE candidate. The previous candidate was rejected "
-                "because a target string did not match the current source. Output strict "
-                "JSON with a top-level candidates array containing exactly one candidate "
-                "and one change. Do not invent a new tactic. Preserve the strategy_axis "
-                "and todo context. The new target must be copied verbatim from the "
-                "current source below and must match exactly. Include start_line/end_line "
-                "and anchor_before/anchor_after hints when available, without copying "
-                "line-number prefixes into target or replacement."
+                f"Repair one failed CODE candidate. {failure_summary} Output strict JSON "
+                "with a top-level candidates array containing exactly one candidate and "
+                "one change. Preserve the strategy_axis and todo context. The new target "
+                "must be copied verbatim from the current source below and must match "
+                "exactly. Include start_line/end_line and anchor_before/anchor_after "
+                "hints when available, without copying line-number prefixes into target "
+                f"or replacement. {repair_instruction}"
             )
         user = (
             f"Failure detail:\n{failure_detail}\n\n"
@@ -1007,9 +1042,8 @@ class CandidateRecordsMixin:
             f"{json.dumps(candidate_record, ensure_ascii=False, indent=2)}\n\n"
             "Current source context for repair:\n"
             f"{source_context}\n\n"
-            "Return only the repaired candidate. Change the search/target text to match "
-            "the current source exactly, and keep the replacement focused on the same "
-            "intended edit."
+            "Return only the repaired candidate. "
+            f"{repair_instruction}"
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         messages.append(candidate_output_message(output_format, mode="single"))
