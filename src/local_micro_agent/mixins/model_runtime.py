@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ..candidate_repair import candidate_repair_call_site, candidate_repair_prompt
 from ..decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
 from ..models import ModelResponse, ModelTextParts
 from ..state import CodeChange
@@ -15,7 +16,6 @@ from ..validators import (
     parse_json_object,
     parse_xml_candidates,
     require_keys,
-    retry_repair_prompt,
 )
 
 
@@ -523,7 +523,13 @@ class ModelRuntimeMixin:
             return "reasoning"
         return "empty"
 
-    async def _json_call(self, role: str, messages: list[dict[str, str]], schema: type):
+    async def _json_call(
+        self,
+        role: str,
+        messages: list[dict[str, str]],
+        schema: type,
+        output_format: str = "json",
+    ):
         try:
             output = await self._model_chat(role, messages, call_site="json_call")
         except Exception as exc:
@@ -534,11 +540,12 @@ class ModelRuntimeMixin:
             return self._parse_decision(output, schema)
         except JsonValidationError as exc:
             self._record_raw_model_output(role, "initial", output, exc)
+            repair_base = "candidate_output" if schema is CodeDecision else "json"
             try:
                 repaired = await self._model_chat(
                     role,
-                    retry_repair_prompt(output, exc),
-                    call_site="json_repair",
+                    candidate_repair_prompt(output_format, output, exc),
+                    call_site=candidate_repair_call_site(output_format, repair_base),
                 )
             except Exception as repair_exc:
                 raise JsonValidationError(

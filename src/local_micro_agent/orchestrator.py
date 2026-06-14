@@ -615,7 +615,12 @@ class MicroAgent(
                             "content": "\n\n".join(dynamic_suffix_blocks),
                         },
                     ]
-                decision = await self._json_call("coder", messages, CodeDecision)
+                decision = await self._json_call(
+                    "coder",
+                    messages,
+                    CodeDecision,
+                    output_format=output_format,
+                )
             except JsonValidationError as exc:
                 self.state.notes.append(f"Coder output rejected after repair: {exc}")
                 decision = CodeDecision(changes=[])

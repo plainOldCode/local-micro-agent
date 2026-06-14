@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..candidate_output import candidate_output_message
+from ..candidate_repair import candidate_repair_call_site, candidate_repair_prompt
 from ..decisions import (
     CodeCandidate,
     CodeDecision,
@@ -19,11 +20,7 @@ from ..state import (
     CodeChange,
     TestResult,
 )
-from ..validators import (
-    JsonValidationError,
-    parse_json_object,
-    retry_repair_prompt,
-)
+from ..validators import JsonValidationError, parse_json_object
 
 
 class CandidateRecordsMixin:
@@ -1072,6 +1069,9 @@ class CandidateRecordsMixin:
     async def _target_not_found_repair_call(
         self, candidate: CodeCandidate, messages: list[dict[str, str]]
     ) -> CodeDecision:
+        output_format = str(
+            self.config.get("workflow", {}).get("code_output_format", "json")
+        )
         try:
             output = await self._model_chat(
                 "coder",
@@ -1094,12 +1094,15 @@ class CandidateRecordsMixin:
                 try:
                     repaired = await self._model_chat(
                         "coder",
-                        retry_repair_prompt(output, exc),
-                        call_site="target_not_found_repair_json_repair",
+                        candidate_repair_prompt(output_format, output, exc),
+                        call_site=candidate_repair_call_site(
+                            output_format,
+                            "target_not_found_repair",
+                        ),
                     )
                 except Exception as repair_call_exc:
                     raise JsonValidationError(
-                        "target-not-found repair JSON repair model call failed: "
+                        "target-not-found repair output-format repair model call failed: "
                         f"{type(repair_call_exc).__name__}: {repair_call_exc}"
                     ) from repair_call_exc
                 try:
@@ -1112,7 +1115,7 @@ class CandidateRecordsMixin:
                     except JsonValidationError:
                         self._record_raw_model_output(
                             "coder",
-                            "target-not-found-repair-json",
+                            f"target-not-found-repair-{output_format}",
                             repaired,
                             repair_parse_exc,
                         )

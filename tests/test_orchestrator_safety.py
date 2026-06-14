@@ -1810,6 +1810,44 @@ class OrchestratorSafetyTests(unittest.TestCase):
             self.assertIn("target not found", messages[2]["content"])
             self.assertIn("only changes comments", messages[2]["content"])
 
+    def test_code_xml_parse_repair_stays_xml_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(repo_root=Path(tmp), user_request="test")
+            agent = MicroAgent(
+                {"models": {"default": "static"}, "providers": {}, "workflow": {}},
+                state,
+            )
+            models = _RoleSequenceModelManager(
+                {
+                    "coder": [
+                        "<candidates><candidate><change><path>target.py</path>"
+                        "<search>old</search><replace>new</replace></change>",
+                        "<candidates><candidate><reason>repair</reason><change>"
+                        "<path>target.py</path><search>old</search><replace>new</replace>"
+                        "</change></candidate></candidates>",
+                    ]
+                }
+            )
+            agent.models = models
+
+            decision = asyncio.run(
+                agent._json_call(
+                    "coder",
+                    [],
+                    CodeDecision,
+                    output_format="xml",
+                )
+            )
+
+            self.assertEqual(decision.changes[0].path, "target.py")
+            self.assertEqual(len(models.seen["coder"]), 2)
+            repair_prompt = "\n".join(
+                message["content"] for message in models.seen["coder"][1]
+            )
+            self.assertIn("XML-like candidate format", repair_prompt)
+            self.assertIn("Do not convert it to JSON", repair_prompt)
+            self.assertNotIn("Repair the output into valid JSON only", repair_prompt)
+
     def test_reflect_prompt_carries_retry_context_without_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState(repo_root=Path(tmp), user_request="test")
@@ -17983,7 +18021,7 @@ value = 'fast'
             self.assertEqual(applied, 0)
             self.assertIn("no-op after retarget", "\n".join(agent.state.notes))
 
-    def test_target_not_found_repair_uses_loose_parser_after_json_repair(self) -> None:
+    def test_target_not_found_repair_uses_xml_format_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             target = repo / "target.py"
@@ -18007,23 +18045,18 @@ value = 'fast'
             state = AgentState(repo_root=repo, user_request="test")
             state.scratch["pre_code_snapshot"] = {"target.py": target.read_text()}
             agent = MicroAgent(config, state)
-            agent.models = _SequenceModelManager(
-                [
-                    "<candidates><candidate><search>value = 'old'</search></candidate></candidates>",
-                    json.dumps(
-                        {
-                            "candidates": [
-                                {
-                                    "search": "value = 'old'",
-                                    "replacement": "value = 'fast'",
-                                    "strategy_axis": "general_edit",
-                                    "reason": "loose repaired json",
-                                }
-                            ]
-                        }
-                    ),
-                ]
+            manager = _RoleSequenceModelManager(
+                {
+                    "coder": [
+                        "<candidates><candidate><search>value = 'old'</search></candidate></candidates>",
+                        "<candidates><candidate><strategy_axis>general_edit</strategy_axis>"
+                        "<reason>xml repaired search</reason><change><path>target.py</path>"
+                        "<search>value = 'old'\n</search><replace>value = 'fast'\n</replace>"
+                        "<reason>retarget stale search</reason></change></candidate></candidates>",
+                    ]
+                }
             )
+            agent.models = manager
             candidate = CodeCandidate(
                 "miss",
                 [
@@ -18055,6 +18088,13 @@ value = 'fast'
             self.assertEqual(record["candidate_id"], "miss-repair1")
             self.assertEqual(record["repair_parent_id"], "miss")
             self.assertEqual(record["status"], "improved")
+            self.assertEqual(len(manager.seen["coder"]), 2)
+            repair_prompt = "\n".join(
+                message["content"] for message in manager.seen["coder"][1]
+            )
+            self.assertIn("XML-like candidate format", repair_prompt)
+            self.assertIn("Do not convert it to JSON", repair_prompt)
+            self.assertNotIn("Repair the output into valid JSON only", repair_prompt)
 
     def test_candidate_artifacts_record_patch_and_test_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
