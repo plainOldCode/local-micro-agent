@@ -17878,9 +17878,10 @@ value = 'fast'
             state = AgentState(repo_root=repo, user_request="test")
             state.planned_files = ["target.py"]
             agent = MicroAgent(config, state)
-            agent.models = _SequenceModelManager(
-                [
-                    """
+            agent.models = _RoleSequenceModelManager(
+                {
+                    "coder": [
+                        """
 <candidates>
 <candidate id="stale">
 <strategy_axis>general_edit</strategy_axis>
@@ -17897,7 +17898,7 @@ value = 'fast'
 </candidate>
 </candidates>
 """,
-                    """
+                        """
 <candidates>
 <candidate id="fixed">
 <strategy_axis>general_edit</strategy_axis>
@@ -17914,7 +17915,8 @@ value = 'fast'
 </candidate>
 </candidates>
 """,
-                ]
+                    ]
+                }
             )
 
             async def code_and_test() -> None:
@@ -17933,6 +17935,11 @@ value = 'fast'
                 "Single CODE candidate target-not-found repair generated",
                 "\n".join(state.notes),
             )
+            repair_prompt = "\n\n".join(
+                message["content"] for message in agent.models.seen["coder"][1]
+            )
+            self.assertIn("Output exactly one <candidate>", repair_prompt)
+            self.assertNotIn("Candidate queue mode is enabled", repair_prompt)
             record = json.loads(
                 (repo / ".local_micro_agent" / "candidates.jsonl")
                 .read_text()

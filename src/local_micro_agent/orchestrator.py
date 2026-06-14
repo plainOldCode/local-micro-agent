@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .candidate_output import candidate_output_message
 from .decisions import CodeCandidate, CodeDecision, ReadDecision, TestDecision
 from .mcp_client import McpServerSpec, McpToolClient
 from .models import ModelManager
@@ -477,7 +478,10 @@ class MicroAgent(
                         f"{exact_refresh}"
                     )
                 if self.config.get("workflow", {}).get("candidate_queue"):
-                    messages = [*messages, self._candidate_queue_message(output_format)]
+                    messages = [
+                        *messages,
+                        candidate_output_message(output_format, mode="queue"),
+                    ]
                 axis_contract = self._format_axis_contract()
                 if axis_contract:
                     add_runtime_context(
@@ -1664,32 +1668,6 @@ class MicroAgent(
                 f"{self._truncate_text(output, 500) if output else 'no output'}"
             )
         return self._truncate_text(" | ".join(items), limit)
-
-    @staticmethod
-    def _candidate_queue_message(output_format: str) -> dict[str, str]:
-        if output_format == "xml":
-            return {
-                "role": "system",
-                "content": (
-                    "Candidate queue mode is enabled. Output one or more <candidate> "
-                    "blocks inside a single <candidates> root. Each candidate must be "
-                    "independent and safe to apply from the same baseline. If a strategy "
-                    "axis contract is present, include <strategy_axis>axis</strategy_axis> "
-                    "inside each <candidate>."
-                ),
-            }
-        return {
-            "role": "system",
-            "content": (
-                "Candidate queue mode is enabled. Output strict JSON with a top-level "
-                '"candidates" array, not a top-level "changes" array. Example: '
-                '{"candidates":[{"id":"1","strategy_axis":"general_edit",'
-                '"reason":"short","changes":[{"path":"file.py",'
-                '"target":"exact text","replacement":"new text","reason":"short",'
-                '"start_line":12,"end_line":14,"anchor_before":"exact nearby text"}]}]}. '
-                "Each candidate must be independent and safe to apply from the same baseline."
-            ),
-        }
 
     async def test(self) -> None:
         self.state.scratch.pop("spec_regression_failed", None)

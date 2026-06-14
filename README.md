@@ -649,6 +649,8 @@ artifacts, not accepted performance wins.
 - `src/local_micro_agent/state.py`: state enum and the single state bag.
 - `src/local_micro_agent/models.py`: model-manager abstraction.
 - `src/local_micro_agent/prompts.py`: micro system prompts per state.
+- `src/local_micro_agent/candidate_output.py`: reusable CODE candidate
+  output-format reminders for single-candidate repair and candidate queues.
 - `src/local_micro_agent/validators.py`: JSON/XML validation and repair.
 - `src/local_micro_agent/mcp_client.py`: async tool boundary.
 - `src/local_micro_agent/mixins/`: stateless domain mixins composed into

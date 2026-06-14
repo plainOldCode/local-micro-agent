@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..candidate_output import candidate_output_message
 from ..decisions import (
     CodeCandidate,
     CodeDecision,
@@ -1014,10 +1015,7 @@ class CandidateRecordsMixin:
             "intended edit."
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        if output_format == "xml":
-            messages.append(self._candidate_queue_message("xml"))
-        else:
-            messages.append(self._candidate_queue_message("json"))
+        messages.append(candidate_output_message(output_format, mode="single"))
         return messages
 
     async def _candidate_repair_source_context(
