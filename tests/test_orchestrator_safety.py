@@ -14,7 +14,13 @@ from collections import Counter
 from pathlib import Path
 
 import local_micro_agent.models as model_module
-from local_micro_agent.orchestrator import CodeCandidate, CodeDecision, MicroAgent, ReadDecision
+from local_micro_agent.orchestrator import (
+    CodeCandidate,
+    CodeDecision,
+    MicroAgent,
+    ReadDecision,
+    _resolve_request_text,
+)
 from local_micro_agent.models import (
     ModelResponse,
     OllamaNativeModel,
@@ -124,6 +130,21 @@ SPEC_RUN_FIXTURE_EXPECTATIONS = {
         "graph_candidate_counts": {"rejected_quality": 3},
     },
 }
+
+
+class CliRequestFileTests(unittest.TestCase):
+    def test_resolve_request_file_relative_to_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "gpt-5.5-request.txt").write_text("optimize cycles\n")
+
+            request = _resolve_request_text(repo, None, "gpt-5.5-request.txt")
+
+            self.assertEqual(request, "optimize cycles\n")
+
+    def test_resolve_request_rejects_ambiguous_inputs(self) -> None:
+        with self.assertRaises(ValueError):
+            _resolve_request_text(Path("."), "inline", "request.txt")
 
 
 def _copy_spec_run_fixture(repo: Path, name: str) -> Path:

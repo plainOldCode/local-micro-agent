@@ -2631,11 +2631,28 @@ def dump_prompts() -> str:
     return "\n\n".join(blocks)
 
 
+def _resolve_request_text(repo_root: Path, request: str | None, request_file: str | None) -> str:
+    if request and request_file:
+        raise ValueError("Use either --request or --request-file, not both.")
+    if request_file:
+        path = Path(request_file)
+        if not path.is_absolute():
+            path = repo_root / path
+        return path.read_text()
+    if request:
+        return request
+    raise ValueError("One of --request or --request-file is required.")
+
+
 async def async_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
-    parser.add_argument("--request", required=True)
+    parser.add_argument("--request")
+    parser.add_argument(
+        "--request-file",
+        help="Read the user request from this path; relative paths resolve under --repo.",
+    )
     parser.add_argument("--dump-prompts", action="store_true")
     args = parser.parse_args()
 
@@ -2643,10 +2660,17 @@ async def async_main() -> None:
         print(dump_prompts())
         return
 
+    try:
+        request_text = _resolve_request_text(args.repo, args.request, args.request_file)
+    except OSError as exc:
+        parser.error(f"Could not read --request-file: {exc}")
+    except ValueError as exc:
+        parser.error(str(exc))
+
     config = load_config(args.config)
     state = AgentState(
         repo_root=args.repo.resolve(),
-        user_request=args.request,
+        user_request=request_text,
         max_loops=config.get("workflow", {}).get("max_code_test_loops", 3),
     )
     result = await MicroAgent(config, state).run()

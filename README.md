@@ -57,6 +57,14 @@ local-micro-agent --config config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json
   --repo . --request "..."
 ```
 
+For long or model-authored requests, keep the prompt in the repo and pass it
+explicitly:
+
+```bash
+local-micro-agent --config config/config.qwen36-35b-a3b-coding-mxfp8-ollama.json \
+  --repo . --request-file request.txt
+```
+
 Copy `config.example.json` or a tuned profile from `config/`, point
 `models.default` at your model server, then pick a preset:
 

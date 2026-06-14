@@ -1,0 +1,48 @@
+Optimize the takehome benchmark in this repository. Your job is to produce a
+small, correct patch that lowers the reported CYCLES value below the current
+baseline of 147734.
+
+Hard scope:
+- Edit only perf_takehome.py unless the live repository explicitly shows a
+  different writable file list.
+- Do not edit problem.py, tests, constants, SLOT_LIMITS, VLEN, N_CORES,
+  SCRATCH_SIZE, the benchmark harness, or validation logic.
+- The candidate is useful only if the command prints a lower CYCLES value and
+  exits successfully.
+- Preserve correctness first. A faster incorrect run is a rejected candidate.
+
+Validation target:
+- Run the configured command, normally:
+  python3 perf_takehome.py
+- A passing candidate must keep correctness OK and print CYCLES: N where
+  N < 147734.
+
+Avoid the failed strategy from previous runs:
+- Do not start with a broad full build_kernel rewrite.
+- Do not replace the scalar kernel with vload/vstore/valu unless you have
+  proved all memory accesses are contiguous. The tree/index accesses are
+  data-dependent and usually non-contiguous.
+- Do not invent unsupported operations such as an ALU vload/vstore.
+- Do not broadly precompute scratch_const/tmp_addr blocks unless the exact
+  current source region exists and the measured path gets faster.
+- Do not submit a stale <search> block. Copy the current source exactly.
+
+Best first optimization to try:
+- The kernel builder emits one bundle per slot, so it wastes VLIW capacity.
+  Implement conservative VLIW packing instead of changing the algorithm.
+- Pack adjacent independent slots into the same instruction dictionary while
+  respecting SLOT_LIMITS and end-of-cycle commit semantics.
+- Never put a slot in the same bundle if it reads a scratch address written by
+  another slot in that bundle, writes a duplicate destination, or has an
+  uncertain dependency.
+- A safe local target is build_hash: the first two ALU operations in each
+  HASH_STAGES iteration write tmp1 and tmp2 from old inputs and can share one
+  alu bundle; the following ALU depends on them and must stay in a later cycle.
+
+Candidate discipline:
+- Output one candidate with one change.
+- Keep the edit as small as possible.
+- In the candidate reason, state the exact cycle-saving mechanism and the
+  expected validation command.
+- If the first VLIW packer is too risky, fall back to packing only the known
+  independent ALU pairs inside build_hash.
