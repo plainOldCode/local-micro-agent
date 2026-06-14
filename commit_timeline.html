@@ -89,9 +89,9 @@
 
   svg.append("g")
       .attr("transform", `translate(0,${height})`)
-      .call(d3.axisBottom(xScale).ticks(10).tickFormat(d => {
+      .call(d3.axisBottom(xScale).ticks(8).tickFormat(d => {
           const item = data.find(x => x.index === d);
-          return item ? item.date : '';
+          return item ? item.date.substring(5) : '';
       }))
       .attr("class", "axis");
 
