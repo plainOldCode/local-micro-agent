@@ -13,11 +13,12 @@ used as a base and selectively overridden.
   validated by the 100-loop telemetry runs: conditional reflect, brainstorm
   after repeated rejections, novelty/axis/region gates, adaptive gate
   controller, candidate history and artifacts, and profiling.
-- `simple`: classic CODE/TEST loop with thin optional thinking steering.
-  Optional reports are opt-in so the default loop stays small; exact
-  duplicate candidate retries use the shared novelty gate.
-  It deliberately avoids run-spec graphs, schedulers, structural lifecycle,
-  adaptive gates, and candidate queues.
+- `simple`: raw-ish local-model measurement loop. It keeps the controller
+  mechanics needed for deterministic patch/test evaluation (READ, CODE, TEST,
+  target-not-found repair, exact duplicate novelty), but leaves advisory
+  reports and heavier search/spec scaffolding opt-in. Use it to measure whether
+  a model can produce a small runnable fix in a classic CODE/TEST loop; use
+  `search` or `spec` when the goal is assisted long-run exploration.
 - `structural`: `search` plus the scaffold/probe/expand machinery for
   multi-step refactors: run-spec task graph, semantic analysis, structural
   tactic lifecycle, and structural state checkpoints.
@@ -105,8 +106,7 @@ _SIMPLE: dict[str, Any] = {
     "structural_state_checkpoint": False,
     "record_candidate_artifacts": True,
     "candidate_history_path": ".local_micro_agent/candidates.jsonl",
-    "simple_thinking_brief_enabled": True,
-    "simple_thinking_brief_model_role": "reasoner",
+    "simple_thinking_brief_enabled": False,
     "simple_thinking_brief_accept_reasoning_only": False,
 }
 

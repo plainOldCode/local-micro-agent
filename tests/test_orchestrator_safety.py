@@ -12787,6 +12787,7 @@ END_HYPOTHESIS_OPTION"""
                             "preset": "simple",
                             "seed_files": ["target.py"],
                             "writable_files": ["target.py"],
+                            "simple_thinking_brief_enabled": True,
                         },
                     },
                     AgentState(repo_root=repo, user_request="test"),
@@ -12838,6 +12839,7 @@ END_HYPOTHESIS_OPTION"""
                             "preset": "simple",
                             "seed_files": ["target.py"],
                             "writable_files": ["target.py"],
+                            "simple_thinking_brief_enabled": True,
                             "simple_thinking_brief_accept_reasoning_only": True,
                         },
                     },
@@ -12882,6 +12884,7 @@ END_HYPOTHESIS_OPTION"""
                         "workflow": {
                             "preset": "simple",
                             "writable_files": ["target.py"],
+                            "simple_thinking_brief_enabled": True,
                         },
                     },
                     AgentState(repo_root=repo, user_request="test"),
@@ -12963,6 +12966,7 @@ END_HYPOTHESIS_OPTION"""
                             "preset": "simple",
                             "seed_files": ["target.py"],
                             "writable_files": ["target.py"],
+                            "simple_thinking_brief_enabled": True,
                         },
                     },
                     AgentState(repo_root=repo, user_request="test"),
@@ -18157,6 +18161,79 @@ value = 'fast'
             self.assertEqual(record["repair_parent_id"], "single")
             self.assertTrue(record["repair_attempted"])
             self.assertEqual(record["repair_status"], "applied")
+
+    def test_simple_preset_e2e_repairs_python_bug_with_scripted_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            target = repo / "calc.py"
+            target.write_text("def add_one(value):\n    return value - 1\n")
+            (repo / "test_calc.py").write_text(
+                "import unittest\n\n"
+                "from calc import add_one\n\n"
+                "class CalcTest(unittest.TestCase):\n"
+                "    def test_add_one(self):\n"
+                "        self.assertEqual(add_one(2), 3)\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n"
+            )
+            config = {
+                "models": {"coder": "coder-model", "default": "coder-model"},
+                "providers": {},
+                "mcp_servers": {},
+                "workflow": {
+                    "preset": "simple",
+                    "plan_markdown": "Fix calc.add_one.",
+                    "seed_files": ["calc.py"],
+                    "writable_files": ["calc.py"],
+                    "simple_thinking_brief_enabled": False,
+                    "test_commands": [
+                        f"{shlex.quote(sys.executable)} -m unittest -q test_calc.py"
+                    ],
+                    "max_code_test_loops": 3,
+                },
+            }
+            state = AgentState(repo_root=repo, user_request="Fix add_one.", max_loops=3)
+            agent = MicroAgent(config, state)
+            agent.models = _RoleSequenceModelManager(
+                {
+                    "coder": [
+                        """
+<candidates>
+<candidate id="fix-add-one">
+<strategy_axis>general_edit</strategy_axis>
+<reason>Fix the off-by-one return value.</reason>
+<change>
+<path>calc.py</path>
+<search>
+def add_one(value):
+    return value - 1
+</search>
+<replace>
+def add_one(value):
+    return value + 1
+</replace>
+</change>
+</candidate>
+</candidates>
+"""
+                    ]
+                }
+            )
+
+            result = asyncio.run(agent.run())
+
+            self.assertEqual(result.current, AgentStateName.DONE)
+            self.assertLessEqual(result.loop_count, 1)
+            self.assertEqual(target.read_text(), "def add_one(value):\n    return value + 1\n")
+            self.assertEqual(agent.config["workflow"]["code_output_format"], "xml")
+            self.assertFalse((repo / ".local_micro_agent" / "run_spec.json").exists())
+            self.assertTrue((repo / ".local_micro_agent" / "candidates.jsonl").exists())
+            record = json.loads(
+                (repo / ".local_micro_agent" / "candidates.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            self.assertEqual(record["status"], "accepted")
 
     def test_patch_noop_repair_uses_current_source_for_next_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

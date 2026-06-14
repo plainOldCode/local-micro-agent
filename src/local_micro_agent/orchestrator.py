@@ -1821,6 +1821,8 @@ class MicroAgent(
             else (
                 "improved"
                 if self.state.scratch.get("metric_improved") is True and not failed
+                else "accepted"
+                if not failed
                 else "rejected"
             )
         )

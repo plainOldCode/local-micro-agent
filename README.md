@@ -91,7 +91,7 @@ one of five vetted bundles from `src/local_micro_agent/presets.py`:
 | Preset | For | Enables |
 |---|---|---|
 | `minimal` | conservative fix-the-tests loop | deterministic test decisions, retries, target-not-found repair; all exploration machinery off |
-| `simple` | mini-swe/Pi-style classic loop | classic `READ -> CODE -> TEST`, XML-like raw search/replace output, target-not-found repair, shared exact-candidate novelty gate, narrow deterministic CODE/TEST mechanics, optional advisory thinking brief; no run-spec graph, scheduler, structural lifecycle, candidate queue, adaptive memory, or loop report by default |
+| `simple` | raw-ish local-model measurement loop | classic `READ -> CODE -> TEST`, XML-like raw search/replace output, target-not-found repair, shared exact-candidate novelty gate, narrow deterministic CODE/TEST mechanics; no advisory thinking call, run-spec graph, scheduler, structural lifecycle, candidate queue, adaptive memory, or loop report by default |
 | `search` | long-running metric search | conditional reflect, brainstorm after repeated rejections, novelty/axis/region gates, adaptive gate controller, candidate history + artifacts, continue-after-improvement, profiling |
 | `structural` | multi-step refactors | `search` + run-spec task graph, semantic analysis, structural scaffold/probe/expand lifecycle, structural checkpoints |
 | `spec` | build a spec through a task graph | `structural` + strict spec-mode scheduling: task-scoped READ, synthesized acceptance, dependency gates, recovery rounds, progress/report artifacts, grounded/design/quality/probe gates |
@@ -114,10 +114,14 @@ Preset values are defaults, not a mode switch: any key set explicitly in
 `preset_defaulted_keys` so the controller can tell preset defaults apart from
 caller-supplied values (for example when deriving the loop budget).
 
-`simple` keeps report generation opt-in (`simple_report_enabled=true`) and
-does not accept reasoning-only thinking briefs unless explicitly requested.
-This keeps the default useful for raw loop measurement while still allowing
-experiment configs to add advisory artifacts deliberately.
+`simple` is intentionally a raw-ish measurement loop, not a full practical
+search scaffold. It measures whether a model can turn the current request and
+source context into a small runnable patch under deterministic apply/test gates.
+Report generation and advisory thinking briefs stay opt-in
+(`simple_report_enabled=true`, `simple_thinking_brief_enabled=true`),
+reasoning-only thinking briefs are rejected unless explicitly requested, and
+heavier exploration machinery belongs in `search`/`spec` or a future `lite`
+preset.
 
 Without a preset, the shipped `config/*.json` profiles run the plain
 `PLAN -> READ -> (CODE -> TEST)*` path: `reflect_before_retry` is false,

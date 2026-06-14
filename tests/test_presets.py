@@ -34,7 +34,7 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertTrue(workflow["deterministic_test_decision"])
         self.assertTrue(workflow["repair_target_not_found"])
 
-    def test_simple_preset_keeps_classic_loop_and_thin_thinking(self) -> None:
+    def test_simple_preset_keeps_raw_measurement_loop(self) -> None:
         config = apply_workflow_preset({"workflow": {"preset": "simple"}})
         workflow = config["workflow"]
         self.assertFalse(workflow["spec_mode"])
@@ -50,8 +50,8 @@ class WorkflowPresetTests(unittest.TestCase):
         self.assertTrue(workflow["repair_target_not_found"])
         self.assertEqual(workflow["code_output_format"], "xml")
         self.assertNotIn("simple_report_enabled", workflow)
-        self.assertTrue(workflow["simple_thinking_brief_enabled"])
-        self.assertEqual(workflow["simple_thinking_brief_model_role"], "reasoner")
+        self.assertFalse(workflow["simple_thinking_brief_enabled"])
+        self.assertNotIn("simple_thinking_brief_model_role", workflow)
         self.assertFalse(workflow["simple_thinking_brief_accept_reasoning_only"])
 
     def test_simple_preset_stays_below_search_key_count(self) -> None:
