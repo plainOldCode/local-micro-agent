@@ -61,14 +61,29 @@ def parse_xml_candidates(text: str) -> dict[str, Any]:
             change_reason = _tag_text(change_content, "reason") or reason
             if not path or not search or not replace:
                 continue
-            changes.append(
-                {
-                    "path": path,
-                    "target": _trim_xml_block(search),
-                    "replacement": _trim_xml_block(replace),
-                    "reason": change_reason,
-                }
+            change = {
+                "path": path,
+                "target": _trim_xml_block(search),
+                "replacement": _trim_xml_block(replace),
+                "reason": change_reason,
+            }
+            start_line = _optional_int(_tag_text(change_content, "start_line"))
+            end_line = _optional_int(_tag_text(change_content, "end_line"))
+            anchor_before = _trim_xml_block(
+                _tag_text(change_content, "anchor_before", strip=False)
             )
+            anchor_after = _trim_xml_block(
+                _tag_text(change_content, "anchor_after", strip=False)
+            )
+            if start_line is not None:
+                change["start_line"] = start_line
+            if end_line is not None:
+                change["end_line"] = end_line
+            if anchor_before:
+                change["anchor_before"] = anchor_before
+            if anchor_after:
+                change["anchor_after"] = anchor_after
+            changes.append(change)
         if not changes:
             continue
         candidates.append(
@@ -100,6 +115,16 @@ def _trim_xml_block(text: str) -> str:
     if lines and not lines[-1].strip():
         lines = lines[:-1]
     return "\n".join(lines)
+
+
+def _optional_int(text: str) -> int | None:
+    value = text.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def require_keys(data: dict[str, Any], keys: list[str]) -> None:

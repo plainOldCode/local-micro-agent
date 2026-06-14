@@ -1026,9 +1026,10 @@ class CandidateRecordsMixin:
                 "one <candidate> in the same XML-like CODE format, with one <change>. "
                 "Preserve the strategy_axis and todo context. The new <search> block "
                 "must be copied verbatim from the current source below and must match "
-                "exactly. Preserve or add line/anchor location hints when the output "
-                "format supports them; line numbers are hints only and must not appear "
-                f"inside <search> or <replace>. {repair_instruction}"
+                "exactly. Include <start_line>/<end_line> and small "
+                "<anchor_before>/<anchor_after> tags when available; line numbers are "
+                "hints only and must not appear inside <search>, <replace>, or anchor "
+                f"tags. {repair_instruction}"
             )
         else:
             system = (

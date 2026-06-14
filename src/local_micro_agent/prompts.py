@@ -360,6 +360,14 @@ Do not output JSON. Output exactly one small candidate in this XML-like format:
 <reason>one short sentence</reason>
 <change>
 <path>relative/path.py</path>
+<start_line>10</start_line>
+<end_line>14</end_line>
+<anchor_before>
+nearby exact text before search
+</anchor_before>
+<anchor_after>
+nearby exact text after search
+</anchor_after>
 <search>
 exact existing code, copied verbatim; 1-40 lines only
 </search>
@@ -375,6 +383,9 @@ Rules:
 - Include exactly one <strategy_axis> tag inside <candidate>.
 - Keep <reason> to one sentence.
 - Keep <search> and <replace> under 40 lines each.
+- Include <start_line>/<end_line> and small <anchor_before>/<anchor_after> when
+  available. They are location hints only; never include line-number prefixes in
+  <search>, <replace>, or anchor tags.
 - Never replace an entire function or class.
 - Prefer a tiny local edit around the immediate bottleneck.
 - The <search> block must match existing code exactly, including whitespace.

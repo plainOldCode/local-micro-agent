@@ -72,6 +72,40 @@ body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
         self.assertIn('("<", tmp1', change["target"])
         self.assertTrue(change["target"].startswith("                body.append"))
 
+    def test_parse_xml_candidates_preserves_location_hints(self) -> None:
+        data = parse_xml_candidates(
+            """
+<candidates>
+<candidate id="anchored">
+<reason>edit repeated target safely</reason>
+<change>
+<path>target.py</path>
+<start_line>6</start_line>
+<end_line>6</end_line>
+<anchor_before>
+def second():
+</anchor_before>
+<anchor_after>
+    return value
+</anchor_after>
+<search>
+    value = 1
+</search>
+<replace>
+    value = 2
+</replace>
+</change>
+</candidate>
+</candidates>
+"""
+        )
+
+        change = data["candidates"][0]["changes"][0]
+        self.assertEqual(change["start_line"], 6)
+        self.assertEqual(change["end_line"], 6)
+        self.assertEqual(change["anchor_before"], "def second():")
+        self.assertEqual(change["anchor_after"], "    return value")
+
     def test_xml_validation_error_uses_json_error_path(self) -> None:
         self.assertTrue(issubclass(XmlValidationError, JsonValidationError))
 

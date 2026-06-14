@@ -28,7 +28,9 @@ def _xml_candidate_output_message(mode: CandidateOutputMode) -> dict[str, str]:
             "Output exactly one <candidate> block inside a single <candidates> "
             "root. The candidate must contain exactly one <change>. If a strategy "
             "axis contract is present, include <strategy_axis>axis</strategy_axis> "
-            "inside the <candidate>."
+            "inside the <candidate>. For replacement edits, include optional "
+            "<start_line>, <end_line>, <anchor_before>, and <anchor_after> tags "
+            "inside <change> when you have exact current-source location hints."
         )
     return {"role": "system", "content": content}
 
